@@ -14,6 +14,7 @@ import customtkinter as ctk
 from tkcalendar import Calendar
 
 import baixar_audio
+from setup_wizard import SetupWizard
 
 # ---------------------------------------------------------------------------
 # Instância única — impede abrir dois apps ao mesmo tempo
@@ -91,8 +92,12 @@ class App(ctk.CTk):
         # Inicialização em background: atualizar yt-dlp
         threading.Thread(target=self._init_update_ytdlp, daemon=True).start()
 
-        # Verifica autorização do Drive e exibe banner se necessário
-        self._check_auth_visibility()
+        # Primeira execução: abre wizard de configuração se credentials ausentes
+        if not os.path.exists(baixar_audio.CREDENTIALS_FILE):
+            self.withdraw()
+            SetupWizard(self, on_complete=self._on_wizard_complete)
+        else:
+            self._check_auth_visibility()
 
     # -----------------------------------------------------------------------
     # Layout
@@ -529,6 +534,11 @@ class App(ctk.CTk):
 
     def _on_close(self):
         self.destroy()
+
+    def _on_wizard_complete(self):
+        """Chamado pelo SetupWizard ao concluir — exibe a janela principal."""
+        self._check_auth_visibility()
+        self.deiconify()
 
     # -----------------------------------------------------------------------
     # Autorização Google Drive

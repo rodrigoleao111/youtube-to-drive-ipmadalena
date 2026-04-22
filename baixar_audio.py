@@ -36,7 +36,13 @@ _DEFAULT_CHANNEL_URL    = "https://www.youtube.com/@IPMadalena/streams"
 _DEFAULT_DRIVE_FOLDER_ID = "1KfsI5zCDL4HZ2pdAWPFfAD3TugplzBez"
 SCOPES                  = ["https://www.googleapis.com/auth/drive"]
 
-BASE_DIR         = os.path.dirname(os.path.abspath(__file__))
+# Quando empacotado com PyInstaller, sys.executable aponta para o .exe gerado.
+# Dados do usuário (credentials/, downloads/, etc.) ficam sempre ao lado do .exe.
+if getattr(sys, "frozen", False):
+    BASE_DIR = os.path.dirname(sys.executable)
+else:
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
 CREDENTIALS_FILE = os.path.join(BASE_DIR, "credentials", "client_secret.json")
 TOKEN_FILE       = os.path.join(BASE_DIR, "credentials", "token.pkl")
 DOWNLOAD_DIR     = os.path.join(BASE_DIR, "downloads")
@@ -44,8 +50,20 @@ HISTORY_FILE     = os.path.join(BASE_DIR, "historico.json")
 LOGS_DIR         = os.path.join(BASE_DIR, "logs")
 CONFIG_FILE      = os.path.join(BASE_DIR, "config.json")
 
-_LOCAL_FFMPEG  = os.path.join(BASE_DIR, "ffmpeg", "bin", "ffmpeg.exe")
+# ffmpeg: primeiro ao lado do exe/fonte, depois no bundle PyInstaller
+_LOCAL_FFMPEG = os.path.join(BASE_DIR, "ffmpeg", "bin", "ffmpeg.exe")
+if not os.path.exists(_LOCAL_FFMPEG) and getattr(sys, "frozen", False):
+    _LOCAL_FFMPEG = os.path.join(sys._MEIPASS, "ffmpeg", "bin", "ffmpeg.exe")
 FFMPEG_LOCATION = _LOCAL_FFMPEG if os.path.exists(_LOCAL_FFMPEG) else None
+
+
+def _ytdlp_cmd():
+    """Retorna o caminho do yt-dlp, suportando bundle PyInstaller e PATH normal."""
+    if getattr(sys, "frozen", False):
+        bundled = os.path.join(sys._MEIPASS, "yt-dlp.exe")
+        if os.path.exists(bundled):
+            return bundled
+    return "yt-dlp"
 
 MESES_PT = {
     1: "Janeiro", 2: "Fevereiro", 3: "Março",    4: "Abril",
@@ -529,7 +547,7 @@ def list_videos(date_str, on_log=None, on_status=None, cancel_event=None):
     channel_url   = load_config()["channel_url"]
 
     cmd = [
-        "yt-dlp",
+        _ytdlp_cmd(),
         "--simulate",
         "--print", "%(id)s|||%(title)s|||%(upload_date)s",
         "--dateafter", dateafter_str,
@@ -601,7 +619,7 @@ def download_selected(videos, on_log=None, on_status=None,
     urls = [f"https://www.youtube.com/watch?v={v['id']}" for v in videos]
 
     cmd = [
-        "yt-dlp",
+        _ytdlp_cmd(),
         "--extract-audio",
         "--audio-format", "mp3",
         "--audio-quality", "0",
