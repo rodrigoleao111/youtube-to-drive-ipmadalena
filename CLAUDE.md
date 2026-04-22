@@ -135,6 +135,29 @@ run_tests.bat
 
 ---
 
+## Versionamento
+
+- **Repositório:** [https://github.com/rodrigoleao111/youtube-to-drive-ipmadalena](https://github.com/rodrigoleao111/youtube-to-drive-ipmadalena)
+- **Visibilidade:** público
+- **Branch principal:** `main`
+- **Git config:** `user.name = Rodrigo Augusto Leão dos Santos` / `user.email = rodrigoleao1995@gmail.com`
+
+**Arquivos ignorados via `.gitignore`** (não commitar):
+- `credentials/client_secret.json` e `credentials/token.pkl` — credenciais OAuth sensíveis
+- `downloads/` — pasta temporária de áudios
+- `logs/` — logs locais de execução
+- `historico.json` — estado local de datas processadas
+- `ffmpeg/` — binário grande; instalar localmente conforme `CONFIGURACAO.md`
+
+**Fluxo de commit:**
+```bash
+git add <arquivos>
+git commit -m "mensagem"
+git push
+```
+
+---
+
 ## Problemas conhecidos / já resolvidos
 
 - Terminal Windows pode ter erro de encoding com títulos especiais → resolvido com `sys.stdout.reconfigure(encoding="utf-8")` no processo principal e `PYTHONUTF8=1` + `PYTHONIOENCODING=utf-8` injetados no ambiente dos subprocessos yt-dlp
