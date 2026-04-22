@@ -66,27 +66,6 @@ def _file_log(msg: str):
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
 
-# Mapeamento de status → progresso da barra de subtarefas (0.0 – 1.0)
-SUBTASK_PROGRESS = {
-    "Iniciando":                  0.05,
-    "Verificando":                0.08,
-    "Buscando vídeos":            0.15,
-    "Encontrando vídeo":          0.25,
-    "Baixando áudio":             0.45,
-    "Convertendo para MP3":       0.65,
-    "Conectando ao Google Drive": 0.75,
-    "Localizando pasta":          0.82,
-    "Enviando arquivo":           0.90,
-    "Concluído":                  1.00,
-}
-
-
-def _subtask_pct(status_text):
-    """Retorna o valor (0–1) da barra de subtarefas para o status recebido."""
-    for key, val in SUBTASK_PROGRESS.items():
-        if key.lower() in status_text.lower():
-            return val
-    return None
 
 
 # ---------------------------------------------------------------------------
@@ -97,11 +76,12 @@ class App(ctk.CTk):
     def __init__(self):
         super().__init__()
         self.title("IPMadalena — Cultos para o Drive")
-        self.geometry("660x660")
+        self.geometry("660x700")
         self.resizable(False, False)
 
         self._queue        = queue.Queue()
         self._running      = False
+        self._converting   = False
         self._cancel_event = threading.Event()
 
         self._build_ui()
@@ -118,9 +98,12 @@ class App(ctk.CTk):
     # Layout
     # -----------------------------------------------------------------------
     def _build_ui(self):
+        PAD = 28
+        LABEL_W = 78   # largura fixa dos rótulos das barras
+
         # ── Cabeçalho ────────────────────────────────────────────────────────
         header_frame = ctk.CTkFrame(self, fg_color="transparent")
-        header_frame.pack(fill="x", padx=28, pady=(24, 0))
+        header_frame.pack(fill="x", padx=PAD, pady=(24, 0))
 
         ctk.CTkLabel(
             header_frame,
@@ -144,11 +127,12 @@ class App(ctk.CTk):
             text="Baixa o áudio dos cultos do YouTube e envia para o Google Drive",
             font=ctk.CTkFont(size=12),
             text_color="gray",
-        ).pack(pady=(4, 10))
+            anchor="w",
+        ).pack(fill="x", padx=PAD, pady=(4, 12))
 
         # ── Banner de autorização Google Drive ────────────────────────────────
         self._auth_banner = ctk.CTkFrame(self, fg_color="#5a3500", corner_radius=8)
-        # Não empacotado aqui — gerenciado por _check_auth_visibility
+        # gerenciado por _check_auth_visibility
 
         ctk.CTkLabel(
             self._auth_banner,
@@ -169,14 +153,14 @@ class App(ctk.CTk):
         self._auth_btn.pack(side="right", padx=14, pady=8)
 
         # ── Seleção de data ───────────────────────────────────────────────────
-        date_frame = ctk.CTkFrame(self, fg_color="transparent")
-        date_frame.pack(fill="x", padx=28)
+        date_frame = ctk.CTkFrame(self, fg_color=("gray90", "gray16"), corner_radius=10)
+        date_frame.pack(fill="x", padx=PAD, pady=(0, 0))
 
         ctk.CTkLabel(
             date_frame,
             text="Data do culto:",
             font=ctk.CTkFont(size=13),
-        ).pack(side="left")
+        ).pack(side="left", padx=(16, 0), pady=14)
 
         self.date_entry = ctk.CTkEntry(
             date_frame,
@@ -184,15 +168,26 @@ class App(ctk.CTk):
             width=130,
             font=ctk.CTkFont(size=13),
         )
-        self.date_entry.pack(side="left", padx=(10, 6))
+        self.date_entry.pack(side="left", padx=(10, 6), pady=14)
 
         ctk.CTkButton(
             date_frame,
             text="📅",
             width=40,
             font=ctk.CTkFont(size=14),
+            fg_color="transparent",
+            hover_color=("#d0d0d0", "#444444"),
             command=self._open_calendar,
-        ).pack(side="left")
+        ).pack(side="left", pady=14)
+
+        self.run_btn = ctk.CTkButton(
+            date_frame,
+            text="Processar",
+            width=120,
+            font=ctk.CTkFont(size=13, weight="bold"),
+            command=self._start,
+        )
+        self.run_btn.pack(side="right", padx=(0, 16), pady=14)
 
         # Botão cancelar — visível apenas durante execução
         self.cancel_btn = ctk.CTkButton(
@@ -204,89 +199,84 @@ class App(ctk.CTk):
             hover_color="#922b21",
             command=self._cancel,
         )
-        # NÃO empacotado ainda — aparece só quando rodando
+        # NÃO empacotado ainda
 
-        self.run_btn = ctk.CTkButton(
-            date_frame,
-            text="Processar",
-            width=120,
-            font=ctk.CTkFont(size=13, weight="bold"),
-            command=self._start,
+        # ── Separador ─────────────────────────────────────────────────────────
+        ctk.CTkFrame(self, height=1, fg_color=("gray78", "gray28")).pack(
+            fill="x", padx=PAD, pady=(16, 0)
         )
-        self.run_btn.pack(side="right")
 
         # ── Status ────────────────────────────────────────────────────────────
+        status_row = ctk.CTkFrame(self, fg_color="transparent")
+        status_row.pack(fill="x", padx=PAD, pady=(12, 8))
+
+        self._status_dot = ctk.CTkLabel(
+            status_row,
+            text="●",
+            font=ctk.CTkFont(size=11),
+            text_color="gray",
+            width=16,
+        )
+        self._status_dot.pack(side="left", padx=(0, 6))
+
         self.status_label = ctk.CTkLabel(
-            self,
-            text="Aguardando...",
-            font=ctk.CTkFont(size=12),
+            status_row,
+            text="Pronto",
+            font=ctk.CTkFont(size=13),
             text_color="gray",
             anchor="w",
         )
-        self.status_label.pack(fill="x", padx=28, pady=(18, 2))
+        self.status_label.pack(side="left", fill="x", expand=True)
 
-        # ── Barra de upload (progresso por chunk) ────────────────────────────
-        upload_frame = ctk.CTkFrame(self, fg_color="transparent")
-        upload_frame.pack(fill="x", padx=28, pady=(0, 6))
+        # ── Seção de progresso (Download / Conversão / Upload) ────────────────
+        # Pack/unpack como bloco — oculta quando idle
+        self._progress_frame = ctk.CTkFrame(self, fg_color="transparent")
+        # empacotado em _show_bars(), removido em _hide_bars()
 
-        ctk.CTkLabel(
-            upload_frame,
-            text="Upload:",
-            font=ctk.CTkFont(size=11),
-            text_color="gray",
-            width=52,
-            anchor="w",
-        ).pack(side="left")
+        def _bar_row(parent, label):
+            row = ctk.CTkFrame(parent, fg_color="transparent")
+            row.pack(fill="x", pady=(0, 7))
+            ctk.CTkLabel(
+                row,
+                text=label,
+                font=ctk.CTkFont(size=11),
+                text_color=("gray50", "gray60"),
+                width=LABEL_W,
+                anchor="w",
+            ).pack(side="left")
+            bar = ctk.CTkProgressBar(row, height=12)
+            bar.pack(side="left", fill="x", expand=True, padx=(0, 8))
+            stats = ctk.CTkLabel(
+                row,
+                text="",
+                font=ctk.CTkFont(family="Consolas", size=11),
+                text_color="gray",
+                width=190,
+                anchor="w",
+            )
+            stats.pack(side="left")
+            return bar, stats
 
-        self.progress_bar = ctk.CTkProgressBar(upload_frame, height=14)
-        self.progress_bar.pack(side="left", fill="x", expand=True, padx=(0, 8))
-
-        self.upload_stats_label = ctk.CTkLabel(
-            upload_frame,
-            text="",
-            font=ctk.CTkFont(family="Consolas", size=11),
-            text_color="gray",
-            width=210,
-            anchor="w",
-        )
-        self.upload_stats_label.pack(side="left")
-
-        # ── Barra de subtarefas (pipeline) ────────────────────────────────────
-        subtask_frame = ctk.CTkFrame(self, fg_color="transparent")
-        subtask_frame.pack(fill="x", padx=28, pady=(0, 14))
-
-        ctk.CTkLabel(
-            subtask_frame,
-            text="Etapas:",
-            font=ctk.CTkFont(size=11),
-            text_color="gray",
-            width=52,
-            anchor="w",
-        ).pack(side="left")
-
-        self.subtask_bar = ctk.CTkProgressBar(subtask_frame, height=8, width=148)
-        self.subtask_bar.pack(side="left")
-
-        # Guarda a cor original das barras e inicia sem marcador visível
-        self._bar_orig_color     = self.progress_bar.cget("progress_color")
-        self._subtask_orig_color = self.subtask_bar.cget("progress_color")
-        self._hide_bars()
+        self.download_bar,  self.download_stats  = _bar_row(self._progress_frame, "Download")
+        self.convert_bar,   self.convert_stats   = _bar_row(self._progress_frame, "Conversão")
+        self.progress_bar,  self.upload_stats_label = _bar_row(self._progress_frame, "Upload")
 
         # ── Log ───────────────────────────────────────────────────────────────
-        ctk.CTkLabel(
+        self._log_label = ctk.CTkLabel(
             self,
             text="Log de execução:",
             font=ctk.CTkFont(size=12),
             text_color="gray",
             anchor="w",
-        ).pack(fill="x", padx=28)
+        )
+        self._log_label.pack(fill="x", padx=PAD)
 
         self.log_box = ctk.CTkTextbox(
             self,
             font=ctk.CTkFont(family="Consolas", size=11),
             wrap="word",
         )
-        self.log_box.pack(fill="both", expand=True, padx=28, pady=(4, 24))
+        self.log_box.pack(fill="both", expand=True, padx=PAD, pady=(4, 24))
         self.log_box.configure(state="disabled")
 
     # -----------------------------------------------------------------------
@@ -348,15 +338,26 @@ class App(ctk.CTk):
 
                 elif kind == "status":
                     is_done = value == "Concluído!"
-                    self.status_label.configure(
-                        text=value,
-                        text_color="#2fa84f" if is_done else "white",
-                    )
+                    state   = "done" if is_done else "running"
+                    self._set_status(value, state)
                     _file_log(f"[STATUS] {value}")
-                    # Atualiza barra de subtarefas
-                    pct = _subtask_pct(value)
-                    if pct is not None:
-                        self.subtask_bar.set(pct)
+                    # Controla animação da barra de conversão
+                    lo = value.lower()
+                    if "convertendo" in lo:
+                        if not self._converting:
+                            self._converting = True
+                            self.convert_stats.configure(text="aguardando...")
+                            self._animate_conversion()
+                    elif self._converting:
+                        # passou da fase de conversão
+                        self._converting = False
+                        self.convert_bar.set(1.0)
+                        self.convert_stats.configure(text="")
+
+                elif kind == "download_progress":
+                    self.download_bar.set(value)
+                    pct_txt = f"{value * 100:.0f}%"
+                    self.download_stats.configure(text=pct_txt)
 
                 elif kind == "progress":
                     self.progress_bar.set(value / 100)
@@ -415,22 +416,54 @@ class App(ctk.CTk):
         self.log_box.configure(state="disabled")
 
     # -----------------------------------------------------------------------
+    # Status dot + helper
+    # -----------------------------------------------------------------------
+    def _set_status(self, text, state="running"):
+        """Atualiza texto e cor do status + dot de indicação."""
+        _colors = {
+            "idle":    ("gray",    "gray"),
+            "running": ("white",   "#4a9edd"),
+            "done":    ("#2fa84f", "#2fa84f"),
+            "error":   ("#e05252", "#e05252"),
+        }
+        text_color, dot_color = _colors.get(state, ("white", "#4a9edd"))
+        self.status_label.configure(text=text, text_color=text_color)
+        self._status_dot.configure(text_color=dot_color)
+
+    # -----------------------------------------------------------------------
     # Controle das barras de progresso
     # -----------------------------------------------------------------------
     def _hide_bars(self):
-        """Remove o marcador visual — torna as barras invisíveis."""
-        track = self.progress_bar.cget("fg_color")
-        self.progress_bar.configure(progress_color=track)
+        self._converting = False
+        self._progress_frame.pack_forget()
+        self.download_bar.set(0)
+        self.convert_bar.set(0)
         self.progress_bar.set(0)
-        track = self.subtask_bar.cget("fg_color")
-        self.subtask_bar.configure(progress_color=track)
-        self.subtask_bar.set(0)
+        self.download_stats.configure(text="")
+        self.convert_stats.configure(text="")
         self.upload_stats_label.configure(text="")
 
     def _show_bars(self):
-        """Restaura as cores originais das barras."""
-        self.progress_bar.configure(progress_color=self._bar_orig_color)
-        self.subtask_bar.configure(progress_color=self._subtask_orig_color)
+        self.download_bar.set(0)
+        self.convert_bar.set(0)
+        self.progress_bar.set(0)
+        self.download_stats.configure(text="")
+        self.convert_stats.configure(text="")
+        self.upload_stats_label.configure(text="")
+        self._progress_frame.pack(fill="x", padx=28, pady=(0, 14),
+                                  before=self._log_label)
+
+    # -----------------------------------------------------------------------
+    # Animação da barra de conversão
+    # -----------------------------------------------------------------------
+    def _animate_conversion(self):
+        if not self._converting:
+            return
+        current = self.convert_bar.get()
+        # Avança até 90%; os 10% finais preenchemos em _on_done
+        nxt = min(current + 0.018, 0.90)
+        self.convert_bar.set(nxt)
+        self.after(160, self._animate_conversion)
 
     # -----------------------------------------------------------------------
     # Iniciar / Cancelar
@@ -459,10 +492,9 @@ class App(ctk.CTk):
         self.log_box.configure(state="normal")
         self.log_box.delete("1.0", "end")
         self.log_box.configure(state="disabled")
-        self.progress_bar.set(0)
-        self.subtask_bar.set(0)
-        self.status_label.configure(text="Verificando...", text_color="white")
+        self._set_status("Verificando...", "running")
         self._cancel_event.clear()
+        self._converting = False
 
         self._running = True
         self._show_bars()
@@ -475,8 +507,9 @@ class App(ctk.CTk):
         if not self._running:
             return
         self._cancel_event.set()
+        self._converting = False
         self._append_log("Cancelamento solicitado...")
-        self.status_label.configure(text="Cancelando...", text_color="#e0a020")
+        self._set_status("Cancelando...", "running")
         self._hide_bars()
         self.cancel_btn.configure(state="disabled")
 
@@ -484,11 +517,11 @@ class App(ctk.CTk):
         """Alterna entre estado idle e running nos botões."""
         if running:
             self.run_btn.configure(state="disabled", text="Processando...")
-            self.cancel_btn.pack(side="right", padx=(0, 8))   # aparece
+            self.cancel_btn.pack(side="right", padx=(0, 16), before=self.run_btn)
         else:
-            self.cancel_btn.pack_forget()                       # some
+            self.cancel_btn.pack_forget()
             self.run_btn.configure(state="normal", text="Processar")
-            self.cancel_btn.configure(state="normal")           # reseta para próxima vez
+            self.cancel_btn.configure(state="normal")
 
     # -----------------------------------------------------------------------
     # Workers (threads de background)
@@ -605,6 +638,7 @@ class App(ctk.CTk):
                 selected_videos,
                 on_log=lambda m: self._queue.put(("log", m)),
                 on_status=lambda m: self._queue.put(("status", m)),
+                on_download_progress=lambda p: self._queue.put(("download_progress", p)),
                 cancel_event=self._cancel_event,
             )
             if not files:
@@ -755,6 +789,10 @@ class App(ctk.CTk):
                 font=ctk.CTkFont(size=11), text_color="gray", anchor="w",
             ).pack(anchor="w")
 
+        def _cancelar():
+            popup.destroy()
+            self._on_cancelled()
+
         def _prosseguir():
             selected = [v for v, chk in zip(videos, check_vars) if chk.get()]
             popup.destroy()
@@ -767,6 +805,8 @@ class App(ctk.CTk):
                 args=(date_str, selected),
                 daemon=True,
             ).start()
+
+        popup.protocol("WM_DELETE_WINDOW", _cancelar)
 
         ctk.CTkButton(
             popup, text="Prosseguir", width=160,
@@ -782,7 +822,7 @@ class App(ctk.CTk):
         self._running = False
         self._set_buttons_running(False)
         self._hide_bars()
-        self.status_label.configure(text="Erro — veja o log abaixo", text_color="#e05252")
+        self._set_status("Erro — veja o log abaixo", "error")
         self._append_log(f"ERRO: {msg}")
         _file_log(f"ERRO pré-execução: {msg}")
         self._show_error(msg)
@@ -791,15 +831,18 @@ class App(ctk.CTk):
         self._running = False
         self._set_buttons_running(False)
         self._hide_bars()
-        self.status_label.configure(text="Operação cancelada.", text_color="gray")
+        self._set_status("Operação cancelada.", "idle")
         self._append_log("Operação cancelada pelo usuário.")
         _file_log("Operação cancelada pelo usuário.")
 
     def _on_done(self, date_str=None, video_titles=None):
         self._running = False
+        self._converting = False
         self._set_buttons_running(False)
+        self.download_bar.set(1)
+        self.convert_bar.set(1)
         self.progress_bar.set(1)
-        self.subtask_bar.set(1)
+        self.convert_stats.configure(text="")
 
         # Salva histórico
         if date_str and video_titles:
@@ -821,8 +864,9 @@ class App(ctk.CTk):
 
     def _on_error(self, msg):
         self._running = False
+        self._converting = False
         self._set_buttons_running(False)
-        self.status_label.configure(text="Erro — veja o log abaixo", text_color="#e05252")
+        self._set_status("Erro — veja o log abaixo", "error")
         self._append_log(f"ERRO: {msg}")
         _file_log(f"ERRO: {msg}")
         self._show_error(msg)

@@ -13,6 +13,7 @@ Uso via código (GUI):
 
 import sys
 import os
+import re
 import subprocess
 import glob
 import pickle
@@ -578,14 +579,21 @@ def list_videos(date_str, on_log=None, on_status=None, cancel_event=None):
 # YouTube — Fase 2: baixar vídeos selecionados
 # ---------------------------------------------------------------------------
 
-def download_selected(videos, on_log=None, on_status=None, cancel_event=None):
+def download_selected(videos, on_log=None, on_status=None,
+                      on_download_progress=None, cancel_event=None):
     """
     Recebe a lista de vídeos selecionados pelo usuário (dicts com chave "id")
     e faz o download do áudio de cada um.
     Retorna lista de caminhos dos MP3 baixados.
+
+    on_download_progress(pct: float) — progresso geral 0.0–1.0 através de todos os vídeos.
     """
-    log    = on_log    if callable(on_log)    else _noop
-    status = on_status if callable(on_status) else _noop
+    log         = on_log               if callable(on_log)               else _noop
+    status      = on_status            if callable(on_status)            else _noop
+    dl_progress = on_download_progress if callable(on_download_progress) else _noop
+
+    total_videos     = len(videos)
+    current_video    = 0   # quantos vídeos já tiveram ExtractAudio concluído
 
     os.makedirs(DOWNLOAD_DIR, exist_ok=True)
     output_template = os.path.join(DOWNLOAD_DIR, "%(title)s.%(ext)s")
@@ -606,9 +614,11 @@ def download_selected(videos, on_log=None, on_status=None, cancel_event=None):
     cmd.extend(urls)
 
     status("Baixando áudio...")
-    log(f"Baixando {len(videos)} vídeo(s)...")
+    log(f"Baixando {total_videos} vídeo(s)...")
 
     process = _start_process(cmd, cancel_event)
+
+    _DL_PCT_RE = re.compile(r'\[download\]\s+(\d+\.?\d*)%')
 
     for line in process.stdout:
         _check_cancel(cancel_event)
@@ -619,12 +629,22 @@ def download_selected(videos, on_log=None, on_status=None, cancel_event=None):
             continue
         if "[youtube]" in line and "Downloading" in line:
             continue
+
         if line.startswith("[download]") and "%" in line:
+            m = _DL_PCT_RE.match(line)
+            if m:
+                file_pct = float(m.group(1)) / 100.0
+                overall  = (current_video + file_pct) / total_videos
+                dl_progress(overall)
             continue
+
         if "[download] Destination:" in line:
             fname = line.split("Destination:")[-1].strip().split("\\")[-1]
             log(f"Baixando: {fname}")
         elif "[ExtractAudio]" in line:
+            # download deste vídeo concluído — marca 100% da parte proporcional
+            dl_progress((current_video + 1) / total_videos)
+            current_video += 1
             status("Convertendo para MP3...")
             log("Convertendo para MP3...")
         else:
