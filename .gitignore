@@ -6,6 +6,7 @@ credentials/token.pkl
 downloads/
 logs/
 historico.json
+config.json
 
 # Binários locais
 ffmpeg/

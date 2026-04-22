@@ -31,9 +31,9 @@ from googleapiclient.discovery import build
 from google_auth_oauthlib.flow import InstalledAppFlow
 from google.auth.transport.requests import Request, AuthorizedSession
 
-CHANNEL_URL    = "https://www.youtube.com/@IPMadalena/streams"
-DRIVE_FOLDER_ID = "1KfsI5zCDL4HZ2pdAWPFfAD3TugplzBez"
-SCOPES         = ["https://www.googleapis.com/auth/drive"]
+_DEFAULT_CHANNEL_URL    = "https://www.youtube.com/@IPMadalena/streams"
+_DEFAULT_DRIVE_FOLDER_ID = "1KfsI5zCDL4HZ2pdAWPFfAD3TugplzBez"
+SCOPES                  = ["https://www.googleapis.com/auth/drive"]
 
 BASE_DIR         = os.path.dirname(os.path.abspath(__file__))
 CREDENTIALS_FILE = os.path.join(BASE_DIR, "credentials", "client_secret.json")
@@ -41,6 +41,7 @@ TOKEN_FILE       = os.path.join(BASE_DIR, "credentials", "token.pkl")
 DOWNLOAD_DIR     = os.path.join(BASE_DIR, "downloads")
 HISTORY_FILE     = os.path.join(BASE_DIR, "historico.json")
 LOGS_DIR         = os.path.join(BASE_DIR, "logs")
+CONFIG_FILE      = os.path.join(BASE_DIR, "config.json")
 
 _LOCAL_FFMPEG  = os.path.join(BASE_DIR, "ffmpeg", "bin", "ffmpeg.exe")
 FFMPEG_LOCATION = _LOCAL_FFMPEG if os.path.exists(_LOCAL_FFMPEG) else None
@@ -71,6 +72,46 @@ def _make_callbacks(on_log, on_status, on_progress):
 
 
 # ---------------------------------------------------------------------------
+# Configurações persistidas
+# ---------------------------------------------------------------------------
+
+def load_config() -> dict:
+    """Retorna o dict de configuração (lê config.json ou usa defaults)."""
+    defaults = {
+        "channel_url":    _DEFAULT_CHANNEL_URL,
+        "drive_folder_id": _DEFAULT_DRIVE_FOLDER_ID,
+    }
+    if not os.path.exists(CONFIG_FILE):
+        return defaults
+    try:
+        with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        # garante que todas as chaves existam
+        for k, v in defaults.items():
+            data.setdefault(k, v)
+        return data
+    except Exception:
+        return defaults
+
+
+def save_config(channel_url: str = None, drive_folder_id: str = None):
+    """Persiste as configurações em config.json (apenas os campos fornecidos)."""
+    cfg = load_config()
+    if channel_url is not None:
+        cfg["channel_url"] = channel_url.strip()
+    if drive_folder_id is not None:
+        cfg["drive_folder_id"] = drive_folder_id.strip()
+    with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+        json.dump(cfg, f, ensure_ascii=False, indent=2)
+
+
+def logout_drive():
+    """Remove o token salvo, forçando reautorização na próxima execução."""
+    if os.path.exists(TOKEN_FILE):
+        os.remove(TOKEN_FILE)
+
+
+# ---------------------------------------------------------------------------
 # Funções utilitárias de robustez
 # ---------------------------------------------------------------------------
 
@@ -82,6 +123,8 @@ def check_internet(timeout=5):
         return True
     except OSError:
         return False
+    finally:
+        socket.setdefaulttimeout(None)  # evita herdar timeout em sockets futuros (OAuth, etc.)
 
 
 def check_disk_space(min_mb=500):
@@ -240,7 +283,7 @@ def get_drive_service(on_log=None):
                 )
             log("Abrindo navegador para autenticação...")
             flow = InstalledAppFlow.from_client_secrets_file(CREDENTIALS_FILE, SCOPES)
-            creds = flow.run_local_server(port=0)
+            creds = flow.run_local_server(host="127.0.0.1", port=8085)
 
         with open(TOKEN_FILE, "wb") as f:
             pickle.dump(creds, f)
@@ -248,14 +291,45 @@ def get_drive_service(on_log=None):
     return build("drive", "v3", credentials=creds)
 
 
+def check_auth_status():
+    """Retorna True se o token do Drive está presente e válido."""
+    if not os.path.exists(TOKEN_FILE):
+        return False
+    try:
+        with open(TOKEN_FILE, "rb") as f:
+            creds = pickle.load(f)
+    except Exception:
+        return False
+    if not creds:
+        return False
+    if creds.valid:
+        return True
+    if creds.expired and creds.refresh_token:
+        try:
+            creds.refresh(Request())
+            with open(TOKEN_FILE, "wb") as f:
+                pickle.dump(creds, f)
+            return True
+        except Exception:
+            return False
+    return False
+
+
+def run_auth(on_log=None):
+    """Executa o fluxo OAuth do Drive. Levanta exceção em caso de falha."""
+    get_drive_service(on_log=on_log)
+
+
 def find_or_create_month_folder(service, date, on_log=None):
     log = on_log if callable(on_log) else _noop
+    cfg = load_config()
+    root_folder_id = cfg["drive_folder_id"]
     mes = MESES_PT[date.month]
     ano = date.year
 
     results = service.files().list(
         q=(
-            f"'{DRIVE_FOLDER_ID}' in parents "
+            f"'{root_folder_id}' in parents "
             "and mimeType='application/vnd.google-apps.folder' "
             "and trashed=false"
         ),
@@ -280,7 +354,7 @@ def find_or_create_month_folder(service, date, on_log=None):
     meta = {
         "name": folder_name,
         "mimeType": "application/vnd.google-apps.folder",
-        "parents": [DRIVE_FOLDER_ID],
+        "parents": [root_folder_id],
     }
     folder = service.files().create(body=meta, fields="id").execute()
     return folder["id"]
@@ -451,6 +525,7 @@ def list_videos(date_str, on_log=None, on_status=None, cancel_event=None):
 
     date          = datetime.strptime(date_str, "%d/%m/%Y")
     dateafter_str = (date - timedelta(days=1)).strftime("%Y%m%d")
+    channel_url   = load_config()["channel_url"]
 
     cmd = [
         "yt-dlp",
@@ -459,11 +534,11 @@ def list_videos(date_str, on_log=None, on_status=None, cancel_event=None):
         "--dateafter", dateafter_str,
         "--break-on-reject",
         "--socket-timeout", "30",
-        CHANNEL_URL,
+        channel_url,
     ]
 
     status("Buscando vídeos no YouTube...")
-    log(f"Canal: {CHANNEL_URL}")
+    log(f"Canal: {channel_url}")
     log(f"Data: {date_str}")
 
     process = _start_process(cmd, cancel_event)

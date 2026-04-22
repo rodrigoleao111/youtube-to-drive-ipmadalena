@@ -106,27 +106,67 @@ class App(ctk.CTk):
 
         self._build_ui()
         self.after(100, self._process_queue)
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
 
         # Inicialização em background: atualizar yt-dlp
         threading.Thread(target=self._init_update_ytdlp, daemon=True).start()
+
+        # Verifica autorização do Drive e exibe banner se necessário
+        self._check_auth_visibility()
 
     # -----------------------------------------------------------------------
     # Layout
     # -----------------------------------------------------------------------
     def _build_ui(self):
         # ── Cabeçalho ────────────────────────────────────────────────────────
+        header_frame = ctk.CTkFrame(self, fg_color="transparent")
+        header_frame.pack(fill="x", padx=28, pady=(24, 0))
+
         ctk.CTkLabel(
-            self,
+            header_frame,
             text="IPMadalena — Cultos para o Drive",
             font=ctk.CTkFont(size=20, weight="bold"),
-        ).pack(pady=(24, 4))
+        ).pack(side="left")
+
+        ctk.CTkButton(
+            header_frame,
+            text="⚙",
+            width=34,
+            height=34,
+            font=ctk.CTkFont(size=16),
+            fg_color="transparent",
+            hover_color=("#d0d0d0", "#444444"),
+            command=self._open_settings,
+        ).pack(side="right")
 
         ctk.CTkLabel(
             self,
             text="Baixa o áudio dos cultos do YouTube e envia para o Google Drive",
             font=ctk.CTkFont(size=12),
             text_color="gray",
-        ).pack(pady=(0, 16))
+        ).pack(pady=(4, 10))
+
+        # ── Banner de autorização Google Drive ────────────────────────────────
+        self._auth_banner = ctk.CTkFrame(self, fg_color="#5a3500", corner_radius=8)
+        # Não empacotado aqui — gerenciado por _check_auth_visibility
+
+        ctk.CTkLabel(
+            self._auth_banner,
+            text="⚠  Google Drive não autorizado",
+            font=ctk.CTkFont(size=12, weight="bold"),
+            text_color="#f0a830",
+        ).pack(side="left", padx=(14, 8), pady=10)
+
+        self._auth_btn = ctk.CTkButton(
+            self._auth_banner,
+            text="Autorizar",
+            width=100,
+            font=ctk.CTkFont(size=12),
+            fg_color="#d4820a",
+            hover_color="#b36b08",
+            command=self._start_auth,
+        )
+        self._auth_btn.pack(side="right", padx=14, pady=8)
 
         # ── Seleção de data ───────────────────────────────────────────────────
         date_frame = ctk.CTkFrame(self, fg_color="transparent")
@@ -352,6 +392,16 @@ class App(ctk.CTk):
                 elif kind == "preflight_error":
                     self._on_preflight_error(value)
 
+                elif kind == "auth_done":
+                    self._auth_banner.pack_forget()
+                    self._append_log("Google Drive autorizado com sucesso!")
+                    _file_log("Google Drive autorizado com sucesso.")
+
+                elif kind == "auth_error":
+                    self._auth_btn.configure(state="normal", text="Autorizar")
+                    self._append_log(f"Erro na autorização: {value}")
+                    _file_log(f"Erro na autorização Drive: {value}")
+
         except queue.Empty:
             pass
         finally:
@@ -398,6 +448,13 @@ class App(ctk.CTk):
             self._show_error("Data inválida.\nUse o formato DD/MM/AAAA  (ex: 19/04/2026).")
             return
 
+        if not baixar_audio.check_auth_status():
+            self._show_error(
+                "Google Drive não autorizado.\n\n"
+                "Clique em 'Autorizar' no banner acima ou acesse ⚙ Configurações."
+            )
+            return
+
         # Limpa UI e reinicia estado
         self.log_box.configure(state="normal")
         self.log_box.delete("1.0", "end")
@@ -435,6 +492,44 @@ class App(ctk.CTk):
 
     # -----------------------------------------------------------------------
     # Workers (threads de background)
+    # -----------------------------------------------------------------------
+
+    def _on_close(self):
+        self.destroy()
+
+    # -----------------------------------------------------------------------
+    # Autorização Google Drive
+    # -----------------------------------------------------------------------
+
+    def _open_settings(self):
+        win = SettingsWindow(self)
+        win.grab_set()
+        win.focus_force()
+        # Quando a janela de configurações fechar, reavalia o banner de auth
+        win.bind("<Destroy>", lambda _: self.after(100, self._check_auth_visibility))
+
+    def _check_auth_visibility(self):
+        """Exibe o banner laranja se o Drive não estiver autorizado."""
+        if baixar_audio.check_auth_status():
+            self._auth_banner.pack_forget()
+        else:
+            self._auth_banner.pack(fill="x", padx=28, pady=(0, 12))
+
+    def _start_auth(self):
+        self._auth_btn.configure(state="disabled", text="Autorizando...")
+        self._append_log("Abrindo navegador para autorização do Google Drive...")
+        _file_log("Iniciando fluxo OAuth do Drive.")
+        threading.Thread(target=self._run_auth_worker, daemon=True).start()
+
+    def _run_auth_worker(self):
+        try:
+            baixar_audio.run_auth(on_log=lambda m: self._queue.put(("log", m)))
+            self._queue.put(("auth_done", None))
+        except Exception as e:
+            self._queue.put(("auth_error", str(e)))
+
+    # -----------------------------------------------------------------------
+    # yt-dlp update
     # -----------------------------------------------------------------------
 
     def _init_update_ytdlp(self):
@@ -754,6 +849,239 @@ class App(ctk.CTk):
         ).pack(padx=20)
 
         ctk.CTkButton(dialog, text="OK", width=100, command=dialog.destroy).pack(pady=16)
+
+
+# ---------------------------------------------------------------------------
+# Janela de configurações
+# ---------------------------------------------------------------------------
+class SettingsWindow(ctk.CTkToplevel):
+
+    def __init__(self, master):
+        super().__init__(master)
+        self.title("Configurações")
+        self.geometry("540x490")
+        self.resizable(False, False)
+
+        self._auth_running = False
+        self._build_ui()
+
+    # -----------------------------------------------------------------------
+    # Layout
+    # -----------------------------------------------------------------------
+    def _build_ui(self):
+        # ── Título ───────────────────────────────────────────────────────────
+        ctk.CTkLabel(
+            self,
+            text="Configurações",
+            font=ctk.CTkFont(size=18, weight="bold"),
+        ).pack(pady=(22, 16))
+
+        content = ctk.CTkFrame(self, fg_color="transparent")
+        content.pack(fill="both", expand=True, padx=28)
+
+        # ── Seção: Google Drive ───────────────────────────────────────────────
+        self._section_label(content, "Google Drive")
+
+        auth_row = ctk.CTkFrame(content, fg_color=("gray92", "gray17"), corner_radius=8)
+        auth_row.pack(fill="x", pady=(4, 12))
+
+        self._auth_status_label = ctk.CTkLabel(
+            auth_row,
+            text="",
+            font=ctk.CTkFont(size=12),
+            anchor="w",
+        )
+        self._auth_status_label.pack(side="left", padx=14, pady=12)
+
+        self._auth_action_btn = ctk.CTkButton(
+            auth_row,
+            text="",
+            width=110,
+            font=ctk.CTkFont(size=12),
+            command=self._toggle_auth,
+        )
+        self._auth_action_btn.pack(side="right", padx=12, pady=8)
+
+        self._refresh_auth_status()
+
+        # ── Seção: Canal do YouTube ───────────────────────────────────────────
+        self._section_label(content, "Canal do YouTube")
+
+        cfg = baixar_audio.load_config()
+
+        self._channel_entry = ctk.CTkEntry(
+            content,
+            font=ctk.CTkFont(size=12),
+            height=36,
+        )
+        self._channel_entry.insert(0, cfg["channel_url"])
+        self._channel_entry.pack(fill="x", pady=(4, 2))
+
+        ctk.CTkLabel(
+            content,
+            text="Ex: https://www.youtube.com/@SeuCanal/streams",
+            font=ctk.CTkFont(size=11),
+            text_color="gray",
+            anchor="w",
+        ).pack(fill="x", pady=(0, 12))
+
+        # ── Seção: Pasta do Google Drive ──────────────────────────────────────
+        self._section_label(content, "Pasta do Google Drive")
+
+        self._folder_entry = ctk.CTkEntry(
+            content,
+            font=ctk.CTkFont(size=12),
+            height=36,
+        )
+        self._folder_entry.insert(0, cfg["drive_folder_id"])
+        self._folder_entry.pack(fill="x", pady=(4, 2))
+
+        ctk.CTkLabel(
+            content,
+            text="ID da pasta raiz no Drive (encontrado no final da URL da pasta)",
+            font=ctk.CTkFont(size=11),
+            text_color="gray",
+            anchor="w",
+        ).pack(fill="x", pady=(0, 16))
+
+        # ── Botões ────────────────────────────────────────────────────────────
+        btn_row = ctk.CTkFrame(content, fg_color="transparent")
+        btn_row.pack(fill="x", pady=(0, 4))
+
+        ctk.CTkButton(
+            btn_row,
+            text="Fechar",
+            width=110,
+            fg_color=("gray75", "gray30"),
+            hover_color=("gray65", "gray25"),
+            command=self.destroy,
+        ).pack(side="right", padx=(8, 0))
+
+        ctk.CTkButton(
+            btn_row,
+            text="Salvar",
+            width=110,
+            font=ctk.CTkFont(weight="bold"),
+            command=self._save,
+        ).pack(side="right")
+
+        self._feedback_label = ctk.CTkLabel(
+            content,
+            text="",
+            font=ctk.CTkFont(size=11),
+            text_color="#2fa84f",
+            anchor="w",
+        )
+        self._feedback_label.pack(fill="x", pady=(6, 0))
+
+    # -----------------------------------------------------------------------
+    # Helpers de layout
+    # -----------------------------------------------------------------------
+    def _section_label(self, parent, text):
+        ctk.CTkLabel(
+            parent,
+            text=text,
+            font=ctk.CTkFont(size=13, weight="bold"),
+            anchor="w",
+        ).pack(fill="x", pady=(0, 2))
+
+    # -----------------------------------------------------------------------
+    # Auth
+    # -----------------------------------------------------------------------
+    def _refresh_auth_status(self):
+        authorized = baixar_audio.check_auth_status()
+        if authorized:
+            self._auth_status_label.configure(
+                text="✓  Autorizado",
+                text_color="#2fa84f",
+            )
+            self._auth_action_btn.configure(
+                text="Logout",
+                fg_color=("#c0392b", "#922b21"),
+                hover_color=("#922b21", "#7b241c"),
+            )
+        else:
+            self._auth_status_label.configure(
+                text="✗  Não autorizado",
+                text_color="#e05252",
+            )
+            self._auth_action_btn.configure(
+                text="Autorizar",
+                fg_color=("#1f6aa5", "#144870"),
+                hover_color=("#144870", "#0f3555"),
+            )
+
+    def _toggle_auth(self):
+        if baixar_audio.check_auth_status():
+            self._do_logout()
+        else:
+            self._do_authorize()
+
+    def _do_logout(self):
+        baixar_audio.logout_drive()
+        self._refresh_auth_status()
+        self._feedback_label.configure(
+            text="Logout realizado. Autorize novamente antes de processar.",
+            text_color="#e0a020",
+        )
+
+    def _do_authorize(self):
+        if self._auth_running:
+            return
+        self._auth_running = True
+        self._auth_action_btn.configure(state="disabled", text="Autorizando...")
+        threading.Thread(target=self._auth_worker, daemon=True).start()
+
+    def _auth_worker(self):
+        try:
+            baixar_audio.run_auth()
+            self.after(0, self._on_auth_done)
+        except Exception as e:
+            self.after(0, lambda: self._on_auth_error(str(e)))
+
+    def _on_auth_done(self):
+        self._auth_running = False
+        self._auth_action_btn.configure(state="normal")
+        self._refresh_auth_status()
+        self._feedback_label.configure(
+            text="Google Drive autorizado com sucesso!",
+            text_color="#2fa84f",
+        )
+
+    def _on_auth_error(self, msg):
+        self._auth_running = False
+        self._auth_action_btn.configure(state="normal")
+        self._refresh_auth_status()
+        self._feedback_label.configure(
+            text=f"Erro na autorização: {msg}",
+            text_color="#e05252",
+        )
+
+    # -----------------------------------------------------------------------
+    # Salvar configurações
+    # -----------------------------------------------------------------------
+    def _save(self):
+        channel = self._channel_entry.get().strip()
+        folder  = self._folder_entry.get().strip()
+
+        if not channel:
+            self._feedback_label.configure(
+                text="URL do canal não pode estar vazia.",
+                text_color="#e05252",
+            )
+            return
+        if not folder:
+            self._feedback_label.configure(
+                text="ID da pasta não pode estar vazio.",
+                text_color="#e05252",
+            )
+            return
+
+        baixar_audio.save_config(channel_url=channel, drive_folder_id=folder)
+        self._feedback_label.configure(
+            text="Configurações salvas com sucesso!",
+            text_color="#2fa84f",
+        )
 
 
 # ---------------------------------------------------------------------------
