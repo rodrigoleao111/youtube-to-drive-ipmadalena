@@ -27,13 +27,19 @@ python baixar_audio.py 19/04/2026
 youtube_to_drive/
 ├── app.py                   ← interface gráfica (customtkinter)
 ├── baixar_audio.py          ← módulo principal (lógica + CLI)
+├── setup_wizard.py          ← wizard de primeira execução (6 passos)
 ├── historico.json           ← datas já processadas (gerado em runtime)
+├── config.json              ← canal YouTube + pasta Drive (gerado em runtime)
 ├── credentials/
 │   ├── client_secret.json   ← credenciais OAuth do Google
 │   └── token.pkl            ← token salvo (gerado na 1ª execução)
 ├── downloads/               ← pasta temporária, limpa após upload
 ├── logs/DD-MM-YYYY.log      ← log diário (gerado em runtime)
-└── ffmpeg/bin/ffmpeg.exe    ← conversor local de áudio
+├── ffmpeg/bin/ffmpeg.exe    ← conversor local de áudio
+├── instalar.bat             ← instalador script (sem PyInstaller)
+├── build_app.spec           ← spec do PyInstaller para gerar .exe
+├── build_installer.bat      ← gera instalador completo (PyInstaller + Inno Setup)
+└── installer.iss            ← script Inno Setup para IPMadalena_Setup.exe
 ```
 
 ## Dependências Python
@@ -50,14 +56,24 @@ plyer
 ## Detalhes técnicos — baixar_audio.py
 
 - **Python:** `C:\Users\rasantos\AppData\Local\Programs\Python\Python312\python.exe`
+- **`BASE_DIR`:** detecta execução frozen (PyInstaller): `os.path.dirname(sys.executable)` se `sys.frozen`, senão `os.path.dirname(__file__)`
+- **`_ytdlp_cmd()`:** retorna caminho do yt-dlp bundled (`sys._MEIPASS/yt-dlp.exe`) quando frozen, senão `"yt-dlp"`
+- **`_LOCAL_FFMPEG`:** verifica `sys._MEIPASS/ffmpeg/bin/ffmpeg.exe` como fallback quando frozen
 - **yt-dlp:** usa `--dateafter` + `--break-on-reject` para parar a varredura ao passar da data alvo (o canal tem ~1300 vídeos — sem isso varre tudo); `--socket-timeout 30` em todos os comandos
 - **Listagem:** `--simulate --print "%(id)s|||%(title)s|||%(upload_date)s"` — varre sem baixar; após coletar, filtra por `upload_date == data_alvo` ou `upload_date == data_alvo + 1 dia` (lives publicadas com data posterior ao culto)
 - **Download:** URLs individuais por ID (`https://www.youtube.com/watch?v=<id>`); player_client `ios,android,web` — `tv_embedded` foi descontinuado pelo YouTube e não deve ser usado
+- **`download_selected()`:** aceita callback `on_download_progress(float)` chamado a cada linha `[download] X%` do yt-dlp; progresso normalizado entre vídeos: `(current_video + file_pct) / total_videos`; emite `(current_video + 1) / total_videos` ao detectar `[ExtractAudio]`
 - **Encoding do subprocess:** `_start_process()` injeta `PYTHONUTF8=1` e `PYTHONIOENCODING=utf-8` no ambiente do subprocesso para garantir que o yt-dlp escreva UTF-8 no stdout (o padrão Windows é cp1252, o que corromperia acentos)
 - **ffmpeg** instalado localmente em `ffmpeg/bin/`, referenciado via `--ffmpeg-location`
 - **Google Drive API v3** com OAuth2; token salvo em `credentials/token.pkl`
 - **Token corrompido:** `get_drive_service()` captura exceção no `pickle.load()`, remove o arquivo e força reautenticação; idem para falha no refresh
-- **Pasta raiz no Drive:** `1KfsI5zCDL4HZ2pdAWPFfAD3TugplzBez`
+- **`check_auth_status()`:** verifica se token existe e é válido (tenta refresh); retorna `True/False`; usado pela GUI para bloquear processamento sem autorização
+- **`run_auth(on_log=None)`:** chama `get_drive_service()` para forçar fluxo OAuth; callback de log opcional para a GUI
+- **`logout_drive()`:** remove `TOKEN_FILE`; exige nova autorização na próxima operação
+- **OAuth server:** `flow.run_local_server(host="127.0.0.1", port=8085)` — porta fixa para não conflitar com outros serviços
+- **`check_internet()`:** usa `socket.setdefaulttimeout(5)` com `finally: socket.setdefaulttimeout(None)` — sem o `finally`, o timeout global ficava ativo e causava falha no servidor OAuth após 5 segundos
+- **`load_config()` / `save_config()`:** `config.json` com campos `channel_url` e `drive_folder_id`; permite personalizar canal e pasta sem editar código
+- **Pasta raiz no Drive:** lida via `drive_folder_id` em `config.json` (padrão: `1KfsI5zCDL4HZ2pdAWPFfAD3TugplzBez`)
 - **Subpasta do mês:** localizada por nome fuzzy (aceita `Abril-2026`, `Abril 2026`, `Abr/2026`); se não encontrar, cria automaticamente
 - **Upload:** `AuthorizedSession` (google-auth / requests) + streaming via `_ProgressFile`; verificação de duplicatas antes de enviar
 - **`_ProgressFile`:** wrapper de arquivo com três responsabilidades separadas:
@@ -71,13 +87,29 @@ plyer
 ## Detalhes técnicos — app.py
 
 - **Framework:** `customtkinter` (dark mode) + `tkcalendar` para popup de calendário
+- **Janela:** 660×700px
 - **Thread safety:** `queue.Queue` para comunicação worker→GUI; polling com `self.after(100, _process_queue)`
 - **Cancelamento:** `threading.Event` passado a todas as fases; watchdog daemon termina o subprocess; `_check_cancel()` no loop de leitura do stdout
-- **Barras de progresso:** `progress_color=fg_color` para ocultar sem remover do layout; restauradas ao iniciar
-  - Upload: barra larga (progresso byte a byte via streaming)
-  - Etapas: barra estreita (148px), avança por status keywords via `SUBTASK_PROGRESS`
 - **Instância única:** porta TCP 47892 reservada via `_acquire_single_instance()`; segunda instância exibe alerta e encerra
 - **Log em arquivo:** `logs/DD-MM-YYYY.log` via `logging.basicConfig`; todo log/status/erro é gravado
+- **Auto-update yt-dlp:** thread daemon roda `update_ytdlp()` ao iniciar o app
+- **Primeira execução:** se `credentials/client_secret.json` não existe, janela principal fica oculta (`withdraw()`) e `SetupWizard` é aberto; ao concluir, `_on_wizard_complete()` chama `_check_auth_visibility()` e exibe a janela (`deiconify()`)
+- **Banner de autorização:** frame condicional no topo — aparece via `pack()` quando Drive não autorizado, some via `pack_forget()` quando autorizado; `_check_auth_visibility()` decide exibição
+- **Bloqueio de processamento:** `_start()` chama `check_auth_status()` antes de prosseguir; exibe aviso e retorna se não autorizado
+- **`_set_status(text, state)`:** atualiza `status_label` e `_status_dot`; estados: `idle` (cinza), `running` (azul), `done` (verde), `error` (vermelho)
+- **Barras de progresso (3 uniformes):**
+  - `download_bar` — progresso byte a byte via callback `on_download_progress`
+  - `conversion_bar` — animação suave `after(160ms)`, sobe até 90% enquanto "Convertendo", zera ao avançar de fase
+  - `upload_bar` — progresso byte a byte via streaming `_ProgressFile`
+  - Todas agrupadas em `_progress_frame`; `_hide_bars()` faz `pack_forget()` no frame inteiro; `_show_bars()` faz `pack()` antes de `_log_label`
+- **`_animate_conversion()`:** iniciada ao detectar "Convertendo" no status; incrementa barra em passos de 0,7% a cada 160ms até 90%; parada ao mudar de fase
+- **Tela de configurações (`SettingsWindow`):** `CTkToplevel` com 3 seções:
+  - Drive: status de autorização + botão Autorizar/Logout
+  - YouTube: campo de entrada para URL do canal
+  - Drive folder: campo de entrada para ID da pasta raiz
+  - `_refresh_auth_status()`, `_do_authorize()` (thread), `_do_logout()`, `_save()`
+- **`_open_settings()`:** cria `SettingsWindow`, vincula `<Destroy>` a `_check_auth_visibility()` para atualizar banner ao fechar
+- **Popup de seleção de vídeos:** `_cancelar()` + `popup.protocol("WM_DELETE_WINDOW", _cancelar)` — fechar a janela pelo X agora cancela corretamente em vez de travar
 - **Fluxo de execução:**
   1. `_worker_preflight` — verifica internet, disco, limpa resíduos, consulta histórico
   2. Popup de aviso se data já foi processada (pode continuar mesmo assim)
@@ -85,7 +117,66 @@ plyer
   4. Popup de seleção de vídeos (checkboxes, todos marcados por padrão)
   5. `_worker_phase2` — `download_selected()` + `upload_files()`
   6. `_on_done()` — salva histórico + notificação desktop via `plyer`
-- **Auto-update yt-dlp:** thread daemon roda `update_ytdlp()` ao iniciar o app
+- **Mensagens de fila:** `log`, `status`, `progress`, `download_progress`, `done`, `cancelled`, `error`, `preflight_error`, `history_warning`, `auth_done`, `auth_error`
+
+## Detalhes técnicos — setup_wizard.py
+
+`SetupWizard(ctk.CTkToplevel)` — wizard de primeira execução, aberto automaticamente quando `client_secret.json` não existe.
+
+**6 passos:**
+0. Boas-vindas
+1. Credenciais — file dialog, valida JSON com chave `"installed"` ou `"web"`, copia para `credentials/client_secret.json`
+2. Canal YouTube — URL do canal (salvo em `config.json`)
+3. Pasta Drive — ID da pasta raiz (salvo em `config.json`)
+4. Autorização Google — botão que chama `run_auth()` em thread separada; re-renderiza passo ao concluir
+5. Conclusão
+
+**Indicador de passos:** linha de dots coloridos — verde (concluído), azul (atual), cinza (pendente).
+
+**`_on_close()`:** se wizard não foi concluído, destrói a janela mestre (encerra o app).
+
+**`_finish()`:** `grab_release()` → `destroy()` → chama callback `on_complete`.
+
+## Instalação e Distribuição
+
+### instalar.bat — Instalação sem compilar
+
+Script bat para usuários finais que instalam direto do código-fonte:
+1. Verifica/instala Python 3.12 via `winget`
+2. Instala dependências pip (`yt-dlp`, `customtkinter`, `tkcalendar`, `google-api-python-client`, `google-auth-oauthlib`, `plyer`)
+3. Baixa ffmpeg de BtbN GitHub releases via PowerShell (`Invoke-WebRequest` + `Expand-Archive`)
+4. Cria atalho na área de trabalho via `WScript.Shell` apontando para `pythonw.exe app.py`
+5. Oferece abrir o app imediatamente
+
+### build_app.spec — PyInstaller
+
+Empacota o app em executável standalone `dist/IPMadalena/IPMadalena.exe`:
+- Detecta `yt-dlp.exe` via `shutil.which()` e inclui como binary
+- Inclui `ffmpeg/bin/ffmpeg.exe` local
+- `collect_all("customtkinter")` para assets de tema/imagens
+- `collect_data_files("babel")` para localização do tkcalendar
+- `hiddenimports` completo: google-auth, google-auth-oauthlib, googleapiclient, plyer.platforms.win, tkcalendar, babel
+- `console=False` — sem janela de terminal
+- `icon="icon.ico"` se existir
+
+### build_installer.bat — Geração do instalador
+
+Orquestra a geração completa:
+1. Verifica/instala PyInstaller
+2. Executa `pyinstaller build_app.spec --noconfirm --clean` → `dist/IPMadalena/`
+3. Detecta Inno Setup em `%ProgramFiles(x86)%` e `%ProgramFiles%`
+4. Executa `ISCC.exe installer.iss` → `dist/IPMadalena_Setup.exe`
+5. Se Inno Setup não encontrado, exibe aviso mas o bundle PyInstaller ainda pode ser distribuído como pasta
+
+### installer.iss — Inno Setup
+
+Gera `dist/IPMadalena_Setup.exe`:
+- `PrivilegesRequired=lowest` — instala sem admin
+- `DefaultDirName={autopf}\IPMadalena`
+- Atalhos em Start Menu + opcional na área de trabalho
+- `[Code]`: exibe mensagem na desinstalação preservando a pasta `credentials/`
+- `[UninstallDelete]`: remove `downloads/`, `logs/`, `__pycache__/` na desinstalação
+- Idioma: Português Brasileiro
 
 ## Comportamento especial — transmissões ao vivo
 
@@ -147,7 +238,10 @@ run_tests.bat
 - `downloads/` — pasta temporária de áudios
 - `logs/` — logs locais de execução
 - `historico.json` — estado local de datas processadas
-- `ffmpeg/` — binário grande; instalar localmente conforme `CONFIGURACAO.md`
+- `config.json` — configurações locais (canal, pasta Drive)
+- `ffmpeg/` — binário grande; instalar localmente
+- `dist/`, `build/` — artefatos de compilação PyInstaller
+- `*.exe`, `icon.ico` — binários
 
 **Fluxo de commit:**
 ```bash
@@ -223,3 +317,5 @@ O app baixa formato 18 (vídeo+áudio), extrai o áudio via ffmpeg e converte pa
 - Upload lento em rede doméstica (~0,05 MB/s) mas normal em hotspot 5G (~0,73 MB/s) → causa confirmada: roteador/ISP aplicando traffic shaping em uploads HTTPS não originados do browser; **workaround: usar hotspot**; investigar QoS do roteador e VPN
 - Cancelamento durante upload travava (next_chunk() bloqueava ~55s) → resolvido substituindo googleapiclient MediaFileUpload por streaming via `_ProgressFile` + `AuthorizedSession`
 - Log de upload poluído (1 linha por MB) → resolvido logando apenas nos marcos 25 %, 50 %, 75 % e na conclusão
+- OAuth timeout em 5 segundos (ERR_CONNECTION_REFUSED) → `check_internet()` definia `socket.setdefaulttimeout(5)` globalmente sem resetar; corrigido com `finally: socket.setdefaulttimeout(None)`
+- Fechar popup de seleção de vídeos travava o app → sem handler para `WM_DELETE_WINDOW`, `self._running` ficava `True` sem thread ativa; corrigido adicionando `_cancelar()` + `popup.protocol("WM_DELETE_WINDOW", _cancelar)`
