@@ -158,6 +158,58 @@ git push
 
 ---
 
+## Autenticação YouTube — Caminhos investigados e resultados
+
+Esta seção documenta todas as abordagens testadas para obter acesso autenticado ao YouTube via yt-dlp, com o objetivo de acessar formatos de áudio isolado (251/140) em vez do formato 18 (vídeo+áudio). **Não reabrir esses caminhos sem uma razão nova concreta.**
+
+### Contexto: por que formatos de áudio isolado importam
+
+| Formato | Tipo | Qualidade | Tamanho/hora |
+|---------|------|-----------|--------------|
+| 18 | MP4 vídeo+áudio | ~126kbps AAC | ~500 MB |
+| 140 | M4A áudio-only | 128kbps AAC | ~57 MB |
+| 251 | WebM áudio-only | ~136kbps Opus | ~61 MB |
+
+Formato 251 e 140 são preferíveis: menor download, melhor ou igual qualidade. O yt-dlp já tem `-f "251/140/18"` preparado no código para usar automaticamente quando houver acesso.
+
+### Abordagens testadas (todas falharam para lives)
+
+**1. bgutil-ytdlp-pot-provider** *(instalado, parcialmente útil)*
+- Plugin Python + servidor Node.js que gera GVS PO Tokens para o cliente `web`
+- Servidor instalado em `~/bgutil-ytdlp-pot-provider/server/` (porta 4416)
+- **Resultado:** gera token para `web`, mas o cliente `web` com PO Token ainda só acessa formato 18 para live stream replays. Clientes `ios` e `android` precisam de tokens GVS próprios que o bgutil não fornece
+- **Veredito:** útil como preparação para o futuro, não resolve o problema atual
+
+**2. Google OAuthLogin endpoint**
+- Tentativa: `GET https://accounts.google.com/accounts/OAuthLogin?access_token=<token>&service=youtube`
+- **Resultado:** HTTP 403 Forbidden — endpoint restrito a OAuth clients primeiro-party do Google (Chrome, apps Google). Não funciona para apps de terceiros
+- **Não tentar novamente**
+
+**3. AuthorizedSession (google-auth) → YouTube**
+- Tentativa: visitar `https://www.youtube.com/` com Bearer token OAuth, capturar cookies da resposta
+- **Resultado:** retorna apenas cookies anônimos/analytics (`GPS`, `YSC`, `VISITOR_INFO1_LIVE`) — não são cookies de sessão autenticada. Inúteis para o yt-dlp
+- **Não tentar novamente**
+
+**4. yt-dlp device auth (`--username oauth2 --password ""`)**
+- Fluxo de device code (Smart TV), sem browser
+- **Resultado:** removido pelo yt-dlp em novembro de 2024 porque o YouTube desativou esse método. Resulta em `ERROR: Login with OAuth is no longer supported`
+- **Não tentar novamente**
+
+**5. Escopo `youtube.readonly` no OAuth Drive existente**
+- Tentativa: adicionar escopo YouTube ao fluxo OAuth já existente (Drive) e usar o token resultante para qualquer das abordagens acima
+- **Resultado:** não ajuda — o problema não é autenticação com a API YouTube, mas sim obter cookies de sessão web do YouTube, que o Google não emite via OAuth de terceiros
+- **Não tentar novamente**
+
+### Único caminho viável não implementado
+
+**`--cookies-from-browser chrome`** (ou `edge`, `firefox`): lê cookies de sessão diretamente do browser instalado. Requer que o usuário esteja logado no YouTube no browser. Simples de implementar (1 flag no comando yt-dlp), mas cria dependência de browser aberto/logado. Adequado para uso pessoal, menos robusto para app compartilhado.
+
+### Estado atual
+
+O app baixa formato 18 (vídeo+áudio), extrai o áudio via ffmpeg e converte para MP3. O resultado final é qualitativamente equivalente. A seleção `-f "251/140/18"` já está no código — se autenticação via browser cookies for implementada no futuro, os formatos melhores serão usados automaticamente.
+
+---
+
 ## Problemas conhecidos / já resolvidos
 
 - Terminal Windows pode ter erro de encoding com títulos especiais → resolvido com `sys.stdout.reconfigure(encoding="utf-8")` no processo principal e `PYTHONUTF8=1` + `PYTHONIOENCODING=utf-8` injetados no ambiente dos subprocessos yt-dlp
