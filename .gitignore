@@ -1,0 +1,26 @@
+# Credenciais e tokens — NUNCA commitar
+credentials/client_secret.json
+credentials/token.pkl
+
+# Gerados em runtime
+downloads/
+logs/
+historico.json
+
+# Binários locais
+ffmpeg/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+
+# Sistema
+.DS_Store
+Thumbs.db
