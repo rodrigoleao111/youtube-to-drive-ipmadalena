@@ -573,6 +573,7 @@ def list_videos(date_str, on_log=None, on_status=None, cancel_event=None):
         "--dateafter", dateafter_str,
         "--break-on-reject",
         "--socket-timeout", "30",
+        "--encoding", "utf-8",
         channel_url,
     ]
 
@@ -645,6 +646,7 @@ def download_selected(videos, on_log=None, on_status=None,
         "--audio-quality", "0",
         "--output", output_template,
         "--socket-timeout", "30",
+        "--encoding", "utf-8",
         "--extractor-args", "youtube:player_client=ios,android,web",
     ]
     if FFMPEG_LOCATION:
