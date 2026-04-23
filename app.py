@@ -7,6 +7,7 @@ import logging
 import os
 import queue
 import socket
+import sys
 import threading
 from datetime import datetime
 
@@ -79,6 +80,14 @@ class App(ctk.CTk):
         self.title("IPMadalena — Cultos para o Drive")
         self.geometry("660x700")
         self.resizable(False, False)
+
+        # Ícone da janela e da barra de tarefas
+        _icon = os.path.join(
+            getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__))),
+            "icon.ico",
+        )
+        if os.path.exists(_icon):
+            self.iconbitmap(_icon)
 
         self._queue        = queue.Queue()
         self._running      = False

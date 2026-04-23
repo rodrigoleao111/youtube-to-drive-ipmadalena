@@ -254,6 +254,11 @@ def _start_process(cmd, cancel_event=None):
     env["PYTHONUTF8"] = "1"
     env["PYTHONIOENCODING"] = "utf-8"
 
+    # No Windows, impede que o yt-dlp abra uma janela de console visível
+    extra = {}
+    if sys.platform == "win32":
+        extra["creationflags"] = subprocess.CREATE_NO_WINDOW
+
     process = subprocess.Popen(
         cmd,
         stdout=subprocess.PIPE,
@@ -262,6 +267,7 @@ def _start_process(cmd, cancel_event=None):
         encoding="utf-8",
         errors="replace",
         env=env,
+        **extra,
     )
     if cancel_event is not None:
         def _watchdog():

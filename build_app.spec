@@ -48,6 +48,7 @@ a = Analysis(
     binaries=extra_binaries + ctk_bins,
     datas=ctk_datas + babel_datas + [
         ("setup_wizard.py", "."),
+        ("icon.ico", "."),          # ícone da janela (barra de tarefas)
     ],
     hiddenimports=ctk_hidden + [
         "tkcalendar",
