@@ -19,6 +19,7 @@ DefaultGroupName={#AppShortName}
 AllowNoIcons=yes
 OutputDir=dist
 OutputBaseFilename=IPMadalena_Setup
+SetupIconFile=icon.ico
 Compression=lzma2/ultra64
 SolidCompression=yes
 WizardStyle=modern

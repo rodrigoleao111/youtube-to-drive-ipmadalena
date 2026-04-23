@@ -24,7 +24,10 @@ venv/
 dist/
 build/
 *.exe
-icon.ico
+yt-dlp.exe
+
+# Ícone: versionado no repositório (não ignorar)
+# icon.ico → rastreado pelo git
 
 # Sistema
 .DS_Store
