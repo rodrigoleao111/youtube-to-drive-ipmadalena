@@ -69,7 +69,6 @@ ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
 
 
-
 # ---------------------------------------------------------------------------
 # Janela principal
 # ---------------------------------------------------------------------------
@@ -885,6 +884,7 @@ class App(ctk.CTk):
         self._running = False
         self._converting = False
         self._set_buttons_running(False)
+        self._hide_bars()
         self._set_status("Erro — veja o log abaixo", "error")
         self._append_log(f"ERRO: {msg}")
         _file_log(f"ERRO: {msg}")

@@ -172,8 +172,6 @@ class SetupWizard(ctk.CTkToplevel):
         if subtitle:
             ctk.CTkLabel(self._content, text=subtitle,
                          font=ctk.CTkFont(size=12), text_color="gray").pack(anchor="w", pady=(2, 14))
-        else:
-            self._content.pack_configure()  # just spacing
 
     def _add_fb(self):
         self._fb = ctk.CTkLabel(self._content, text="",
@@ -306,7 +304,7 @@ class SetupWizard(ctk.CTkToplevel):
             )
             self._auth_btn.pack(anchor="w")
             self._auth_lbl = ctk.CTkLabel(
-                self._content, text="Aguardando autorização...",
+                self._content, text="Clique no botão para abrir o navegador.",
                 font=ctk.CTkFont(size=12), text_color="gray",
             )
             self._auth_lbl.pack(anchor="w", pady=(12, 0))

@@ -63,7 +63,8 @@ plyer
 - **Listagem:** `--simulate --print "%(id)s|||%(title)s|||%(upload_date)s"` — varre sem baixar; após coletar, filtra por `upload_date == data_alvo` ou `upload_date == data_alvo + 1 dia` (lives publicadas com data posterior ao culto)
 - **Download:** URLs individuais por ID (`https://www.youtube.com/watch?v=<id>`); player_client `ios,android,web` — `tv_embedded` foi descontinuado pelo YouTube e não deve ser usado
 - **`download_selected()`:** aceita callback `on_download_progress(float)` chamado a cada linha `[download] X%` do yt-dlp; progresso normalizado entre vídeos: `(current_video + file_pct) / total_videos`; emite `(current_video + 1) / total_videos` ao detectar `[ExtractAudio]`
-- **Encoding do subprocess:** `_start_process()` injeta `PYTHONUTF8=1` e `PYTHONIOENCODING=utf-8` no ambiente do subprocesso para garantir que o yt-dlp escreva UTF-8 no stdout (o padrão Windows é cp1252, o que corromperia acentos)
+- **Encoding do subprocess:** `_start_process()` injeta `PYTHONUTF8=1` e `PYTHONIOENCODING=utf-8` no ambiente — funciona para yt-dlp script; para o standalone, usa-se `--encoding utf-8` diretamente nos comandos yt-dlp (`list_videos` e `download_selected`), pois o standalone ignora variáveis de ambiente do processo pai
+- **Janela de console oculta:** `_start_process()` usa `creationflags=subprocess.CREATE_NO_WINDOW` no Windows para que o yt-dlp não abra janela preta visível; o mesmo flag é aplicado em todos os `subprocess.run()` de `update_ytdlp()`
 - **ffmpeg** instalado localmente em `ffmpeg/bin/`, referenciado via `--ffmpeg-location`
 - **Google Drive API v3** com OAuth2; token salvo em `credentials/token.pkl`
 - **Token corrompido:** `get_drive_service()` captura exceção no `pickle.load()`, remove o arquivo e força reautenticação; idem para falha no refresh
@@ -102,7 +103,8 @@ plyer
   - `conversion_bar` — animação suave `after(160ms)`, sobe até 90% enquanto "Convertendo", zera ao avançar de fase
   - `upload_bar` — progresso byte a byte via streaming `_ProgressFile`
   - Todas agrupadas em `_progress_frame`; `_hide_bars()` faz `pack_forget()` no frame inteiro; `_show_bars()` faz `pack()` antes de `_log_label`
-- **`_animate_conversion()`:** iniciada ao detectar "Convertendo" no status; incrementa barra em passos de 0,7% a cada 160ms até 90%; parada ao mudar de fase
+- **`_animate_conversion()`:** iniciada ao detectar "Convertendo" no status; incrementa barra em passos de 1,8% a cada 160ms até 90%; parada ao mudar de fase
+- **Ícone da janela:** `self.iconbitmap()` chamado no `__init__` usando `sys._MEIPASS` quando frozen, `__file__` quando script — garante ícone correto na barra de tarefas; `icon.ico` incluído nos `datas` do PyInstaller
 - **Tela de configurações (`SettingsWindow`):** `CTkToplevel` com 3 seções:
   - Drive: status de autorização + botão Autorizar/Logout
   - YouTube: campo de entrada para URL do canal
@@ -151,8 +153,9 @@ Script bat para usuários finais que instalam direto do código-fonte:
 ### build_app.spec — PyInstaller
 
 Empacota o app em executável standalone `dist/IPMadalena/IPMadalena.exe`:
-- Detecta `yt-dlp.exe` via `shutil.which()` e inclui como binary
+- Prioriza `yt-dlp.exe` standalone local (baixado por `build_installer.bat`); fallback para `shutil.which()` — o launcher pip **não funciona** fora do ambiente Python e não deve ser usado
 - Inclui `ffmpeg/bin/ffmpeg.exe` local
+- Inclui `icon.ico` nos `datas` para que `app.py` possa chamá-lo via `sys._MEIPASS`
 - `collect_all("customtkinter")` para assets de tema/imagens
 - `collect_data_files("babel")` para localização do tkcalendar
 - `hiddenimports` completo: google-auth, google-auth-oauthlib, googleapiclient, plyer.platforms.win, tkcalendar, babel
@@ -161,11 +164,11 @@ Empacota o app em executável standalone `dist/IPMadalena/IPMadalena.exe`:
 
 ### build_installer.bat — Geração do instalador
 
-Orquestra a geração completa:
-1. Verifica/instala PyInstaller
-2. Executa `pyinstaller build_app.spec --noconfirm --clean` → `dist/IPMadalena/`
-3. Detecta Inno Setup em `%ProgramFiles(x86)%` e `%ProgramFiles%`
-4. Executa `ISCC.exe installer.iss` → `dist/IPMadalena_Setup.exe`
+Orquestra a geração completa em 4 passos:
+1. Baixa/atualiza `yt-dlp.exe` standalone do GitHub releases (`yt-dlp/yt-dlp`) — necessário antes do PyInstaller
+2. Verifica/instala PyInstaller
+3. Executa `pyinstaller build_app.spec --noconfirm --clean` → `dist/IPMadalena/`
+4. Detecta Inno Setup em `%ProgramFiles(x86)%`, `%ProgramFiles%` e `%LOCALAPPDATA%\Programs` (winget instala sem admin); executa `ISCC.exe installer.iss` → `dist/IPMadalena_Setup.exe`
 5. Se Inno Setup não encontrado, exibe aviso mas o bundle PyInstaller ainda pode ser distribuído como pasta
 
 ### installer.iss — Inno Setup
@@ -241,7 +244,8 @@ run_tests.bat
 - `config.json` — configurações locais (canal, pasta Drive)
 - `ffmpeg/` — binário grande; instalar localmente
 - `dist/`, `build/` — artefatos de compilação PyInstaller
-- `*.exe`, `icon.ico` — binários
+- `*.exe` — binários gerados (inclui `yt-dlp.exe` standalone baixado pelo build)
+- `icon.ico` — **rastreado** no repositório (removido do .gitignore)
 
 **Fluxo de commit:**
 ```bash
@@ -319,3 +323,8 @@ O app baixa formato 18 (vídeo+áudio), extrai o áudio via ffmpeg e converte pa
 - Log de upload poluído (1 linha por MB) → resolvido logando apenas nos marcos 25 %, 50 %, 75 % e na conclusão
 - OAuth timeout em 5 segundos (ERR_CONNECTION_REFUSED) → `check_internet()` definia `socket.setdefaulttimeout(5)` globalmente sem resetar; corrigido com `finally: socket.setdefaulttimeout(None)`
 - Fechar popup de seleção de vídeos travava o app → sem handler para `WM_DELETE_WINDOW`, `self._running` ficava `True` sem thread ativa; corrigido adicionando `_cancelar()` + `popup.protocol("WM_DELETE_WINDOW", _cancelar)`
+- yt-dlp não encontrava vídeos no exe instalado → `shutil.which()` retornava o launcher pip (não funciona fora do ambiente Python); corrigido baixando o standalone oficial e priorizando-o no `build_app.spec`
+- Encoding corrompido no exe instalado (`Evid?ncia`) → `PYTHONUTF8=1` é ignorado pelo standalone yt-dlp (PyInstaller próprio); corrigido passando `--encoding utf-8` diretamente nos comandos yt-dlp
+- Janela preta do yt-dlp aparecia na inicialização → `update_ytdlp()` usava `subprocess.run()` sem `CREATE_NO_WINDOW`; corrigido aplicando o flag em todos os `subprocess.run()` da função
+- Ícone errado na barra de tarefas → faltava `self.iconbitmap()` no `__init__` e `icon.ico` nos `datas` do PyInstaller; corrigido nas duas frentes
+- Fundo branco no ícone → PNG gerado com canvas branco; corrigido com flood-fill BFS a partir dos 4 cantos para tornar área externa transparente sem afetar o branco interno (cruz)

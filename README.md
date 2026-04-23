@@ -10,10 +10,10 @@ Existem duas formas de instalar o app. Escolha a que melhor se encaixa no seu pe
 
 ### Opção 1 — Instalador Windows (recomendado para usuários finais)
 
-> Não requer Python, nem conhecimento técnico.
+> Não requer Python, nem conhecimento técnico. Inclui yt-dlp e ffmpeg embutidos.
 
-1. Baixe o arquivo `IPMadalena_Setup.exe` (disponível na seção de releases)
-2. Execute o instalador e siga os passos
+1. Baixe o arquivo `IPMadalena_Setup.exe`
+2. Execute o instalador e siga os passos (não requer permissão de administrador)
 3. Um atalho **IPMadalena** será criado na área de trabalho
 4. Na primeira execução, um **assistente de configuração** irá guiá-lo pelos passos necessários
 
@@ -140,10 +140,16 @@ youtube_to_drive/
 
 Para gerar o `IPMadalena_Setup.exe`:
 
-1. Instale o [Inno Setup 6](https://jrsoftware.org/isdl.php)
+1. Instale o [Inno Setup 6](https://jrsoftware.org/isdl.php) (pode ser via `winget install JRSoftware.InnoSetup`)
 2. Execute `build_installer.bat` com duplo clique
 
-O script cuida do resto: empacota com PyInstaller e gera o instalador. O arquivo final fica em `dist\IPMadalena_Setup.exe`.
+O script cuida de tudo automaticamente em 4 passos:
+1. Baixa o `yt-dlp.exe` standalone do GitHub (necessário para bundle correto)
+2. Instala/verifica PyInstaller
+3. Empacota o app com PyInstaller → `dist\IPMadalena\`
+4. Gera o instalador com Inno Setup → `dist\IPMadalena_Setup.exe`
+
+> **Importante:** o `build_installer.bat` deve sempre ser usado em vez de rodar o PyInstaller manualmente — ele garante que o `yt-dlp.exe` standalone correto seja incluído no bundle.
 
 > Sem o Inno Setup, o bundle em `dist\IPMadalena\` pode ser distribuído comprimido como `.zip`.
 

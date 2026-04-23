@@ -196,8 +196,7 @@ def update_ytdlp(on_log=None):
             )
             if result.returncode == 0:
                 output = result.stdout + result.stderr
-                import re as _re
-                m = _re.search(r"(\d{4}\.\d{2}\.\d{2})", output)
+                m = re.search(r"(\d{4}\.\d{2}\.\d{2})", output)
                 v = m.group(1) if m else "?"
                 log(f"yt-dlp verificado — versão {v}.")
             else:
@@ -332,7 +331,7 @@ def get_drive_service(on_log=None):
             if not os.path.exists(CREDENTIALS_FILE):
                 raise FileNotFoundError(
                     f"Credenciais não encontradas:\n{CREDENTIALS_FILE}\n\n"
-                    "Siga as instruções em CONFIGURACAO.md."
+                    "Abra o aplicativo e siga o assistente de configuração inicial."
                 )
             log("Abrindo navegador para autenticação...")
             flow = InstalledAppFlow.from_client_secrets_file(CREDENTIALS_FILE, SCOPES)
