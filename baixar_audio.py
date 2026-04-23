@@ -180,15 +180,21 @@ def update_ytdlp(on_log=None):
     - Script normal: atualiza via pip.
     """
     log = on_log if callable(on_log) else _noop
+
+    # No Windows, impede janela de console visível em qualquer subprocess.run
+    _no_window = {}
+    if sys.platform == "win32":
+        _no_window["creationflags"] = subprocess.CREATE_NO_WINDOW
+
     try:
         if getattr(sys, "frozen", False):
             # Versão empacotada: yt-dlp standalone suporta auto-update com -U
             result = subprocess.run(
                 [_ytdlp_cmd(), "-U"],
                 capture_output=True, text=True, timeout=60,
+                **_no_window,
             )
             if result.returncode == 0:
-                # Extrai versão da saída (linha "yt-dlp is up to date (YYYY.MM.DD)")
                 output = result.stdout + result.stderr
                 import re as _re
                 m = _re.search(r"(\d{4}\.\d{2}\.\d{2})", output)
@@ -201,11 +207,13 @@ def update_ytdlp(on_log=None):
             result = subprocess.run(
                 [sys.executable, "-m", "pip", "install", "--upgrade", "yt-dlp", "-q"],
                 capture_output=True, text=True, timeout=60,
+                **_no_window,
             )
             if result.returncode == 0:
                 ver = subprocess.run(
                     [_ytdlp_cmd(), "--version"],
                     capture_output=True, text=True, timeout=10,
+                    **_no_window,
                 )
                 v = ver.stdout.strip() if ver.returncode == 0 else "?"
                 log(f"yt-dlp atualizado — versão {v}.")
