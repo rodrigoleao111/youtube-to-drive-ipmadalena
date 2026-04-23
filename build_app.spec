@@ -13,13 +13,21 @@ from PyInstaller.utils.hooks import collect_all, collect_data_files
 
 block_cipher = None
 
-# ── yt-dlp: incluir executável do PATH ───────────────────────────────────────
-_ytdlp = shutil.which("yt-dlp") or shutil.which("yt-dlp.exe")
+# ── yt-dlp: preferir standalone local (baixado por build_installer.bat) ──────
+# O launcher pip (Scripts/yt-dlp.exe) não funciona fora do ambiente Python.
+# O binário standalone (github.com/yt-dlp/yt-dlp/releases) é auto-suficiente.
+_ytdlp_local = os.path.join(".", "yt-dlp.exe")
+if os.path.exists(_ytdlp_local):
+    _ytdlp = _ytdlp_local
+else:
+    _ytdlp = shutil.which("yt-dlp") or shutil.which("yt-dlp.exe")
+
 extra_binaries = []
 if _ytdlp:
     extra_binaries.append((_ytdlp, "."))
+    print(f"INFO: bundling yt-dlp de: {_ytdlp}")
 else:
-    print("AVISO: yt-dlp não encontrado no PATH. Instale com: pip install yt-dlp")
+    print("AVISO: yt-dlp não encontrado. Execute build_installer.bat para baixar o standalone.")
 
 # ── ffmpeg: incluir do diretório local ───────────────────────────────────────
 _ffmpeg = os.path.join("ffmpeg", "bin", "ffmpeg.exe")

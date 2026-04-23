@@ -174,23 +174,43 @@ def cleanup_downloads(on_log=None):
 
 
 def update_ytdlp(on_log=None):
-    """Atualiza o yt-dlp para a versão mais recente via pip (silencioso)."""
+    """Atualiza o yt-dlp para a versão mais recente.
+
+    - Frozen (exe instalado): usa o auto-update nativo do yt-dlp standalone (-U).
+    - Script normal: atualiza via pip.
+    """
     log = on_log if callable(on_log) else _noop
     try:
-        result = subprocess.run(
-            [sys.executable, "-m", "pip", "install", "--upgrade", "yt-dlp", "-q"],
-            capture_output=True, text=True, timeout=60,
-        )
-        if result.returncode == 0:
-            # Descobre a versão instalada
-            ver = subprocess.run(
-                ["yt-dlp", "--version"],
-                capture_output=True, text=True, timeout=10,
+        if getattr(sys, "frozen", False):
+            # Versão empacotada: yt-dlp standalone suporta auto-update com -U
+            result = subprocess.run(
+                [_ytdlp_cmd(), "-U"],
+                capture_output=True, text=True, timeout=60,
             )
-            v = ver.stdout.strip() if ver.returncode == 0 else "?"
-            log(f"yt-dlp atualizado — versão {v}.")
+            if result.returncode == 0:
+                # Extrai versão da saída (linha "yt-dlp is up to date (YYYY.MM.DD)")
+                output = result.stdout + result.stderr
+                import re as _re
+                m = _re.search(r"(\d{4}\.\d{2}\.\d{2})", output)
+                v = m.group(1) if m else "?"
+                log(f"yt-dlp verificado — versão {v}.")
+            else:
+                log("Aviso: não foi possível verificar atualização do yt-dlp.")
         else:
-            log("Aviso: não foi possível atualizar o yt-dlp.")
+            # Versão script: atualiza via pip
+            result = subprocess.run(
+                [sys.executable, "-m", "pip", "install", "--upgrade", "yt-dlp", "-q"],
+                capture_output=True, text=True, timeout=60,
+            )
+            if result.returncode == 0:
+                ver = subprocess.run(
+                    [_ytdlp_cmd(), "--version"],
+                    capture_output=True, text=True, timeout=10,
+                )
+                v = ver.stdout.strip() if ver.returncode == 0 else "?"
+                log(f"yt-dlp atualizado — versão {v}.")
+            else:
+                log("Aviso: não foi possível atualizar o yt-dlp.")
     except Exception as e:
         log(f"Aviso: erro ao verificar atualização do yt-dlp: {e}")
 

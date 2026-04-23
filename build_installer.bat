@@ -13,8 +13,26 @@ echo    IPMadalena — Gerando instalador Windows
 echo  ============================================================
 echo.
 
+:: ── Baixar yt-dlp standalone ─────────────────────────────────────────────────
+echo  [1/4] Verificando yt-dlp standalone...
+if exist "%APP_DIR%\yt-dlp.exe" (
+    echo  Atualizando yt-dlp.exe existente...
+    "%APP_DIR%\yt-dlp.exe" -U >nul 2>&1
+    echo  OK.
+) else (
+    echo  Baixando yt-dlp standalone do GitHub...
+    powershell -ExecutionPolicy Bypass -Command ^
+        "Invoke-WebRequest -Uri 'https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe' -OutFile '%APP_DIR%\yt-dlp.exe' -UseBasicParsing"
+    if errorlevel 1 (
+        echo  ERRO: Falha ao baixar yt-dlp.exe.
+        pause & exit /b 1
+    )
+    echo  OK.
+)
+
 :: ── Verificar PyInstaller ────────────────────────────────────────────────────
-echo  [1/3] Verificando PyInstaller...
+echo.
+echo  [2/4] Verificando PyInstaller...
 pyinstaller --version >nul 2>&1
 if errorlevel 1 (
     echo  Instalando PyInstaller...
@@ -28,7 +46,7 @@ echo  OK.
 
 :: ── Executar PyInstaller ─────────────────────────────────────────────────────
 echo.
-echo  [2/3] Empacotando aplicativo com PyInstaller...
+echo  [3/4] Empacotando aplicativo com PyInstaller...
 echo  (Isso pode levar alguns minutos)
 echo.
 cd /d "%APP_DIR%"
@@ -43,7 +61,7 @@ echo  Bundle gerado em: dist\IPMadalena\
 
 :: ── Executar Inno Setup ──────────────────────────────────────────────────────
 echo.
-echo  [3/3] Gerando instalador com Inno Setup...
+echo  [4/4] Gerando instalador com Inno Setup...
 
 :: Procura o Inno Setup em locais comuns
 set "ISCC="
