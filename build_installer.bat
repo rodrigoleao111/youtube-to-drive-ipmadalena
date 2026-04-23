@@ -51,6 +51,8 @@ if exist "%ProgramFiles(x86)%\Inno Setup 6\ISCC.exe" ^
     set "ISCC=%ProgramFiles(x86)%\Inno Setup 6\ISCC.exe"
 if exist "%ProgramFiles%\Inno Setup 6\ISCC.exe" ^
     set "ISCC=%ProgramFiles%\Inno Setup 6\ISCC.exe"
+if exist "%LOCALAPPDATA%\Programs\Inno Setup 6\ISCC.exe" ^
+    set "ISCC=%LOCALAPPDATA%\Programs\Inno Setup 6\ISCC.exe"
 
 if "%ISCC%"=="" (
     echo.
