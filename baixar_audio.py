@@ -36,6 +36,18 @@ _DEFAULT_CHANNEL_URL    = "https://www.youtube.com/@IPMadalena/streams"
 _DEFAULT_DRIVE_FOLDER_ID = "1KfsI5zCDL4HZ2pdAWPFfAD3TugplzBez"
 SCOPES                  = ["https://www.googleapis.com/auth/drive"]
 
+# Credenciais OAuth embutidas — o usuário não precisa distribuir client_secret.json.
+# Geradas no Google Cloud Console do projeto ipmadalena-drive.
+_OAUTH_CLIENT_CONFIG = {
+    "installed": {
+        "client_id":     "435847172721-8rsq01h21sjmqpd023hkkb5suct5lsmi.apps.googleusercontent.com",
+        "client_secret": "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",
+        "auth_uri":      "https://accounts.google.com/o/oauth2/auth",
+        "token_uri":     "https://oauth2.googleapis.com/token",
+        "redirect_uris": ["http://localhost"],
+    }
+}
+
 # Quando empacotado com PyInstaller, sys.executable aponta para o .exe gerado.
 # Dados do usuário (credentials/, downloads/, etc.) ficam sempre ao lado do .exe.
 if getattr(sys, "frozen", False):
@@ -328,13 +340,8 @@ def get_drive_service(on_log=None):
                 creds = None
 
         if not creds or not creds.valid:
-            if not os.path.exists(CREDENTIALS_FILE):
-                raise FileNotFoundError(
-                    f"Credenciais não encontradas:\n{CREDENTIALS_FILE}\n\n"
-                    "Abra o aplicativo e siga o assistente de configuração inicial."
-                )
             log("Abrindo navegador para autenticação...")
-            flow = InstalledAppFlow.from_client_secrets_file(CREDENTIALS_FILE, SCOPES)
+            flow = InstalledAppFlow.from_client_config(_OAUTH_CLIENT_CONFIG, SCOPES)
             creds = flow.run_local_server(host="127.0.0.1", port=8085)
 
         with open(TOKEN_FILE, "wb") as f:

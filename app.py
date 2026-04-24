@@ -100,8 +100,8 @@ class App(ctk.CTk):
         # Inicialização em background: atualizar yt-dlp
         threading.Thread(target=self._init_update_ytdlp, daemon=True).start()
 
-        # Primeira execução: abre wizard de configuração se credentials ausentes
-        if not os.path.exists(baixar_audio.CREDENTIALS_FILE):
+        # Primeira execução: abre wizard de configuração se ainda não foi autorizado
+        if not os.path.exists(baixar_audio.TOKEN_FILE):
             self.withdraw()
             SetupWizard(self, on_complete=self._on_wizard_complete)
         else:

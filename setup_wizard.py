@@ -1,13 +1,9 @@
 """
 Assistente de configuração inicial — IPMadalena Cultos para o Drive.
-Executado automaticamente quando client_secret.json não está presente.
+Executado automaticamente na primeira execução (antes da autorização Google).
 """
 
-import json
-import os
-import shutil
 import threading
-from tkinter import filedialog
 
 import customtkinter as ctk
 
@@ -15,11 +11,10 @@ import baixar_audio
 
 
 class SetupWizard(ctk.CTkToplevel):
-    """Wizard modal de configuração inicial em 6 passos."""
+    """Wizard modal de configuração inicial em 5 passos."""
 
     _STEPS = [
         "Boas-vindas",
-        "Credenciais",
         "Canal YouTube",
         "Pasta Drive",
         "Autorização",
@@ -36,7 +31,6 @@ class SetupWizard(ctk.CTkToplevel):
 
         self._on_complete = on_complete
         self._step        = 0
-        self._creds_src   = None          # caminho do client_secret.json selecionado
         self._authorized  = baixar_audio.check_auth_status()
         self._fb          = None          # referência ao feedback label do passo atual
 
@@ -123,32 +117,25 @@ class SetupWizard(ctk.CTkToplevel):
             state="normal",
         )
 
-        [self._s0, self._s1, self._s2, self._s3, self._s4, self._s5][step]()
+        [self._s0, self._s1, self._s2, self._s3, self._s4][step]()
 
     def _go_next(self):
         # Validação e persistência de cada passo
-        if self._step == 1:   # credenciais
-            if not self._creds_src:
-                self._set_fb("Selecione o arquivo de credenciais antes de continuar.", error=True)
-                return
-            os.makedirs(os.path.dirname(baixar_audio.CREDENTIALS_FILE), exist_ok=True)
-            shutil.copy2(self._creds_src, baixar_audio.CREDENTIALS_FILE)
-
-        elif self._step == 2:  # canal
+        if self._step == 1:   # canal
             channel = self._channel_entry.get().strip()
             if not channel:
                 self._set_fb("Informe a URL do canal.", error=True)
                 return
             baixar_audio.save_config(channel_url=channel)
 
-        elif self._step == 3:  # pasta
+        elif self._step == 2:  # pasta
             folder = self._folder_entry.get().strip()
             if not folder:
                 self._set_fb("Informe o ID da pasta.", error=True)
                 return
             baixar_audio.save_config(drive_folder_id=folder)
 
-        elif self._step == 4:  # auth
+        elif self._step == 3:  # auth
             if not self._authorized:
                 self._set_fb("Autorize o acesso ao Google Drive antes de continuar.", error=True)
                 return
@@ -198,8 +185,7 @@ class SetupWizard(ctk.CTkToplevel):
             wraplength=520, justify="left", font=ctk.CTkFont(size=12),
             text=(
                 "Este assistente irá guiá-lo pela configuração inicial do aplicativo.\n"
-                "O processo leva cerca de 5 minutos e inclui:\n\n"
-                "  • Configuração das credenciais do Google\n"
+                "O processo leva cerca de 2 minutos e inclui:\n\n"
                 "  • Definição do canal do YouTube a ser monitorado\n"
                 "  • Configuração da pasta de destino no Google Drive\n"
                 "  • Autorização de acesso ao Google Drive"
@@ -207,33 +193,6 @@ class SetupWizard(ctk.CTkToplevel):
         ).pack(anchor="w")
 
     def _s1(self):
-        """Credenciais Google."""
-        self._section("Credenciais do Google", "Arquivo client_secret.json")
-        ctk.CTkLabel(
-            self._content,
-            wraplength=520, justify="left", font=ctk.CTkFont(size=12),
-            text=(
-                "Para usar o aplicativo, você precisa do arquivo de credenciais "
-                "fornecido pelo administrador do sistema (client_secret.json).\n\n"
-                "Se você não possui este arquivo, entre em contato com o administrador "
-                "antes de continuar."
-            ),
-        ).pack(anchor="w", pady=(0, 16))
-
-        ctk.CTkButton(self._content, text="Selecionar arquivo...", width=200,
-                      command=self._browse_creds).pack(anchor="w")
-
-        ok = self._creds_src is not None
-        ctk.CTkLabel(
-            self._content,
-            text=("✓  " + os.path.basename(self._creds_src)) if ok else "○  Nenhum arquivo selecionado",
-            font=ctk.CTkFont(size=12),
-            text_color="#2fa84f" if ok else "gray",
-        ).pack(anchor="w", pady=(10, 0))
-
-        self._add_fb()
-
-    def _s2(self):
         """Canal do YouTube."""
         self._section("Canal do YouTube", "URL do canal a ser monitorado")
         cfg = baixar_audio.load_config()
@@ -252,7 +211,7 @@ class SetupWizard(ctk.CTkToplevel):
                      font=ctk.CTkFont(size=11), text_color="gray").pack(anchor="w")
         self._add_fb()
 
-    def _s3(self):
+    def _s2(self):
         """Pasta do Google Drive."""
         self._section("Pasta do Google Drive", "ID da pasta raiz de destino")
         cfg = baixar_audio.load_config()
@@ -277,7 +236,7 @@ class SetupWizard(ctk.CTkToplevel):
         self._folder_entry.pack(fill="x")
         self._add_fb()
 
-    def _s4(self):
+    def _s3(self):
         """Autorização Google Drive."""
         self._section("Autorização do Google Drive", "Permitir acesso à sua conta Google")
         ctk.CTkLabel(
@@ -311,7 +270,7 @@ class SetupWizard(ctk.CTkToplevel):
 
         self._add_fb()
 
-    def _s5(self):
+    def _s4(self):
         """Concluído."""
         self._back_btn.configure(state="disabled")
         ctk.CTkLabel(self._content, text="✓  Configuração concluída!",
@@ -330,30 +289,6 @@ class SetupWizard(ctk.CTkToplevel):
                 "  4. Aguarde o download e o envio ao Google Drive"
             ),
         ).pack(anchor="w")
-
-    # -----------------------------------------------------------------------
-    # Seleção de credenciais
-    # -----------------------------------------------------------------------
-
-    def _browse_creds(self):
-        path = filedialog.askopenfilename(
-            parent=self,
-            title="Selecionar client_secret.json",
-            filetypes=[("JSON", "*.json"), ("Todos os arquivos", "*.*")],
-        )
-        if not path:
-            return
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            if "installed" not in data and "web" not in data:
-                self._set_fb("Arquivo inválido — não parece ser um client_secret.json.", error=True)
-                return
-        except Exception:
-            self._set_fb("Não foi possível ler o arquivo. Verifique se é um JSON válido.", error=True)
-            return
-        self._creds_src = path
-        self._show_step(self._step)   # re-renderiza para mostrar o nome do arquivo
 
     # -----------------------------------------------------------------------
     # Autorização OAuth

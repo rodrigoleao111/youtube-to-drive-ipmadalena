@@ -27,12 +27,11 @@ python baixar_audio.py 19/04/2026
 youtube_to_drive/
 ├── app.py                   ← interface gráfica (customtkinter)
 ├── baixar_audio.py          ← módulo principal (lógica + CLI)
-├── setup_wizard.py          ← wizard de primeira execução (6 passos)
+├── setup_wizard.py          ← wizard de primeira execução (5 passos)
 ├── historico.json           ← datas já processadas (gerado em runtime)
 ├── config.json              ← canal YouTube + pasta Drive (gerado em runtime)
 ├── credentials/
-│   ├── client_secret.json   ← credenciais OAuth do Google
-│   └── token.pkl            ← token salvo (gerado na 1ª execução)
+│   └── token.pkl            ← token OAuth salvo (gerado na 1ª execução)
 ├── downloads/               ← pasta temporária, limpa após upload
 ├── logs/DD-MM-YYYY.log      ← log diário (gerado em runtime)
 ├── ffmpeg/bin/ffmpeg.exe    ← conversor local de áudio
@@ -94,7 +93,7 @@ plyer
 - **Instância única:** porta TCP 47892 reservada via `_acquire_single_instance()`; segunda instância exibe alerta e encerra
 - **Log em arquivo:** `logs/DD-MM-YYYY.log` via `logging.basicConfig`; todo log/status/erro é gravado
 - **Auto-update yt-dlp:** thread daemon roda `update_ytdlp()` ao iniciar o app
-- **Primeira execução:** se `credentials/client_secret.json` não existe, janela principal fica oculta (`withdraw()`) e `SetupWizard` é aberto; ao concluir, `_on_wizard_complete()` chama `_check_auth_visibility()` e exibe a janela (`deiconify()`)
+- **Primeira execução:** se `credentials/token.pkl` não existe (usuário ainda não autorizou o Drive), janela principal fica oculta (`withdraw()`) e `SetupWizard` é aberto; ao concluir, `_on_wizard_complete()` chama `_check_auth_visibility()` e exibe a janela (`deiconify()`)
 - **Banner de autorização:** frame condicional no topo — aparece via `pack()` quando Drive não autorizado, some via `pack_forget()` quando autorizado; `_check_auth_visibility()` decide exibição
 - **Bloqueio de processamento:** `_start()` chama `check_auth_status()` antes de prosseguir; exibe aviso e retorna se não autorizado
 - **`_set_status(text, state)`:** atualiza `status_label` e `_status_dot`; estados: `idle` (cinza), `running` (azul), `done` (verde), `error` (vermelho)
@@ -123,15 +122,16 @@ plyer
 
 ## Detalhes técnicos — setup_wizard.py
 
-`SetupWizard(ctk.CTkToplevel)` — wizard de primeira execução, aberto automaticamente quando `client_secret.json` não existe.
+`SetupWizard(ctk.CTkToplevel)` — wizard de primeira execução, aberto automaticamente quando `credentials/token.pkl` não existe (usuário ainda não autorizou o Drive).
 
-**6 passos:**
+**5 passos:**
 0. Boas-vindas
-1. Credenciais — file dialog, valida JSON com chave `"installed"` ou `"web"`, copia para `credentials/client_secret.json`
-2. Canal YouTube — URL do canal (salvo em `config.json`)
-3. Pasta Drive — ID da pasta raiz (salvo em `config.json`)
-4. Autorização Google — botão que chama `run_auth()` em thread separada; re-renderiza passo ao concluir
-5. Conclusão
+1. Canal YouTube — URL do canal (salvo em `config.json`)
+2. Pasta Drive — ID da pasta raiz (salvo em `config.json`)
+3. Autorização Google — botão que chama `run_auth()` em thread separada; re-renderiza passo ao concluir
+4. Conclusão
+
+**Credenciais OAuth embutidas:** não é mais necessário distribuir `client_secret.json`. O `baixar_audio.py` define `_OAUTH_CLIENT_CONFIG` com `client_id` e `client_secret` hardcoded; `get_drive_service()` usa `InstalledAppFlow.from_client_config(_OAUTH_CLIENT_CONFIG, SCOPES)`. O token por usuário (`token.pkl`) continua sendo gerado na primeira autorização.
 
 **Indicador de passos:** linha de dots coloridos — verde (concluído), azul (atual), cinza (pendente).
 
@@ -170,6 +170,22 @@ Orquestra a geração completa em 4 passos:
 3. Executa `pyinstaller build_app.spec --noconfirm --clean` → `dist/IPMadalena/`
 4. Detecta Inno Setup em `%ProgramFiles(x86)%`, `%ProgramFiles%` e `%LOCALAPPDATA%\Programs` (winget instala sem admin); executa `ISCC.exe installer.iss` → `dist/IPMadalena_Setup.exe`
 5. Se Inno Setup não encontrado, exibe aviso mas o bundle PyInstaller ainda pode ser distribuído como pasta
+
+**IMPORTANTE:** O arquivo `build_installer.bat` deve conter **apenas caracteres ASCII**. Caracteres UTF-8 como `─`, `—` nos comentários ou no `title` corrompem o parsing do `cmd.exe` antes que o `chcp 65001` entre em vigor, fazendo o bat falhar silenciosamente no passo do PyInstaller sem exibir erro. Use `=`, `-` e hifens simples em todos os echos e comentários.
+
+**Como gerar o build corretamente (via Claude ou terminal):**
+
+Se o `build_installer.bat` falhar ou não rodar pelo Claude, execute os dois comandos abaixo em sequência:
+
+```powershell
+# Passo 1 — PyInstaller (recompila o bundle do zero)
+& "C:\Users\rasantos\AppData\Local\Programs\Python\Python312\python.exe" -m PyInstaller build_app.spec --noconfirm --clean
+
+# Passo 2 — Inno Setup (gera o instalador)
+& "C:\Users\rasantos\AppData\Local\Programs\Inno Setup 6\ISCC.exe" "C:\Users\rasantos\youtube_to_drive\installer.iss"
+```
+
+O instalador final fica em `dist\IPMadalena_Setup.exe`.
 
 ### installer.iss — Inno Setup
 
@@ -237,7 +253,7 @@ run_tests.bat
 - **Git config:** `user.name = Rodrigo Augusto Leão dos Santos` / `user.email = rodrigoleao1995@gmail.com`
 
 **Arquivos ignorados via `.gitignore`** (não commitar):
-- `credentials/client_secret.json` e `credentials/token.pkl` — credenciais OAuth sensíveis
+- `credentials/token.pkl` — token OAuth por usuário (sensível, não commitar)
 - `downloads/` — pasta temporária de áudios
 - `logs/` — logs locais de execução
 - `historico.json` — estado local de datas processadas

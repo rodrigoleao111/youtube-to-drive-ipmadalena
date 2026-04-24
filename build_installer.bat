@@ -1,19 +1,18 @@
 @echo off
 setlocal
-title IPMadalena — Build do Instalador
+title IPMadalena - Build do Instalador
 color 0B
-chcp 65001 >nul 2>&1
 
 set "APP_DIR=%~dp0"
 if "%APP_DIR:~-1%"=="\" set "APP_DIR=%APP_DIR:~0,-1%"
 
 echo.
 echo  ============================================================
-echo    IPMadalena — Gerando instalador Windows
+echo    IPMadalena - Gerando instalador Windows
 echo  ============================================================
 echo.
 
-:: ── Baixar yt-dlp standalone ─────────────────────────────────────────────────
+:: --- [1/4] Baixar yt-dlp standalone -----------------------------------------
 echo  [1/4] Verificando yt-dlp standalone...
 if exist "%APP_DIR%\yt-dlp.exe" (
     echo  Atualizando yt-dlp.exe existente...
@@ -30,7 +29,7 @@ if exist "%APP_DIR%\yt-dlp.exe" (
     echo  OK.
 )
 
-:: ── Verificar PyInstaller ────────────────────────────────────────────────────
+:: --- [2/4] Verificar PyInstaller ---------------------------------------------
 echo.
 echo  [2/4] Verificando PyInstaller...
 pyinstaller --version >nul 2>&1
@@ -44,7 +43,7 @@ if errorlevel 1 (
 )
 echo  OK.
 
-:: ── Executar PyInstaller ─────────────────────────────────────────────────────
+:: --- [3/4] Executar PyInstaller ----------------------------------------------
 echo.
 echo  [3/4] Empacotando aplicativo com PyInstaller...
 echo  (Isso pode levar alguns minutos)
@@ -59,11 +58,11 @@ if errorlevel 1 (
 echo.
 echo  Bundle gerado em: dist\IPMadalena\
 
-:: ── Executar Inno Setup ──────────────────────────────────────────────────────
+:: --- [4/4] Executar Inno Setup -----------------------------------------------
 echo.
 echo  [4/4] Gerando instalador com Inno Setup...
 
-:: Procura o Inno Setup em locais comuns
+:: Procura o Inno Setup em locais comuns (admin e sem-admin)
 set "ISCC="
 if exist "%ProgramFiles(x86)%\Inno Setup 6\ISCC.exe" ^
     set "ISCC=%ProgramFiles(x86)%\Inno Setup 6\ISCC.exe"
