@@ -7,13 +7,16 @@ Cobre:
   - cleanup_downloads
   - load_history / save_history
   - _check_cancel / OperacaoCancelada
-  - get_drive_service (token corrompido)
+  - get_drive_service (token corrompido, credenciais embutidas)
   - --socket-timeout nos comandos yt-dlp
+  - download_selected_sections (seções + vídeo completo)
+  - modo debug: arquivo mantido em downloads/ quando não-frozen
 """
 
 import json
 import os
 import pickle
+import sys
 import subprocess
 import threading
 from unittest.mock import MagicMock, patch
@@ -44,6 +47,13 @@ class TestCheckInternet:
         args = mock_conn.call_args[0][0]
         assert args == ("8.8.8.8", 53)
 
+    def test_resets_socket_timeout_after_call(self):
+        """Timeout global deve ser None após a chamada (evita quebrar o OAuth)."""
+        import socket
+        with patch("socket.create_connection"):
+            baixar_audio.check_internet()
+        assert socket.getdefaulttimeout() is None
+
 
 # ---------------------------------------------------------------------------
 # check_disk_space
@@ -53,7 +63,7 @@ class TestCheckDiskSpace:
     def test_ok_when_enough_space(self, tmp_path):
         with patch.object(baixar_audio, "DOWNLOAD_DIR", str(tmp_path)), \
              patch("shutil.disk_usage") as mock_usage:
-            mock_usage.return_value = MagicMock(free=1000 * 1024 * 1024)  # 1 GB
+            mock_usage.return_value = MagicMock(free=1000 * 1024 * 1024)
             ok, free_mb = baixar_audio.check_disk_space(min_mb=500)
         assert ok is True
         assert free_mb == pytest.approx(1000.0, abs=1)
@@ -61,7 +71,7 @@ class TestCheckDiskSpace:
     def test_fails_when_insufficient_space(self, tmp_path):
         with patch.object(baixar_audio, "DOWNLOAD_DIR", str(tmp_path)), \
              patch("shutil.disk_usage") as mock_usage:
-            mock_usage.return_value = MagicMock(free=100 * 1024 * 1024)  # 100 MB
+            mock_usage.return_value = MagicMock(free=100 * 1024 * 1024)
             ok, free_mb = baixar_audio.check_disk_space(min_mb=500)
         assert ok is False
         assert free_mb == pytest.approx(100.0, abs=1)
@@ -95,12 +105,12 @@ class TestCleanupDownloads:
 
     def test_no_error_when_dir_is_empty(self, tmp_path):
         with patch.object(baixar_audio, "DOWNLOAD_DIR", str(tmp_path)):
-            baixar_audio.cleanup_downloads()  # não deve lançar exceção
+            baixar_audio.cleanup_downloads()
 
     def test_no_error_when_dir_does_not_exist(self, tmp_path):
         missing = str(tmp_path / "ghost_dir")
         with patch.object(baixar_audio, "DOWNLOAD_DIR", missing):
-            baixar_audio.cleanup_downloads()  # não deve lançar exceção
+            baixar_audio.cleanup_downloads()
 
     def test_no_log_when_nothing_removed(self, tmp_path):
         with patch.object(baixar_audio, "DOWNLOAD_DIR", str(tmp_path)):
@@ -176,10 +186,10 @@ class TestCancelEvent:
 
     def test_no_exception_when_event_not_set(self):
         event = threading.Event()
-        baixar_audio._check_cancel(event)  # não deve lançar
+        baixar_audio._check_cancel(event)
 
     def test_no_exception_when_event_is_none(self):
-        baixar_audio._check_cancel(None)  # não deve lançar
+        baixar_audio._check_cancel(None)
 
     def test_exception_message_is_descriptive(self):
         event = threading.Event()
@@ -189,7 +199,7 @@ class TestCancelEvent:
 
 
 # ---------------------------------------------------------------------------
-# get_drive_service — token corrompido
+# get_drive_service — credenciais embutidas + token corrompido
 # ---------------------------------------------------------------------------
 
 class TestGetDriveServiceToken:
@@ -200,61 +210,66 @@ class TestGetDriveServiceToken:
         mock_flow.run_local_server.return_value = mock_creds
         return mock_flow, mock_creds
 
+    def test_usa_from_client_config_nao_arquivo(self, tmp_path):
+        """Credenciais OAuth são embutidas — não deve ler nenhum arquivo externo."""
+        token_file = tmp_path / "token.pkl"
+        mock_flow, mock_creds = self._make_mock_flow()
+
+        with patch.object(baixar_audio, "TOKEN_FILE", str(token_file)), \
+             patch("baixar_audio.InstalledAppFlow") as MockFlow, \
+             patch("baixar_audio.build"), \
+             patch("pickle.dump"):
+            MockFlow.from_client_config.return_value = mock_flow
+            baixar_audio.get_drive_service()
+
+        MockFlow.from_client_config.assert_called_once()
+        # Nunca deve tentar ler de arquivo externo
+        MockFlow.from_client_secrets_file.assert_not_called()
+
     def test_logs_and_recovers_from_corrupted_token(self, tmp_path):
         token_file = tmp_path / "token.pkl"
-        creds_file = tmp_path / "client_secret.json"
         token_file.write_bytes(b"dados corrompidos aqui!!!")
-        creds_file.write_text('{"installed": {}}')
 
-        mock_flow, mock_creds = self._make_mock_flow()
+        mock_flow, _ = self._make_mock_flow()
         logs = []
 
         with patch.object(baixar_audio, "TOKEN_FILE", str(token_file)), \
-             patch.object(baixar_audio, "CREDENTIALS_FILE", str(creds_file)), \
              patch("baixar_audio.InstalledAppFlow") as MockFlow, \
              patch("baixar_audio.build"), \
-             patch("pickle.dump"):          # MagicMock não é serializável
-            MockFlow.from_client_secrets_file.return_value = mock_flow
+             patch("pickle.dump"):
+            MockFlow.from_client_config.return_value = mock_flow
             baixar_audio.get_drive_service(on_log=logs.append)
 
-        assert any("corrompido" in m.lower() or "reautenticando" in m.lower()
-                   for m in logs), f"Esperava log de corrompido/reautenticando, mas obteve: {logs}"
+        assert any(
+            "corrompido" in m.lower() or "reautenticando" in m.lower()
+            for m in logs
+        ), f"Esperava log de corrompido/reautenticando, obteve: {logs}"
 
     def test_deletes_corrupted_token_and_reauths(self, tmp_path):
         token_file = tmp_path / "token.pkl"
-        creds_file = tmp_path / "client_secret.json"
         token_file.write_bytes(b"not a pickle")
-        creds_file.write_text('{"installed": {}}')
 
         mock_flow, _ = self._make_mock_flow()
 
         with patch.object(baixar_audio, "TOKEN_FILE", str(token_file)), \
-             patch.object(baixar_audio, "CREDENTIALS_FILE", str(creds_file)), \
              patch("baixar_audio.InstalledAppFlow") as MockFlow, \
              patch("baixar_audio.build"), \
-             patch("pickle.dump"):          # MagicMock não é serializável
-            MockFlow.from_client_secrets_file.return_value = mock_flow
+             patch("pickle.dump"):
+            MockFlow.from_client_config.return_value = mock_flow
             baixar_audio.get_drive_service()
 
-        # O fluxo de reautenticação deve ter sido iniciado
-        MockFlow.from_client_secrets_file.assert_called_once()
-
-    def test_raises_if_credentials_file_missing(self, tmp_path):
-        with patch.object(baixar_audio, "TOKEN_FILE", str(tmp_path / "token.pkl")), \
-             patch.object(baixar_audio, "CREDENTIALS_FILE", str(tmp_path / "nao_existe.json")):
-            with pytest.raises(FileNotFoundError, match="Credenciais"):
-                baixar_audio.get_drive_service()
+        MockFlow.from_client_config.assert_called_once()
 
 
 # ---------------------------------------------------------------------------
-# --socket-timeout nos comandos yt-dlp
+# --socket-timeout e flags nos comandos yt-dlp
 # ---------------------------------------------------------------------------
 
 class TestSocketTimeout:
     """Verifica que --socket-timeout 30 está presente em todos os comandos yt-dlp."""
 
-    def _capture_cmd(self, fn, *args, **kwargs):
-        """Chama fn e captura o primeiro cmd passado para _start_process."""
+    def _capture_cmds(self, fn, *args, **kwargs):
+        """Chama fn e retorna todos os cmds passados para _start_process."""
         captured = []
 
         def fake_start_process(cmd, cancel_event=None):
@@ -272,29 +287,171 @@ class TestSocketTimeout:
                 pass
 
         assert captured, "Nenhum processo foi iniciado"
-        return captured[0]
+        return captured
 
     def test_list_videos_has_socket_timeout(self):
-        cmd = self._capture_cmd(baixar_audio.list_videos, "19/04/2026")
+        cmds = self._capture_cmds(baixar_audio.list_videos, "19/04/2026")
+        cmd = cmds[0]
         assert "--socket-timeout" in cmd
-        idx = cmd.index("--socket-timeout")
-        assert cmd[idx + 1] == "30"
+        assert cmd[cmd.index("--socket-timeout") + 1] == "30"
 
     def test_download_selected_has_socket_timeout(self, tmp_path):
         videos = [{"id": "abc123", "title": "Culto", "upload_date": "20260419"}]
         with patch.object(baixar_audio, "DOWNLOAD_DIR", str(tmp_path)):
-            cmd = self._capture_cmd(baixar_audio.download_selected, videos)
+            cmds = self._capture_cmds(baixar_audio.download_selected, videos)
+        cmd = cmds[0]
         assert "--socket-timeout" in cmd
-        idx = cmd.index("--socket-timeout")
-        assert cmd[idx + 1] == "30"
+        assert cmd[cmd.index("--socket-timeout") + 1] == "30"
+
+    def test_download_selected_sections_has_socket_timeout(self, tmp_path):
+        videos = [{"id": "abc123", "title": "Culto", "start": None, "end": None}]
+        with patch.object(baixar_audio, "DOWNLOAD_DIR", str(tmp_path)):
+            cmds = self._capture_cmds(baixar_audio.download_selected_sections, videos)
+        cmd = cmds[0]
+        assert "--socket-timeout" in cmd
+        assert cmd[cmd.index("--socket-timeout") + 1] == "30"
 
     def test_list_videos_uses_dateafter_not_date(self):
-        """Garante que --date não está no cmd (causaria conflito com --dateafter)."""
-        cmd = self._capture_cmd(baixar_audio.list_videos, "19/04/2026")
+        cmds = self._capture_cmds(baixar_audio.list_videos, "19/04/2026")
+        cmd = cmds[0]
         assert "--date" not in cmd
         assert "--dateafter" in cmd
 
     def test_list_videos_uses_break_on_reject(self):
-        """Garante que --break-on-reject está presente para parar varredura cedo."""
-        cmd = self._capture_cmd(baixar_audio.list_videos, "19/04/2026")
-        assert "--break-on-reject" in cmd
+        cmds = self._capture_cmds(baixar_audio.list_videos, "19/04/2026")
+        assert "--break-on-reject" in cmds[0]
+
+
+# ---------------------------------------------------------------------------
+# download_selected_sections
+# ---------------------------------------------------------------------------
+
+class TestDownloadSelectedSections:
+    """Testa a função de download com marcação de trecho."""
+
+    def _capture_cmds(self, videos, tmp_path):
+        captured = []
+
+        def fake_start_process(cmd, cancel_event=None):
+            captured.append(list(cmd))
+            proc = MagicMock()
+            proc.stdout = iter([])
+            proc.returncode = 0
+            proc.wait = lambda: None
+            return proc
+
+        with patch.object(baixar_audio, "DOWNLOAD_DIR", str(tmp_path)), \
+             patch.object(baixar_audio, "_start_process", side_effect=fake_start_process):
+            try:
+                baixar_audio.download_selected_sections(videos)
+            except Exception:
+                pass
+
+        return captured
+
+    def test_inclui_download_sections_quando_start_end_presentes(self, tmp_path):
+        videos = [{"id": "abc", "title": "Culto", "start": "00:15:00", "end": "01:10:00"}]
+        cmds = self._capture_cmds(videos, tmp_path)
+        assert len(cmds) == 1
+        cmd = cmds[0]
+        assert "--download-sections" in cmd
+        idx = cmd.index("--download-sections")
+        assert cmd[idx + 1] == "*00:15:00-01:10:00"
+
+    def test_nao_inclui_download_sections_quando_start_end_nulos(self, tmp_path):
+        videos = [{"id": "abc", "title": "Culto", "start": None, "end": None}]
+        cmds = self._capture_cmds(videos, tmp_path)
+        assert len(cmds) == 1
+        assert "--download-sections" not in cmds[0]
+
+    def test_um_subprocess_por_video(self, tmp_path):
+        videos = [
+            {"id": "abc", "title": "Culto 1", "start": "00:10:00", "end": "01:00:00"},
+            {"id": "def", "title": "Culto 2", "start": None,        "end": None},
+        ]
+        cmds = self._capture_cmds(videos, tmp_path)
+        assert len(cmds) == 2
+
+    def test_url_correta_por_video(self, tmp_path):
+        videos = [{"id": "xyz999", "title": "Culto", "start": None, "end": None}]
+        cmds = self._capture_cmds(videos, tmp_path)
+        assert any("xyz999" in arg for arg in cmds[0])
+
+    def test_formato_da_secao_usa_asterisco(self, tmp_path):
+        """yt-dlp exige '*HH:MM:SS-HH:MM:SS' — asterisco obrigatório."""
+        videos = [{"id": "abc", "title": "Culto", "start": "00:30:00", "end": "01:30:00"}]
+        cmds = self._capture_cmds(videos, tmp_path)
+        idx = cmds[0].index("--download-sections")
+        assert cmds[0][idx + 1].startswith("*")
+
+    def test_cancela_entre_videos(self, tmp_path):
+        """Operação deve ser cancelada entre vídeos quando cancel_event está setado."""
+        cancel = threading.Event()
+        call_count = 0
+
+        def fake_start_process(cmd, cancel_event=None):
+            nonlocal call_count
+            call_count += 1
+            cancel.set()   # sinaliza no primeiro vídeo
+            proc = MagicMock()
+            proc.stdout = iter([])
+            proc.returncode = 0
+            proc.wait = lambda: None
+            return proc
+
+        videos = [
+            {"id": "abc", "title": "Culto 1", "start": None, "end": None},
+            {"id": "def", "title": "Culto 2", "start": None, "end": None},
+        ]
+
+        with patch.object(baixar_audio, "DOWNLOAD_DIR", str(tmp_path)), \
+             patch.object(baixar_audio, "_start_process", side_effect=fake_start_process):
+            with pytest.raises(baixar_audio.OperacaoCancelada):
+                baixar_audio.download_selected_sections(videos, cancel_event=cancel)
+
+        assert call_count == 1   # segundo vídeo não deve ser iniciado
+
+
+# ---------------------------------------------------------------------------
+# Modo debug — arquivo mantido após upload quando não-frozen
+# ---------------------------------------------------------------------------
+
+class TestDebugMode:
+    """
+    Em modo script (sys.frozen ausente/False), upload_files() deve manter
+    o arquivo local e logar [DEBUG].
+    Em modo frozen (exe instalado), deve remover o arquivo.
+    """
+
+    def _run(self, tmp_path, frozen: bool):
+        fake_mp3 = tmp_path / "Culto.mp3"
+        fake_mp3.write_bytes(b"ID3" + b"\x00" * 64)
+
+        with patch("baixar_audio.get_drive_service"), \
+             patch("baixar_audio.find_or_create_month_folder", return_value="folder_id"), \
+             patch("baixar_audio.upload_to_drive"), \
+             patch.object(sys, "frozen", frozen, create=True):
+            logs = []
+            baixar_audio.upload_files(
+                "19/04/2026",
+                [str(fake_mp3)],
+                on_log=logs.append,
+            )
+        return fake_mp3, logs
+
+    def test_arquivo_mantido_em_modo_debug(self, tmp_path):
+        mp3, logs = self._run(tmp_path, frozen=False)
+        assert mp3.exists(), "Arquivo não deveria ser removido em modo debug"
+
+    def test_log_debug_emitido_em_modo_debug(self, tmp_path):
+        _, logs = self._run(tmp_path, frozen=False)
+        assert any("[DEBUG]" in m for m in logs), \
+            f"Esperava mensagem [DEBUG] no log, obteve: {logs}"
+
+    def test_arquivo_removido_em_modo_producao(self, tmp_path):
+        mp3, _ = self._run(tmp_path, frozen=True)
+        assert not mp3.exists(), "Arquivo deveria ser removido em modo produção"
+
+    def test_sem_log_debug_em_modo_producao(self, tmp_path):
+        _, logs = self._run(tmp_path, frozen=True)
+        assert not any("[DEBUG]" in m for m in logs)

@@ -3,6 +3,7 @@
 ## Regras de trabalho
 
 - **Commits:** somente quando o usuário solicitar explicitamente. Nunca commitar automaticamente após implementar uma mudança.
+- **Antes de cada commit:** verificar se `CLAUDE.md` e `README.md` precisam ser atualizados para refletir as mudanças que serão commitadas. Atualizar ambos antes de fazer o commit se necessário.
 
 ## O que é este projeto
 
@@ -249,9 +250,10 @@ Cultos ao vivo podem ser publicados no YouTube com a data do dia seguinte ao eve
 
 ```
 tests/
-├── conftest.py              ← adiciona raiz do projeto ao sys.path
-├── test_baixar_audio.py     ← 30 testes unitários do módulo principal
-└── test_app.py              ← 36 testes de integração da GUI
+├── conftest.py              ← sys.path + fixture shared_app (sessão)
+├── test_baixar_audio.py     ← 39 testes unitários do módulo principal
+├── test_app.py              ← 45 testes de integração da GUI
+└── test_player_window.py    ← 33 testes do player e utilitários de tempo
 ```
 
 **Como rodar:**
@@ -265,25 +267,33 @@ run_tests.bat
 - `check_internet`, `check_disk_space`, `cleanup_downloads`
 - `load_history` / `save_history` (arquivo ausente, JSON corrompido, round-trip)
 - `_check_cancel` / `OperacaoCancelada`
-- `get_drive_service` com token corrompido (verifica log + reauth forçado)
+- `get_drive_service` com token corrompido (verifica log + reauth forçado); usa `from_client_config` (credenciais embutidas)
 - `--socket-timeout 30`, `--dateafter`, `--break-on-reject` nos comandos yt-dlp
+- `download_selected_sections`: flag `--download-sections`, vídeo completo, um subprocess por vídeo, cancelamento entre vídeos
+- Modo debug: arquivo mantido em `downloads/` quando não-frozen; removido quando frozen
 - Instância única (mock de socket)
-- Processamento de todos os tipos de mensagem da fila (`log`, `status`, `progress`, `done`, `cancelled`, `error`, `preflight_error`, `history_warning`)
+- Processamento de todos os tipos de mensagem da fila (`log`, `status`, `progress`, `download_progress`, `done`, `cancelled`, `error`, `preflight_error`, `history_warning`, `open_player`)
 - `_worker_preflight`: sem internet, disco insuficiente, data já processada, tudo OK
 - `_on_done`: salva histórico, notificação desktop (mock plyer), estado idle
 - Cancelamento: sinaliza evento, desabilita botão, oculta barras
-- Validação de data: vazia, formato errado, formato correto
+- Validação de data: vazia, formato errado, formato correto, sem autorização Drive
 - Log em arquivo: criado na pasta `logs/`, nome com data de hoje, entrada de início
+- `_seconds_to_hms` / `_hms_to_seconds`: conversão bidirecional, casos inválidos, roundtrip
+- `_build_player_cmd`: modo script vs frozen, argumentos de posição
+- `PlayerWindow`: inicialização, título e contador, validação de trecho (fim ≤ início, zeros, formato inválido), segmento com start/end, vídeo completo (start/end nulos), avanço entre vídeos, segmentos de múltiplos vídeos, cancelamento, cálculo de duração
 
 **O que NÃO é testado automaticamente** (requer execução manual):
 - Fluxo real com YouTube (rede + canal ativo)
 - Popup de seleção de vídeos (interação humana)
 - Upload real para o Drive (credenciais ativas)
 - Notificação desktop visível na bandeja
+- Player webview abrindo a página do YouTube
 
 **Notas de implementação:**
 - Mocks via `unittest.mock` (biblioteca padrão, sem dependências extras)
-- App GUI testado instanciando `App()` real com `withdraw()` — requer display (Windows OK)
+- `conftest.py` provê `shared_app` (escopo session) — uma única instância `App` para toda a sessão; evita corrupção do intérprete Tcl ao criar/destruir múltiplas janelas `ctk.CTk()` no mesmo processo
+- Fixture `_reset_app_state` (autouse, function-scope) reseta `_running`, barras, fila e log box antes de cada teste
+- `PlayerWindow` testado com `patch.object(PlayerWindow, "_start_player")` para evitar abrir subprocess real
 - `patch('plyer.notification.notify')` direto — evita `patch.dict(sys.modules)` que corrompe o estado Tcl entre testes
 - `MagicMock` não é serializável via pickle → usar `patch('pickle.dump')` nos testes de token
 

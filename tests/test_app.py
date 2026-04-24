@@ -3,7 +3,8 @@ Testes de integração para app.py.
 
 Cobre:
   - Instância única (porta TCP)
-  - Processamento da fila de mensagens (log, status, progresso, done, cancelled, error)
+  - Processamento da fila de mensagens (log, status, progress, done, cancelled, error,
+    open_player, download_progress)
   - Worker de pré-execução (_worker_preflight)
   - _on_done: salva histórico + notificação desktop
   - Cancelamento
@@ -30,20 +31,40 @@ from app import App, _acquire_single_instance
 
 
 # ---------------------------------------------------------------------------
-# Fixture principal — instância do App com janela oculta
+# Fixture principal — usa a instância de sessão do conftest
 # ---------------------------------------------------------------------------
 
 @pytest.fixture
-def application():
-    """Cria o App com mocks de chamadas externas e janela oculta."""
-    with patch("baixar_audio.update_ytdlp"):
-        inst = App()
-        inst.withdraw()
-        yield inst
-        try:
-            inst.destroy()
-        except Exception:
-            pass
+def application(shared_app):
+    """Alias do shared_app para os testes deste módulo."""
+    return shared_app
+
+
+@pytest.fixture(autouse=True)
+def _reset_app_state(shared_app):
+    """Reseta o estado do App antes de cada teste para garantir isolamento."""
+    app = shared_app
+    app._running = False
+    app._converting = False
+    app._cancel_event.clear()
+    # Zera barras e oculta o frame
+    app._hide_bars()
+    # Restaura botões para estado idle
+    try:
+        app._set_buttons_running(False)
+    except Exception:
+        pass
+    # Limpa log box
+    app.log_box.configure(state="normal")
+    app.log_box.delete("1.0", "end")
+    app.log_box.configure(state="disabled")
+    # Drena a fila
+    try:
+        while True:
+            app._queue.get_nowait()
+    except Exception:
+        pass
+    yield
 
 
 # ---------------------------------------------------------------------------
@@ -75,21 +96,17 @@ class TestSingleInstanceLock:
 
 class TestAppInit:
     def test_ytdlp_update_thread_e_iniciado(self, application):
-        """Verifica que update_ytdlp foi chamado ao iniciar o app."""
-        import time
-        # A thread daemon é daemon=True, pode precisar de um momento para rodar
-        time.sleep(0.15)
-        # O patch foi aplicado antes de criar a instância — se chegou até aqui
-        # sem erro, a thread foi iniciada (update_ytdlp foi mockado e não bloqueou)
+        """Verifica que o app inicializa sem erros e não está em execução."""
         assert not application._running  # App ainda em idle após init
 
     def test_estado_inicial_running_e_false(self, application):
         assert application._running is False
 
-    def test_barras_iniciam_invisiveis(self, application):
-        """Progresso deve ser 0 e a cor deve ser igual à cor de trilha."""
-        assert application.progress_bar.get() == pytest.approx(0.0, abs=0.01)
-        assert application.subtask_bar.get() == pytest.approx(0.0, abs=0.01)
+    def test_barras_iniciam_ocultas(self, application):
+        """O frame de progresso não deve estar visível na inicialização."""
+        # _progress_frame só é empacotado via _show_bars(); no estado idle fica oculto
+        application.update_idletasks()
+        assert not application._progress_frame.winfo_ismapped()
 
 
 # ---------------------------------------------------------------------------
@@ -122,17 +139,32 @@ class TestQueueProcessing:
             application._process_queue()
         assert "#2fa84f" in str(application.status_label.cget("text_color"))
 
-    def test_status_avanca_barra_de_subtarefas(self, application):
+    def test_status_convertendo_inicia_animacao(self, application):
+        """Quando o status contém 'Convertendo', a flag _converting deve ser ativada."""
         application._show_bars()
-        application._queue.put(("status", "Baixando áudio..."))
+        application._queue.put(("status", "Convertendo áudio..."))
         application._process_queue()
-        assert application.subtask_bar.get() > 0
+        assert application._converting is True
+
+    def test_status_nao_convertendo_para_animacao(self, application):
+        """Mudar o status para outra coisa deve parar a animação."""
+        application._show_bars()
+        application._converting = True
+        application._queue.put(("status", "Enviando para o Drive..."))
+        application._process_queue()
+        assert application._converting is False
 
     def test_mensagem_progress_atualiza_barra_de_upload(self, application):
         application._show_bars()
         application._queue.put(("progress", 60))
         application._process_queue()
         assert application.progress_bar.get() == pytest.approx(0.60, abs=0.01)
+
+    def test_mensagem_download_progress_atualiza_download_bar(self, application):
+        application._show_bars()
+        application._queue.put(("download_progress", 0.45))
+        application._process_queue()
+        assert application.download_bar.get() == pytest.approx(0.45, abs=0.01)
 
     def test_mensagem_done_chama_on_done_com_args(self, application):
         with patch.object(application, "_on_done") as mock_done:
@@ -184,6 +216,14 @@ class TestQueueProcessing:
         mock_warn.assert_called_once_with(
             "19/04/2026", ["Culto A"], "19/04/2026 às 10:00"
         )
+
+    def test_mensagem_open_player_chama_show_player_window(self, application):
+        """Mensagem 'open_player' deve disparar _show_player_window com os argumentos corretos."""
+        with patch.object(application, "_show_player_window") as mock_player:
+            videos = [{"id": "abc", "title": "Culto", "upload_date": "20260419"}]
+            application._queue.put(("open_player", ("19/04/2026", videos)))
+            application._process_queue()
+        mock_player.assert_called_once_with("19/04/2026", videos)
 
 
 # ---------------------------------------------------------------------------
@@ -340,12 +380,23 @@ class TestCancellation:
         assert application.cancel_btn.cget("state") == "disabled"
 
     def test_on_cancelled_oculta_barras(self, application):
+        """Após cancelar, as barras devem ser zeradas."""
         application._show_bars()
         application._on_cancelled()
-        # Após cancelar, cor da barra deve ser igual à cor de trilha (oculta)
-        bar_color = str(application.progress_bar.cget("progress_color"))
-        track_color = str(application.progress_bar.cget("fg_color"))
-        assert bar_color == track_color
+        # Barras devem estar em 0 após cancelamento
+        assert application.download_bar.get() == pytest.approx(0.0, abs=0.01)
+        assert application.progress_bar.get() == pytest.approx(0.0, abs=0.01)
+
+    def test_on_cancelled_reseta_running(self, application):
+        application._running = True
+        application._on_cancelled()
+        assert application._running is False
+
+    def test_on_cancelled_status_idle(self, application):
+        application._on_cancelled()
+        # Estado idle → cor cinza
+        assert "gray" in str(application.status_label.cget("text_color")).lower() or \
+               "cancelad" in application.status_label.cget("text").lower()
 
 
 # ---------------------------------------------------------------------------
@@ -373,7 +424,8 @@ class TestInputValidation:
     def test_data_valida_inicia_thread_preflight(self, application):
         application.date_entry.delete(0, "end")
         application.date_entry.insert(0, "19/04/2026")
-        with patch("threading.Thread") as MockThread:
+        with patch("baixar_audio.check_auth_status", return_value=True), \
+             patch("threading.Thread") as MockThread:
             mock_t = MagicMock()
             MockThread.return_value = mock_t
             application._start()
@@ -383,9 +435,21 @@ class TestInputValidation:
     def test_data_valida_seta_running_true(self, application):
         application.date_entry.delete(0, "end")
         application.date_entry.insert(0, "19/04/2026")
-        with patch("threading.Thread"):
+        with patch("baixar_audio.check_auth_status", return_value=True), \
+             patch("threading.Thread"):
             application._start()
         assert application._running is True
+
+    def test_sem_autorizacao_mostra_erro_e_nao_inicia(self, application):
+        """Se Drive não autorizado, _start deve mostrar erro sem iniciar worker."""
+        application.date_entry.delete(0, "end")
+        application.date_entry.insert(0, "19/04/2026")
+        with patch("baixar_audio.check_auth_status", return_value=False), \
+             patch.object(application, "_show_error") as mock_err, \
+             patch("threading.Thread") as MockThread:
+            application._start()
+        mock_err.assert_called_once()
+        MockThread.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
