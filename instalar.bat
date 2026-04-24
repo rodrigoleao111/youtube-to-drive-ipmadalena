@@ -48,6 +48,7 @@ python -m pip install ^
     google-auth-oauthlib ^
     google-auth ^
     plyer ^
+    pywebview ^
     --quiet
 if errorlevel 1 (
     echo  ERRO: Falha ao instalar dependencias.

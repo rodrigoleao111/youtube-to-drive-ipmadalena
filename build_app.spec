@@ -42,15 +42,22 @@ ctk_datas, ctk_bins, ctk_hidden = collect_all("customtkinter")
 # ── tkcalendar/babel: dados de localização ───────────────────────────────────
 babel_datas = collect_data_files("babel")
 
+# ── pywebview: coleta assets do framework ────────────────────────────────────
+try:
+    wv_datas, wv_bins, wv_hidden = collect_all("webview")
+except Exception:
+    wv_datas, wv_bins, wv_hidden = [], [], []
+
 a = Analysis(
     ["app.py"],
     pathex=[os.path.abspath(".")],
-    binaries=extra_binaries + ctk_bins,
-    datas=ctk_datas + babel_datas + [
+    binaries=extra_binaries + ctk_bins + wv_bins,
+    datas=ctk_datas + babel_datas + wv_datas + [
         ("setup_wizard.py", "."),
+        ("player_window.py", "."),
         ("icon.ico", "."),          # ícone da janela (barra de tarefas)
     ],
-    hiddenimports=ctk_hidden + [
+    hiddenimports=ctk_hidden + wv_hidden + [
         "tkcalendar",
         "babel.numbers",
         "babel.dates",
@@ -66,6 +73,10 @@ a = Analysis(
         "googleapiclient.discovery",
         "googleapiclient.http",
         "pkg_resources.py2_warn",
+        "webview",
+        "webview.platforms.edgechromium",
+        "webview.js",
+        "webview.js.css",
     ],
     hookspath=[],
     runtime_hooks=[],

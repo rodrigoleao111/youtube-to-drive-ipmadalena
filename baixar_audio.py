@@ -724,6 +724,111 @@ def download_selected(videos, on_log=None, on_status=None,
 
 
 # ---------------------------------------------------------------------------
+# YouTube — Fase 2b: baixar vídeos com trecho selecionado
+# ---------------------------------------------------------------------------
+
+def download_selected_sections(
+    videos_with_sections: list,
+    on_log=None,
+    on_status=None,
+    on_download_progress=None,
+    cancel_event=None,
+) -> list:
+    """
+    Baixa o áudio de cada vídeo, aplicando corte de trecho quando start/end fornecidos.
+
+    Cada elemento de videos_with_sections é um dict:
+        {"id": str, "title": str, "start": str|None, "end": str|None}
+    start/end no formato "HH:MM:SS"; None = vídeo completo.
+    Retorna lista de caminhos dos MP3 baixados.
+    """
+    log         = on_log               if callable(on_log)               else _noop
+    status      = on_status            if callable(on_status)            else _noop
+    dl_progress = on_download_progress if callable(on_download_progress) else _noop
+
+    total_videos = len(videos_with_sections)
+
+    os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+    output_template = os.path.join(DOWNLOAD_DIR, "%(title)s.%(ext)s")
+
+    _DL_PCT_RE = re.compile(r'\[download\]\s+(\d+\.?\d*)%')
+
+    for current_video, video in enumerate(videos_with_sections):
+        _check_cancel(cancel_event)
+
+        vid_id = video["id"]
+        start  = video.get("start")
+        end    = video.get("end")
+        url    = f"https://www.youtube.com/watch?v={vid_id}"
+
+        status(f"Baixando vídeo {current_video + 1} de {total_videos}...")
+        log(f"Baixando: {video['title']}")
+        if start and end:
+            log(f"  Trecho: {start} → {end}")
+        else:
+            log("  Vídeo completo")
+
+        cmd = [
+            _ytdlp_cmd(),
+            "--extract-audio",
+            "--audio-format", "mp3",
+            "--audio-quality", "0",
+            "--output", output_template,
+            "--socket-timeout", "30",
+            "--encoding", "utf-8",
+            "--extractor-args", "youtube:player_client=ios,android,web",
+        ]
+        if start and end:
+            cmd += ["--download-sections", f"*{start}-{end}"]
+        if FFMPEG_LOCATION:
+            cmd += ["--ffmpeg-location", os.path.dirname(FFMPEG_LOCATION)]
+        cmd.append(url)
+
+        process = _start_process(cmd, cancel_event)
+
+        for line in process.stdout:
+            _check_cancel(cancel_event)
+            line = line.rstrip()
+            if not line:
+                continue
+            if "WARNING" in line and "JavaScript" in line:
+                continue
+            if "[youtube]" in line and "Downloading" in line:
+                continue
+
+            if line.startswith("[download]") and "%" in line:
+                m = _DL_PCT_RE.match(line)
+                if m:
+                    file_pct = float(m.group(1)) / 100.0
+                    overall  = (current_video + file_pct) / total_videos
+                    dl_progress(overall)
+                continue
+
+            if "[download] Destination:" in line:
+                fname = line.split("Destination:")[-1].strip().split("\\")[-1]
+                log(f"Destino: {fname}")
+            elif "[ExtractAudio]" in line:
+                dl_progress((current_video + 1) / total_videos)
+                status("Convertendo para MP3...")
+                log("Convertendo para MP3...")
+            else:
+                log(line)
+
+        process.wait()
+        _check_cancel(cancel_event)
+
+        if process.returncode != 0:
+            raise RuntimeError(
+                f"yt-dlp encerrou com código {process.returncode} "
+                f"ao baixar '{video['title']}'.\n"
+                "Verifique sua conexão e tente novamente."
+            )
+
+    files = glob.glob(os.path.join(DOWNLOAD_DIR, "*.mp3"))
+    return sorted(files)
+
+
+# ---------------------------------------------------------------------------
 # Fase 3: upload para o Drive
 # ---------------------------------------------------------------------------
 

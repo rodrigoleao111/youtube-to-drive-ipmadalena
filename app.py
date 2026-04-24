@@ -16,6 +16,7 @@ from tkcalendar import Calendar
 
 import baixar_audio
 from setup_wizard import SetupWizard
+from player_window import PlayerWindow
 
 # ---------------------------------------------------------------------------
 # Instância única — impede abrir dois apps ao mesmo tempo
@@ -391,6 +392,9 @@ class App(ctk.CTk):
                 elif kind == "select_videos":
                     self._show_video_selection(*value)
 
+                elif kind == "open_player":
+                    self._show_player_window(*value)
+
                 elif kind == "done":
                     self._on_done(*value)
 
@@ -649,11 +653,26 @@ class App(ctk.CTk):
         except Exception as e:
             self._queue.put(("error", str(e)))
 
-    def _worker_phase2(self, date_str, selected_videos):
-        """Fase 2 — baixa e faz upload dos vídeos selecionados."""
+    def _show_player_window(self, date_str, selected_videos):
+        """Abre PlayerWindow para o usuário marcar trechos antes do download."""
+        def _on_complete(segments):
+            self._append_log("Trechos confirmados. Iniciando download...")
+            threading.Thread(
+                target=self._worker_phase2,
+                args=(date_str, segments),
+                daemon=True,
+            ).start()
+
+        def _on_cancel():
+            self._on_cancelled()
+
+        PlayerWindow(self, selected_videos, on_complete=_on_complete, on_cancel=_on_cancel)
+
+    def _worker_phase2(self, date_str, segments):
+        """Fase 2 — baixa (com trechos) e faz upload dos vídeos selecionados."""
         try:
-            files = baixar_audio.download_selected(
-                selected_videos,
+            files = baixar_audio.download_selected_sections(
+                segments,
                 on_log=lambda m: self._queue.put(("log", m)),
                 on_status=lambda m: self._queue.put(("status", m)),
                 on_download_progress=lambda p: self._queue.put(("download_progress", p)),
@@ -671,7 +690,7 @@ class App(ctk.CTk):
                 on_upload_stats=lambda d, t, r: self._queue.put(("upload_stats", (d, t, r))),
                 cancel_event=self._cancel_event,
             )
-            titles = [v["title"] for v in selected_videos]
+            titles = [v["title"] for v in segments]
             self._queue.put(("done", (date_str, titles)))
         except baixar_audio.OperacaoCancelada:
             self._queue.put(("cancelled", None))
@@ -817,12 +836,11 @@ class App(ctk.CTk):
             if not selected:
                 self._on_error("Nenhum vídeo selecionado.")
                 return
-            self._append_log(f"{len(selected)} vídeo(s) selecionado(s). Iniciando download...")
-            threading.Thread(
-                target=self._worker_phase2,
-                args=(date_str, selected),
-                daemon=True,
-            ).start()
+            self._append_log(
+                f"{len(selected)} vídeo(s) selecionado(s). "
+                "Abrindo player para seleção de trecho..."
+            )
+            self._queue.put(("open_player", (date_str, selected)))
 
         popup.protocol("WM_DELETE_WINDOW", _cancelar)
 
