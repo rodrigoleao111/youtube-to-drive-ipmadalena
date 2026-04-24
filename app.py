@@ -3,6 +3,18 @@ IPMadalena — Cultos para o Drive
 Interface gráfica principal.
 """
 
+# ---------------------------------------------------------------------------
+# Modo subprocesso do player (frozen exe: IPMadalena.exe --player-mode ...)
+# Deve ser verificado ANTES de qualquer import do Tkinter/customtkinter.
+# ---------------------------------------------------------------------------
+import sys as _sys
+if "--player-mode" in _sys.argv:
+    _idx = _sys.argv.index("--player-mode")
+    _sys.argv = [_sys.argv[0]] + _sys.argv[_idx + 1:]
+    from player_subprocess import main as _player_main
+    _player_main()
+    _sys.exit(0)
+
 import logging
 import os
 import queue

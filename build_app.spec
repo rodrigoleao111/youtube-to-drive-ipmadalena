@@ -55,6 +55,7 @@ a = Analysis(
     datas=ctk_datas + babel_datas + wv_datas + [
         ("setup_wizard.py", "."),
         ("player_window.py", "."),
+        ("player_subprocess.py", "."),
         ("icon.ico", "."),          # ícone da janela (barra de tarefas)
     ],
     hiddenimports=ctk_hidden + wv_hidden + [

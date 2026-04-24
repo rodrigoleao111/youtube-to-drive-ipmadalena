@@ -1,5 +1,9 @@
 # IPMadalena — YouTube to Drive
 
+## Regras de trabalho
+
+- **Commits:** somente quando o usuário solicitar explicitamente. Nunca commitar automaticamente após implementar uma mudança.
+
 ## O que é este projeto
 
 Script Python com interface gráfica que baixa o áudio dos cultos do canal [@IPMadalena](https://www.youtube.com/@IPMadalena/streams) no YouTube e faz upload para o Google Drive, organizando por pasta de mês.
@@ -28,6 +32,8 @@ youtube_to_drive/
 ├── app.py                   ← interface gráfica (customtkinter)
 ├── baixar_audio.py          ← módulo principal (lógica + CLI)
 ├── setup_wizard.py          ← wizard de primeira execução (5 passos)
+├── player_window.py         ← painel de controles de trecho (CTkToplevel)
+├── player_subprocess.py     ← subprocesso do player YouTube (pywebview/Edge)
 ├── historico.json           ← datas já processadas (gerado em runtime)
 ├── config.json              ← canal YouTube + pasta Drive (gerado em runtime)
 ├── credentials/
@@ -50,6 +56,7 @@ google-auth-oauthlib
 customtkinter
 tkcalendar
 plyer
+pywebview
 ```
 
 ## Detalhes técnicos — baixar_audio.py
@@ -83,6 +90,8 @@ plyer
   - Expõe `average_rate_mbps()` para o log de conclusão em `upload_to_drive()`
 - **Histórico:** `historico.json` — `{date_str: {processado_em, videos: [...]}}` — gerenciado por `load_history()` / `save_history()`
 - **Utilitários de robustez:** `check_internet()`, `check_disk_space(min_mb=500)`, `cleanup_downloads()`, `update_ytdlp()`
+- **`download_selected_sections()`:** versão por-vídeo de `download_selected()`; recebe `list[{id, title, start, end}]`; adiciona `--download-sections "*HH:MM:SS-HH:MM:SS"` quando start/end presentes; um subprocess por vídeo
+- **Modo debug (não-frozen):** em `upload_files()`, o `os.remove(file_path)` após upload é condicionado a `sys.frozen`; em modo script (`python app.py`), o MP3 é mantido em `downloads/` e uma linha `[DEBUG] Arquivo mantido em: ...` é logada
 
 ## Detalhes técnicos — app.py
 
@@ -116,9 +125,11 @@ plyer
   2. Popup de aviso se data já foi processada (pode continuar mesmo assim)
   3. `_worker` — `list_videos()` (fase 1, sem download)
   4. Popup de seleção de vídeos (checkboxes, todos marcados por padrão)
-  5. `_worker_phase2` — `download_selected()` + `upload_files()`
-  6. `_on_done()` — salva histórico + notificação desktop via `plyer`
-- **Mensagens de fila:** `log`, `status`, `progress`, `download_progress`, `done`, `cancelled`, `error`, `preflight_error`, `history_warning`, `auth_done`, `auth_error`
+  5. `_show_player_window()` → abre `PlayerWindow`; usuário marca trechos
+  6. `_worker_phase2` — `download_selected_sections()` + `upload_files()`
+  7. `_on_done()` — salva histórico + notificação desktop via `plyer`
+- **Mensagens de fila:** `log`, `status`, `progress`, `download_progress`, `done`, `cancelled`, `error`, `preflight_error`, `history_warning`, `auth_done`, `auth_error`, `open_player`
+- **Modo subprocesso do player (frozen exe):** `app.py` detecta `--player-mode` antes de qualquer import do Tkinter; importa `player_subprocess` e chama `main()`, encerrando em seguida — permite que `IPMadalena.exe --player-mode video_id x y w h` rode o player sem inicializar a GUI principal
 
 ## Detalhes técnicos — setup_wizard.py
 
@@ -139,13 +150,46 @@ plyer
 
 **`_finish()`:** `grab_release()` → `destroy()` → chama callback `on_complete`.
 
+## Detalhes técnicos — player_window.py + player_subprocess.py
+
+**Problema de threading:** `webview.start()` exige ser chamado da thread principal do processo. O Tkinter já ocupa essa thread com `mainloop()`. A solução é rodar o webview em um **processo separado** (`player_subprocess.py`), que tem sua própria thread principal livre.
+
+**Comunicação por pipes:**
+- `stdout` do subprocesso → pai: mensagens JSON (`{"type": "ready"}`, `{"type": "mark", "target": "start"|"end", "seconds": float}`, `{"type": "error"}`, `{"type": "closed"}`)
+- `stdin` do pai → subprocesso: comandos JSON (`{"cmd": "load", "video_id": "..."}`, `{"cmd": "eval", "js": "..."}`, `{"cmd": "quit"}`)
+
+**`player_window.py`:**
+- `PlayerWindow(ctk.CTkToplevel)` — barra horizontal de 860×118px posicionada diretamente abaixo da janela do player, formando unidade visual integrada
+- `_calc_positions()`: player em (base_x, base_y), controles em (base_x, base_y + PLAY_H) — colados verticalmente, centralizados na tela
+- `_start_player()`: se processo já existe, envia `{"cmd": "load"}` via stdin para navegar sem reabrir; caso contrário inicia novo subprocess via `_build_player_cmd()`
+- `_build_player_cmd()`: retorna `[sys.executable, "--player-mode", ...]` se frozen, ou `[sys.executable, "player_subprocess.py", ...]` em modo script
+- `_read_player_stdout()`: thread daemon lê JSON do stdout e coloca em `self._ev_queue`
+- `_poll_queue()`: chamado a cada 100ms via `after()` — despacha eventos para UI (thread-safe)
+- `_request_mark(target)`: envia `{"cmd": "get_time", "target": "start"|"end"}` — subprocess executa `evaluate_js("video.currentTime")` e responde com `{"type": "mark", ...}`
+- `_kill_player()`: envia `{"cmd": "quit"}` e chama `terminate()` em fallback
+- Botões ◀ ficam desabilitados até receber `{"type": "ready"}`; ao receber, habilita também "Confirmar trecho" e "Usar completo"
+- Ao avançar para próximo vídeo: reutiliza subprocess via `{"cmd": "load"}` — sem fechar e reabrir a janela
+
+**`player_subprocess.py`:**
+- Carrega `https://www.youtube.com/watch?v=VIDEO_ID` (página completa, sem embed) — evita erro 153 (restrição de incorporação em livestreams)
+- Corre `webview.start(gui="edgechromium")` na thread principal deste processo
+- `_Bridge`: `on_time_result(seconds, target)` chamado pelos botões overlay no player via `window.pywebview.api`; envia JSON ao pai via `sys.stdout`
+- `_on_loaded()`: chamado pelo evento `window.events.loaded`; injeta `_OVERLAY_JS` via `evaluate_js()` para adicionar botões "▶ Marcar Início" / "■ Marcar Fim" sobrepostos ao vídeo (retry automático até o elemento `<video>` estar disponível)
+- `_stdin_reader()`: thread daemon lê comandos do pai — `load` → `load_url()`, `get_time` → `evaluate_js("video.currentTime")` + `_send(mark)`, `eval` → `evaluate_js()`, `quit` → `destroy()`
+- `evaluate_js()` ignora CSP da página — roda no contexto do renderer como acesso de desenvolvedor
+
+**Modo `--player-mode` (frozen exe):**
+- `app.py` verifica `"--player-mode" in sys.argv` antes de qualquer import Tkinter
+- Faz `from player_subprocess import main; main(); sys.exit(0)`
+- Permite `IPMadalena.exe --player-mode video_id x y w h` rodar como player sem GUI
+
 ## Instalação e Distribuição
 
 ### instalar.bat — Instalação sem compilar
 
 Script bat para usuários finais que instalam direto do código-fonte:
 1. Verifica/instala Python 3.12 via `winget`
-2. Instala dependências pip (`yt-dlp`, `customtkinter`, `tkcalendar`, `google-api-python-client`, `google-auth-oauthlib`, `plyer`)
+2. Instala dependências pip (`yt-dlp`, `customtkinter`, `tkcalendar`, `google-api-python-client`, `google-auth-oauthlib`, `plyer`, `pywebview`)
 3. Baixa ffmpeg de BtbN GitHub releases via PowerShell (`Invoke-WebRequest` + `Expand-Archive`)
 4. Cria atalho na área de trabalho via `WScript.Shell` apontando para `pythonw.exe app.py`
 5. Oferece abrir o app imediatamente

@@ -1,105 +1,21 @@
 """
-player_window.py — Seleção de trecho via player YouTube.
+player_window.py — Painel de controles de seleção de trecho.
 
-Abre o vídeo em janela pywebview (Edge WebView2) com botões de marcação
-sobrepostos. O painel de controles (CTkToplevel) fica ao lado com os campos
-de tempo e os botões de confirmação.
+A janela de controles (CTkToplevel) é posicionada como uma barra horizontal
+diretamente abaixo da janela do player, formando uma unidade visual integrada.
+
+O player corre em player_subprocess.py para evitar conflito de thread com o
+Tkinter (webview.start() exige a thread principal do processo).
 """
 
+import json
+import os
+import queue
+import subprocess
+import sys
 import threading
 
 import customtkinter as ctk
-import webview
-
-
-# ---------------------------------------------------------------------------
-# Bridge singleton — exposta ao JS como window.pywebview.api
-# ---------------------------------------------------------------------------
-
-class _Bridge:
-    """
-    Único objeto bridge por processo. O PlayerWindow registra seu callback
-    via set_callback(); ao fechar, limpa com clear_callback().
-    Os métodos são chamados da thread do webview — NÃO atualizar Tk diretamente.
-    """
-    def __init__(self):
-        self._cb = None
-
-    def set_callback(self, cb):
-        self._cb = cb
-
-    def clear_callback(self):
-        self._cb = None
-
-    # Chamados pelo JavaScript
-    def on_player_ready(self):
-        if self._cb:
-            self._cb("ready", None)
-
-    def on_time_result(self, seconds, target):
-        if self._cb:
-            self._cb("time", (float(seconds), str(target)))
-
-    def on_player_error(self, code):
-        if self._cb:
-            self._cb("error", int(code))
-
-    def on_window_closed(self):
-        if self._cb:
-            self._cb("closed", None)
-
-
-_bridge   = _Bridge()
-_wv_win   = None    # webview.Window atual
-_wv_alive = False   # True enquanto webview.start() está rodando
-
-
-def _webview_thread_fn(html: str, width: int, height: int, x: int, y: int):
-    global _wv_win, _wv_alive
-    _wv_win = webview.create_window(
-        "IPMadalena — Player",
-        html=html,
-        js_api=_bridge,
-        width=width,
-        height=height,
-        x=x,
-        y=y,
-        resizable=True,
-        on_top=False,
-        confirm_close=False,
-    )
-    # Notifica quando a janela for destruída pelo usuário
-    _wv_win.events.closed += _bridge.on_window_closed
-    _wv_alive = True
-    webview.start(gui="edgechromium")
-    # webview.start() retorna quando todas as janelas forem fechadas
-    _wv_alive = False
-    _bridge.clear_callback()
-
-
-def _open_webview(html: str, width: int, height: int, x: int, y: int):
-    """Abre o webview ou recarrega com novo HTML se já estiver vivo."""
-    global _wv_alive
-    if _wv_alive and _wv_win is not None:
-        try:
-            _wv_win.load_html(html)
-            return
-        except Exception:
-            pass  # janela foi fechada, recria
-    threading.Thread(
-        target=_webview_thread_fn,
-        args=(html, width, height, x, y),
-        daemon=True,
-    ).start()
-
-
-def _close_webview():
-    """Destrói a janela do webview programaticamente."""
-    if _wv_alive and _wv_win is not None:
-        try:
-            _wv_win.destroy()
-        except Exception:
-            pass
 
 
 # ---------------------------------------------------------------------------
@@ -129,121 +45,23 @@ def _hms_to_seconds(hms: str):
 
 
 # ---------------------------------------------------------------------------
-# HTML do player (constante — sem arquivo externo para funcionar no bundle)
+# Resolução do comando para o subprocesso
 # ---------------------------------------------------------------------------
 
-_HTML_TEMPLATE = """\
-<!DOCTYPE html>
-<html>
-<head>
-<meta charset="UTF-8">
-<style>
-  * { margin: 0; padding: 0; box-sizing: border-box; }
-  body { background: #0f0f0f; overflow: hidden; font-family: sans-serif; }
-  #player-wrap { width: 100vw; height: 100vh; position: relative; }
-  #player { width: 100%; height: 100%; }
-  #overlay {
-    position: absolute;
-    bottom: 0; left: 0; right: 0;
-    padding: 10px 16px;
-    background: linear-gradient(transparent, rgba(0,0,0,0.88));
-    display: flex;
-    gap: 12px;
-    align-items: center;
-    justify-content: center;
-  }
-  .mark-btn {
-    background: rgba(255,255,255,0.14);
-    border: 1.5px solid rgba(255,255,255,0.45);
-    color: #fff;
-    font-size: 13px;
-    font-weight: bold;
-    padding: 8px 20px;
-    border-radius: 6px;
-    cursor: pointer;
-    backdrop-filter: blur(4px);
-    transition: background 0.15s;
-  }
-  .mark-btn:hover  { background: rgba(255,255,255,0.28); }
-  .mark-btn:active { background: rgba(255,255,255,0.40); }
-  .mark-btn:disabled { opacity: 0.35; cursor: default; }
-  #status-lbl {
-    color: rgba(255,255,255,0.65);
-    font-size: 12px;
-    min-width: 180px;
-    text-align: center;
-  }
-</style>
-</head>
-<body>
-<div id="player-wrap">
-  <div id="player"></div>
-  <div id="overlay">
-    <button class="mark-btn" id="btn-start" onclick="markTime('start')" disabled>
-      &#9654; Marcar In&iacute;cio
-    </button>
-    <span id="status-lbl">Carregando player...</span>
-    <button class="mark-btn" id="btn-end" onclick="markTime('end')" disabled>
-      &#9632; Marcar Fim
-    </button>
-  </div>
-</div>
-
-<script>
-var player;
-
-// Carrega a YouTube IFrame API
-var tag = document.createElement('script');
-tag.src = 'https://www.youtube.com/iframe_api';
-document.head.appendChild(tag);
-
-function onYouTubeIframeAPIReady() {
-  player = new YT.Player('player', {
-    videoId: '{{VIDEO_ID}}',
-    playerVars: { autoplay: 0, controls: 1, rel: 0, modestbranding: 1 },
-    events: {
-      onReady: function() {
-        document.getElementById('btn-start').disabled = false;
-        document.getElementById('btn-end').disabled  = false;
-        document.getElementById('status-lbl').textContent = 'Player pronto';
-        withBridge(function(api) { api.on_player_ready(); });
-      },
-      onError: function(e) {
-        document.getElementById('status-lbl').textContent = 'Erro no player (' + e.data + ')';
-        withBridge(function(api) { api.on_player_error(e.data); });
-      }
-    }
-  });
-}
-
-function markTime(target) {
-  var t = (player && player.getCurrentTime) ? player.getCurrentTime() : 0;
-  var label = (target === 'start') ? 'In\u00edcio: ' : 'Fim: ';
-  document.getElementById('status-lbl').textContent = label + toHMS(t);
-  withBridge(function(api) { api.on_time_result(t, target); });
-}
-
-function toHMS(s) {
-  var h   = Math.floor(s / 3600);
-  var m   = Math.floor((s % 3600) / 60);
-  var sec = Math.floor(s % 60);
-  return (h < 10 ? '0' : '') + h + ':'
-       + (m < 10 ? '0' : '') + m + ':'
-       + (sec < 10 ? '0' : '') + sec;
-}
-
-// Chama o bridge com retry caso ainda não esteja injetado
-function withBridge(fn) {
-  if (window.pywebview && window.pywebview.api) {
-    fn(window.pywebview.api);
-  } else {
-    setTimeout(function() { withBridge(fn); }, 100);
-  }
-}
-</script>
-</body>
-</html>
-"""
+def _build_player_cmd(video_id: str, x: int, y: int, w: int, h: int) -> list:
+    """
+    Retorna os argumentos para o subprocess do player.
+    - Frozen: IPMadalena.exe --player-mode <args>
+    - Script: python player_subprocess.py <args>
+    """
+    pos_args = [video_id, str(x), str(y), str(w), str(h)]
+    if getattr(sys, "frozen", False):
+        return [sys.executable, "--player-mode"] + pos_args
+    script = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)),
+        "player_subprocess.py",
+    )
+    return [sys.executable, script] + pos_args
 
 
 # ---------------------------------------------------------------------------
@@ -252,21 +70,24 @@ function withBridge(fn) {
 
 class PlayerWindow(ctk.CTkToplevel):
     """
-    Painel de controles lateral ao player YouTube.
+    Barra de controles horizontal posicionada abaixo do player YouTube.
 
     Parâmetros
     ----------
     master      : janela pai (App)
     videos      : list[{id, title, upload_date}]
     on_complete : callback(segments: list[{id, title, start, end}])
-                  start/end são strings "HH:MM:SS" ou None (vídeo completo)
+                  start/end → "HH:MM:SS" ou None (vídeo completo)
     on_cancel   : callback()
     """
 
-    _CTRL_W = 380
-    _CTRL_H = 500
+    # Dimensões do player (subprocesso)
     _PLAY_W = 860
-    _PLAY_H = 580
+    _PLAY_H = 480
+
+    # Dimensões do painel de controles (esta janela)
+    _CTRL_W = 860
+    _CTRL_H = 118
 
     def __init__(self, master, videos: list, on_complete, on_cancel):
         super().__init__(master)
@@ -281,129 +102,273 @@ class PlayerWindow(ctk.CTkToplevel):
         self._on_cancel   = on_cancel
         self._idx         = 0
         self._segments    = []
-
-        _bridge.set_callback(self._on_bridge_event)
+        self._proc        = None
+        self._ev_queue    = queue.Queue()
 
         self._build_ui()
         self._load_video(0)
+        self.after(100, self._poll_queue)
 
     # -----------------------------------------------------------------------
-    # Layout
+    # Layout horizontal compacto
     # -----------------------------------------------------------------------
 
     def _build_ui(self):
-        # Título e contador
+        # ── Linha 1: título + contador ─────────────────────────────────────
+        row1 = ctk.CTkFrame(self, fg_color="transparent")
+        row1.pack(fill="x", padx=16, pady=(8, 0))
+
         self._title_lbl = ctk.CTkLabel(
-            self, font=ctk.CTkFont(size=13, weight="bold"),
-            wraplength=340, justify="left", anchor="w",
+            row1,
+            text="",
+            font=ctk.CTkFont(size=12, weight="bold"),
+            anchor="w",
         )
-        self._title_lbl.pack(anchor="w", padx=20, pady=(16, 2))
+        self._title_lbl.pack(side="left", fill="x", expand=True)
 
         self._counter_lbl = ctk.CTkLabel(
-            self, font=ctk.CTkFont(size=11), text_color="gray", anchor="w",
+            row1,
+            text="",
+            font=ctk.CTkFont(size=11),
+            text_color="gray",
+            anchor="e",
         )
-        self._counter_lbl.pack(anchor="w", padx=20, pady=(0, 6))
+        self._counter_lbl.pack(side="right")
 
+        # ── Separador ──────────────────────────────────────────────────────
         ctk.CTkFrame(self, height=1, fg_color=("gray78", "gray28")).pack(
-            fill="x", padx=16, pady=(0, 10)
+            fill="x", padx=10, pady=(4, 0)
         )
 
-        # Status do player
-        self._status_lbl = ctk.CTkLabel(
-            self, text="⏳ Abrindo player...",
-            font=ctk.CTkFont(size=11), text_color="gray", anchor="w",
-        )
-        self._status_lbl.pack(anchor="w", padx=20, pady=(0, 12))
+        # ── Linha 2: controles de tempo + botões ───────────────────────────
+        row2 = ctk.CTkFrame(self, fg_color="transparent")
+        row2.pack(fill="x", padx=12, pady=(6, 0))
 
-        # Campos de tempo
-        fields = ctk.CTkFrame(self, fg_color="transparent")
-        fields.pack(fill="x", padx=20, pady=(0, 4))
-        fields.columnconfigure(1, weight=1)
-
-        for row_i, (label_text, var_attr, btn_attr, target) in enumerate([
-            ("Início:", "_start_var", "_btn_start", "start"),
-            ("Fim:",    "_end_var",   "_btn_end",   "end"),
-        ]):
-            ctk.CTkLabel(
-                fields, text=label_text,
-                font=ctk.CTkFont(size=12), width=52, anchor="e",
-            ).grid(row=row_i, column=0, padx=(0, 8), pady=6, sticky="e")
-
-            var = ctk.StringVar(value="00:00:00")
-            setattr(self, var_attr, var)
-            var.trace_add("write", lambda *_: self._update_duration())
-
-            ctk.CTkEntry(
-                fields, textvariable=var,
-                width=100, font=ctk.CTkFont(size=13),
-            ).grid(row=row_i, column=1, pady=6, sticky="w")
-
-            btn = ctk.CTkButton(
-                fields, text="◀ Marcar", width=88, state="disabled",
-                command=lambda t=target: self._request_mark(t),
-            )
-            btn.grid(row=row_i, column=2, padx=(8, 0), pady=6)
-            setattr(self, btn_attr, btn)
-
-        # Duração calculada
-        dur_row = ctk.CTkFrame(self, fg_color="transparent")
-        dur_row.pack(fill="x", padx=20, pady=(2, 14))
+        # -- Início --
         ctk.CTkLabel(
-            dur_row, text="Duração:", font=ctk.CTkFont(size=12), width=52, anchor="e",
+            row2, text="Início:",
+            font=ctk.CTkFont(size=12), width=50, anchor="e",
         ).pack(side="left")
-        self._dur_lbl = ctk.CTkLabel(
-            dur_row, text="--:--:--",
-            font=ctk.CTkFont(size=13, weight="bold"),
-        )
-        self._dur_lbl.pack(side="left", padx=8)
 
-        # Aviso de precisão
+        self._start_var = ctk.StringVar(value="00:00:00")
+        self._start_var.trace_add("write", lambda *_: self._update_duration())
+        ctk.CTkEntry(
+            row2, textvariable=self._start_var,
+            width=88, font=ctk.CTkFont(size=12),
+        ).pack(side="left", padx=(4, 4))
+
+        self._btn_start = ctk.CTkButton(
+            row2, text="◀", width=34, state="disabled",
+            command=lambda: self._request_mark("start"),
+        )
+        self._btn_start.pack(side="left", padx=(0, 14))
+
+        # -- Fim --
         ctk.CTkLabel(
-            self,
-            text="⚠ Precisão ±2 s em transmissões ao vivo (corte no keyframe mais próximo).",
-            font=ctk.CTkFont(size=10), text_color="gray",
-            wraplength=340, justify="left",
-        ).pack(anchor="w", padx=20, pady=(0, 6))
+            row2, text="Fim:",
+            font=ctk.CTkFont(size=12), width=36, anchor="e",
+        ).pack(side="left")
 
-        # Feedback de erro
-        self._err_lbl = ctk.CTkLabel(
-            self, text="", font=ctk.CTkFont(size=11),
-            text_color="#e05252", anchor="w",
+        self._end_var = ctk.StringVar(value="00:00:00")
+        self._end_var.trace_add("write", lambda *_: self._update_duration())
+        ctk.CTkEntry(
+            row2, textvariable=self._end_var,
+            width=88, font=ctk.CTkFont(size=12),
+        ).pack(side="left", padx=(4, 4))
+
+        self._btn_end = ctk.CTkButton(
+            row2, text="◀", width=34, state="disabled",
+            command=lambda: self._request_mark("end"),
         )
-        self._err_lbl.pack(anchor="w", padx=20, pady=(0, 8))
+        self._btn_end.pack(side="left", padx=(0, 14))
 
-        ctk.CTkFrame(self, height=1, fg_color=("gray78", "gray28")).pack(
-            fill="x", padx=16, pady=(0, 12)
+        # -- Duração --
+        ctk.CTkLabel(
+            row2, text="Dur:",
+            font=ctk.CTkFont(size=11), text_color="gray",
+        ).pack(side="left")
+
+        self._dur_lbl = ctk.CTkLabel(
+            row2, text="--:--:--",
+            font=ctk.CTkFont(size=12, weight="bold"),
         )
+        self._dur_lbl.pack(side="left", padx=(4, 0))
 
-        # Botões de ação
-        self._confirm_btn = ctk.CTkButton(
-            self,
-            text="Confirmar trecho →",
-            font=ctk.CTkFont(size=13, weight="bold"),
-            state="disabled",
-            command=self._confirm,
-        )
-        self._confirm_btn.pack(fill="x", padx=20, pady=(0, 8))
-
-        self._full_btn = ctk.CTkButton(
-            self,
-            text="Usar vídeo completo",
-            fg_color=("gray75", "gray30"), hover_color=("gray65", "gray25"),
-            state="disabled",
-            command=self._use_full,
-        )
-        self._full_btn.pack(fill="x", padx=20, pady=(0, 8))
-
+        # -- Botões de ação (alinhados à direita) --
         ctk.CTkButton(
-            self,
-            text="Cancelar",
+            row2, text="✕",
+            width=34,
             fg_color="transparent",
             border_width=1,
             text_color=("gray40", "gray70"),
             hover_color=("gray85", "gray20"),
             command=self._cancel,
-        ).pack(fill="x", padx=20, pady=(0, 14))
+        ).pack(side="right")
+
+        self._full_btn = ctk.CTkButton(
+            row2, text="Usar completo",
+            width=118,
+            fg_color=("gray75", "gray30"),
+            hover_color=("gray65", "gray25"),
+            state="disabled",
+            command=self._use_full,
+        )
+        self._full_btn.pack(side="right", padx=(0, 6))
+
+        self._confirm_btn = ctk.CTkButton(
+            row2, text="Confirmar trecho →",
+            width=150,
+            font=ctk.CTkFont(size=12, weight="bold"),
+            state="disabled",
+            command=self._confirm,
+        )
+        self._confirm_btn.pack(side="right", padx=(0, 6))
+
+        # ── Linha 3: status / erro (compartilhado) ─────────────────────────
+        self._status_lbl = ctk.CTkLabel(
+            self,
+            text="⏳ Abrindo player...",
+            font=ctk.CTkFont(size=10),
+            text_color="gray",
+            anchor="w",
+        )
+        self._status_lbl.pack(anchor="w", padx=16, pady=(3, 0))
+
+    # -----------------------------------------------------------------------
+    # Subprocesso do player
+    # -----------------------------------------------------------------------
+
+    def _calc_positions(self):
+        """Calcula posições: player em cima, controles colados abaixo."""
+        sw = self.winfo_screenwidth()
+        sh = self.winfo_screenheight()
+        # Altura total visível (desconta taskbar ~40px)
+        total_h = self._PLAY_H + self._CTRL_H
+        base_x  = max(0, (sw - self._PLAY_W) // 2)
+        base_y  = max(0, (sh - 40 - total_h) // 2)
+        ctrl_y  = base_y + self._PLAY_H
+        self.geometry(f"{self._CTRL_W}x{self._CTRL_H}+{base_x}+{ctrl_y}")
+        return base_x, base_y
+
+    def _start_player(self, video_id: str):
+        """Inicia ou recarrega o player via subprocesso."""
+        px, py = self._calc_positions()
+
+        if self._proc and self._proc.poll() is None:
+            # Processo vivo — navega para novo vídeo via stdin
+            try:
+                self._send_cmd({"cmd": "load", "video_id": video_id})
+                return
+            except Exception:
+                self._kill_player()  # fallback: reinicia
+
+        self._kill_player()
+
+        cmd = _build_player_cmd(video_id, px, py, self._PLAY_W, self._PLAY_H)
+        extra = {}
+        if sys.platform == "win32":
+            extra["creationflags"] = subprocess.CREATE_NO_WINDOW
+
+        try:
+            self._proc = subprocess.Popen(
+                cmd,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                **extra,
+            )
+        except Exception as e:
+            self._set_status(f"⚠ Erro ao abrir player: {e}", error=True)
+            self._confirm_btn.configure(state="normal")
+            self._full_btn.configure(state="normal")
+            return
+
+        threading.Thread(
+            target=self._read_player_stdout,
+            args=(self._proc,),
+            daemon=True,
+        ).start()
+
+    def _kill_player(self):
+        if self._proc and self._proc.poll() is None:
+            try:
+                self._send_cmd({"cmd": "quit"})
+            except Exception:
+                pass
+            try:
+                self._proc.terminate()
+            except Exception:
+                pass
+        self._proc = None
+
+    def _send_cmd(self, obj: dict):
+        """Envia um comando JSON ao subprocess via stdin."""
+        if self._proc and self._proc.stdin:
+            self._proc.stdin.write(json.dumps(obj) + "\n")
+            self._proc.stdin.flush()
+
+    def _read_player_stdout(self, proc):
+        """Thread: lê JSON do stdout do subprocesso → fila de eventos."""
+        try:
+            for line in proc.stdout:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    self._ev_queue.put(json.loads(line))
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        self._ev_queue.put({"type": "proc_ended"})
+
+    def _poll_queue(self):
+        """Tick Tk: despacha eventos do player para a UI (thread-safe)."""
+        try:
+            while True:
+                ev = self._ev_queue.get_nowait()
+                self._handle_player_event(ev)
+        except queue.Empty:
+            pass
+        try:
+            self.after(100, self._poll_queue)
+        except Exception:
+            pass
+
+    def _handle_player_event(self, ev: dict):
+        kind = ev.get("type")
+
+        if kind == "ready":
+            self._set_status("✓ Player pronto — assista e use ◀ para marcar os tempos.",
+                             color="#2fa84f")
+            self._btn_start.configure(state="normal")
+            self._btn_end.configure(state="normal")
+            self._confirm_btn.configure(state="normal")
+            self._full_btn.configure(state="normal")
+
+        elif kind == "mark":
+            seconds = ev.get("seconds", 0.0)
+            target  = ev.get("target", "")
+            hms = _seconds_to_hms(seconds)
+            if target == "start":
+                self._start_var.set(hms)
+            else:
+                self._end_var.set(hms)
+
+        elif kind == "error":
+            self._set_status("⚠ Erro no player — insira os tempos manualmente.",
+                             color="#e0a020")
+            self._confirm_btn.configure(state="normal")
+            self._full_btn.configure(state="normal")
+
+        elif kind in ("closed", "proc_ended"):
+            self._set_status("⚠ Player fechado — insira os tempos manualmente.",
+                             color="#e0a020")
+            self._confirm_btn.configure(state="normal")
+            self._full_btn.configure(state="normal")
 
     # -----------------------------------------------------------------------
     # Carregamento de vídeo
@@ -412,11 +377,9 @@ class PlayerWindow(ctk.CTkToplevel):
     def _load_video(self, idx: int):
         video = self._videos[idx]
         total = len(self._videos)
-
         self._title_lbl.configure(text=video["title"])
         self._counter_lbl.configure(text=f"Vídeo {idx + 1} de {total}")
-        self._status_lbl.configure(text="⏳ Carregando player...", text_color="gray")
-        self._err_lbl.configure(text="")
+        self._set_status("⏳ Abrindo player...", color="gray")
         self._start_var.set("00:00:00")
         self._end_var.set("00:00:00")
         self._btn_start.configure(state="disabled")
@@ -424,75 +387,24 @@ class PlayerWindow(ctk.CTkToplevel):
         self._confirm_btn.configure(state="disabled")
         self._full_btn.configure(state="disabled")
         self._update_duration()
-
-        html = _HTML_TEMPLATE.replace("{{VIDEO_ID}}", video["id"])
-        px, py = self._calc_player_pos()
-        _open_webview(html, self._PLAY_W, self._PLAY_H, px, py)
-
-    def _calc_player_pos(self):
-        """Posiciona player à esquerda e controles à direita, centralizados."""
-        sw = self.winfo_screenwidth()
-        sh = self.winfo_screenheight()
-        total_w = self._PLAY_W + 12 + self._CTRL_W
-        base_x  = max(0, (sw - total_w) // 2)
-        base_y  = max(0, (sh - self._PLAY_H) // 2)
-        ctrl_x  = base_x + self._PLAY_W + 12
-        ctrl_y  = base_y + (self._PLAY_H - self._CTRL_H) // 2
-        self.geometry(f"{self._CTRL_W}x{self._CTRL_H}+{ctrl_x}+{ctrl_y}")
-        return base_x, base_y
-
-    # -----------------------------------------------------------------------
-    # Bridge callback (recebido da thread do webview)
-    # -----------------------------------------------------------------------
-
-    def _on_bridge_event(self, kind: str, data):
-        """Despacha para a thread Tk via after()."""
-        self.after(0, lambda: self._handle_bridge(kind, data))
-
-    def _handle_bridge(self, kind: str, data):
-        if kind == "ready":
-            self._status_lbl.configure(text="✓ Player pronto — assista e marque os tempos.",
-                                        text_color="#2fa84f")
-            self._btn_start.configure(state="normal")
-            self._btn_end.configure(state="normal")
-            self._confirm_btn.configure(state="normal")
-            self._full_btn.configure(state="normal")
-
-        elif kind == "time":
-            seconds, target = data
-            hms = _seconds_to_hms(seconds)
-            if target == "start":
-                self._start_var.set(hms)
-            else:
-                self._end_var.set(hms)
-
-        elif kind == "error":
-            self._status_lbl.configure(
-                text="⚠ Erro no player — insira os tempos manualmente.",
-                text_color="#e0a020",
-            )
-            self._confirm_btn.configure(state="normal")
-            self._full_btn.configure(state="normal")
-
-        elif kind == "closed":
-            self._status_lbl.configure(
-                text="⚠ Player fechado — insira os tempos manualmente.",
-                text_color="#e0a020",
-            )
-            self._confirm_btn.configure(state="normal")
-            self._full_btn.configure(state="normal")
+        self._start_player(video["id"])
 
     # -----------------------------------------------------------------------
     # Ações do usuário
     # -----------------------------------------------------------------------
 
     def _request_mark(self, target: str):
-        """Chama markTime() no JS do player."""
-        if _wv_alive and _wv_win is not None:
+        """Captura o tempo atual do player via evaluate_js no subprocess."""
+        if self._proc and self._proc.poll() is None:
             try:
-                _wv_win.evaluate_js(f"markTime('{target}')")
+                self._send_cmd({"cmd": "get_time", "target": target})
             except Exception:
                 pass
+
+    def _set_status(self, text: str, color: str = "gray", error: bool = False):
+        if error:
+            color = "#e05252"
+        self._status_lbl.configure(text=text, text_color=color)
 
     def _update_duration(self):
         start_s = _hms_to_seconds(self._start_var.get())
@@ -508,10 +420,15 @@ class PlayerWindow(ctk.CTkToplevel):
         start_s   = _hms_to_seconds(start_str)
         end_s     = _hms_to_seconds(end_str)
         if start_s is None or end_s is None:
-            self._err_lbl.configure(text="Tempo inválido. Use o formato HH:MM:SS.")
+            self._set_status("⚠ Tempo inválido — use HH:MM:SS.", error=True)
             return
         if end_s <= start_s:
-            self._err_lbl.configure(text="O tempo de fim deve ser maior que o início.")
+            self._set_status("⚠ O tempo de fim deve ser maior que o início.", error=True)
+            return
+        if start_s == 0 and end_s == 0:
+            self._set_status(
+                "⚠ Informe o trecho ou clique em 'Usar completo'.", error=True
+            )
             return
         self._save_segment(start_str, end_str)
         self._advance()
@@ -537,15 +454,13 @@ class PlayerWindow(ctk.CTkToplevel):
             self._load_video(self._idx)
 
     def _finish(self):
-        _close_webview()
-        _bridge.clear_callback()
+        self._kill_player()
         self.grab_release()
         self.destroy()
         self._on_complete(self._segments)
 
     def _cancel(self):
-        _close_webview()
-        _bridge.clear_callback()
+        self._kill_player()
         self.grab_release()
         self.destroy()
         self._on_cancel()

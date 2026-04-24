@@ -860,7 +860,10 @@ def upload_files(date_str, files, on_log=None, on_status=None, on_progress=None,
                         on_log=log, on_progress=progress,
                         on_upload_stats=on_upload_stats,
                         cancel_event=cancel_event)
-        os.remove(file_path)
+        if getattr(sys, "frozen", False):
+            os.remove(file_path)
+        else:
+            log(f"[DEBUG] Arquivo mantido em: {file_path}")
 
     status("Concluído!")
     log(f"✓ {total} arquivo(s) enviado(s) para o Drive.")

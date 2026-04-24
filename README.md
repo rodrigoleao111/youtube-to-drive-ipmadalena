@@ -29,7 +29,7 @@ Existem duas formas de instalar o app. Escolha a que melhor se encaixa no seu pe
 ### Opção 3 — Instalação manual (desenvolvedores)
 
 ```bash
-pip install yt-dlp google-api-python-client google-auth-oauthlib customtkinter tkcalendar plyer
+pip install yt-dlp google-api-python-client google-auth-oauthlib customtkinter tkcalendar plyer pywebview
 ```
 
 Instale o ffmpeg em `ffmpeg/bin/ffmpeg.exe` e execute:
@@ -42,16 +42,14 @@ python app.py
 
 ## Configuração inicial (primeiro uso)
 
-Na primeira execução, o **assistente de configuração** é aberto automaticamente e guia você por 6 passos:
+Na primeira execução, o **assistente de configuração** é aberto automaticamente e guia você por 4 passos:
 
 1. **Boas-vindas** — visão geral do app
-2. **Credenciais Google** — selecione o arquivo `client_secret.json` baixado do Google Cloud Console
-3. **Canal YouTube** — informe a URL do canal a monitorar
-4. **Pasta do Drive** — informe o ID da pasta raiz onde os áudios serão organizados
-5. **Autorização Google** — o navegador abre para você aprovar o acesso ao Drive
-6. **Conclusão** — tudo pronto para usar
+2. **Canal YouTube** — informe a URL do canal a monitorar
+3. **Pasta do Drive** — informe o ID da pasta raiz onde os áudios serão organizados
+4. **Autorização Google** — o navegador abre para você aprovar o acesso ao Drive
 
-> Para criar as credenciais Google, acesse o [Google Cloud Console](https://console.cloud.google.com/), crie um projeto, ative a API do Google Drive e baixe o arquivo OAuth `client_secret.json`.
+> As credenciais OAuth já estão embutidas no app — não é necessário nenhum arquivo adicional do Google Cloud Console.
 
 Após a configuração, o token é salvo em `credentials/token.pkl` e renovado automaticamente. Se ficar corrompido, é deletado e a autenticação é refeita na próxima execução.
 
@@ -68,8 +66,10 @@ python app.py
 1. Informe a data do culto (DD/MM/AAAA) ou use o seletor de calendário 📅
 2. Clique em **Processar**
 3. Selecione os vídeos desejados no popup e clique em **Prosseguir**
-4. Acompanhe o progresso pelas barras de **Download**, **Conversão** e **Upload**
-5. Uma notificação desktop é exibida ao concluir
+4. O **player** abre com o vídeo no YouTube — assista e clique **◀** para marcar o início e o fim da pregação
+5. Clique em **Confirmar trecho** (ou **Usar vídeo completo** para enviar sem corte)
+6. Acompanhe o progresso pelas barras de **Download**, **Conversão** e **Upload**
+7. Uma notificação desktop é exibida ao concluir
 
 ### Linha de comando
 
@@ -102,13 +102,16 @@ Clique no ícone ⚙ no canto superior direito para acessar a tela de configura�
 4. Atualiza o yt-dlp em background ao iniciar
 5. Busca os vídeos publicados na data informada no canal
 6. Exibe popup para selecionar quais vídeos processar
-7. Baixa o áudio e converte para MP3 (barra de Download + Conversão)
-8. Localiza a pasta do mês no Drive (ou cria se não existir)
-9. Faz o upload com progresso em tempo real (barra de Upload)
-10. Remove os arquivos locais após o upload
-11. Salva histórico local e exibe notificação desktop
+7. Abre o player para marcar o trecho desejado (início/fim da pregação)
+8. Baixa apenas o trecho selecionado e converte para MP3
+9. Localiza a pasta do mês no Drive (ou cria se não existir)
+10. Faz o upload com progresso em tempo real
+11. Remove os arquivos locais após o upload
+12. Salva histórico local e exibe notificação desktop
 
 > **Transmissões ao vivo:** o YouTube pode registrar a data de publicação como o dia seguinte ao culto. O script lida com isso automaticamente.
+
+> **Precisão do corte:** o yt-dlp corta no keyframe mais próximo do tempo marcado, com precisão de ±2 segundos.
 
 ---
 
@@ -119,12 +122,13 @@ youtube_to_drive/
 ├── app.py                   ← interface gráfica (customtkinter)
 ├── baixar_audio.py          ← módulo principal (lógica + CLI)
 ├── setup_wizard.py          ← assistente de configuração inicial
+├── player_window.py         ← painel de controles de seleção de trecho
+├── player_subprocess.py     ← subprocesso do player YouTube (Edge WebView2)
 ├── historico.json           ← datas já processadas (gerado automaticamente)
 ├── config.json              ← canal e pasta Drive (gerado automaticamente)
 ├── credentials/
-│   ├── client_secret.json   ← credenciais OAuth (você baixa do Google Cloud)
 │   └── token.pkl            ← token de acesso (gerado automaticamente)
-├── downloads/               ← pasta temporária (limpa após cada execução)
+├── downloads/               ← pasta temporária (limpa após upload no executável)
 ├── logs/
 │   └── DD-MM-YYYY.log       ← log diário (gerado automaticamente)
 ├── ffmpeg/bin/ffmpeg.exe    ← conversor de áudio
@@ -160,9 +164,9 @@ O script cuida de tudo automaticamente em 4 passos:
 | Problema | Solução |
 |---|---|
 | Botão "Autorizar Google Drive" aparece no topo | Clique nele ou acesse ⚙ Configurações para autorizar |
-| `client_secret.json` não encontrado | O assistente de configuração abre automaticamente na primeira execução |
 | Erro de autenticação Google | Acesse ⚙ Configurações → Logout e autorize novamente |
 | Nenhum vídeo encontrado para a data | Verifique se o culto foi transmitido nesse dia |
+| Player não abre | Verifique se o Edge WebView2 Runtime está instalado (já vem com o Windows 11) |
 | Upload duplicado | O script detecta arquivos já existentes no Drive e pula automaticamente |
 | App abre duas vezes | Somente uma instância é permitida — feche a anterior |
 | Sem espaço em disco | O app avisa antes de começar; libere pelo menos 500 MB |
