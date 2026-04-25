@@ -269,7 +269,13 @@ class TestSocketTimeout:
     """Verifica que --socket-timeout 30 está presente em todos os comandos yt-dlp."""
 
     def _capture_cmds(self, fn, *args, **kwargs):
-        """Chama fn e retorna todos os cmds passados para _start_process."""
+        """
+        Chama fn e retorna todos os cmds passados para start_process.
+
+        Patcha tanto baixar_audio._start_process (download_selected legado)
+        quanto infrastructure.youtube.ytdlp_source.start_process (funções
+        refatoradas: list_videos, download_selected_sections).
+        """
         captured = []
 
         def fake_start_process(cmd, cancel_event=None):
@@ -280,7 +286,11 @@ class TestSocketTimeout:
             proc.wait = lambda: None
             return proc
 
-        with patch.object(baixar_audio, "_start_process", side_effect=fake_start_process):
+        with patch.object(baixar_audio, "_start_process", side_effect=fake_start_process), \
+             patch("infrastructure.youtube.ytdlp_source.start_process",
+                   side_effect=fake_start_process), \
+             patch("infrastructure.youtube.ytdlp_source.ffmpeg_dir", return_value=None), \
+             patch("glob.glob", return_value=[]):
             try:
                 fn(*args, **kwargs)
             except Exception:
@@ -341,7 +351,10 @@ class TestDownloadSelectedSections:
             return proc
 
         with patch.object(baixar_audio, "DOWNLOAD_DIR", str(tmp_path)), \
-             patch.object(baixar_audio, "_start_process", side_effect=fake_start_process):
+             patch("infrastructure.youtube.ytdlp_source.start_process",
+                   side_effect=fake_start_process), \
+             patch("infrastructure.youtube.ytdlp_source.ffmpeg_dir", return_value=None), \
+             patch("glob.glob", return_value=[]):
             try:
                 baixar_audio.download_selected_sections(videos)
             except Exception:
@@ -405,7 +418,10 @@ class TestDownloadSelectedSections:
         ]
 
         with patch.object(baixar_audio, "DOWNLOAD_DIR", str(tmp_path)), \
-             patch.object(baixar_audio, "_start_process", side_effect=fake_start_process):
+             patch("infrastructure.youtube.ytdlp_source.start_process",
+                   side_effect=fake_start_process), \
+             patch("infrastructure.youtube.ytdlp_source.ffmpeg_dir", return_value=None), \
+             patch("glob.glob", return_value=[]):
             with pytest.raises(baixar_audio.OperacaoCancelada):
                 baixar_audio.download_selected_sections(videos, cancel_event=cancel)
 

@@ -30,22 +30,35 @@ python baixar_audio.py 19/04/2026
 
 ```
 youtube_to_drive/
-├── app.py                   ← interface gráfica (customtkinter)
-├── baixar_audio.py          ← módulo principal (lógica + CLI)
-├── setup_wizard.py          ← wizard de primeira execução (5 passos)
-├── player_window.py         ← painel de controles de trecho (CTkToplevel)
-├── player_subprocess.py     ← subprocesso do player YouTube (pywebview/Edge)
-├── historico.json           ← datas já processadas (gerado em runtime)
-├── config.json              ← canal YouTube + pasta Drive (gerado em runtime)
+├── app.py                          ← interface gráfica (customtkinter)
+├── baixar_audio.py                 ← módulo principal (lógica + CLI)
+├── setup_wizard.py                 ← wizard de primeira execução (5 passos)
+├── player_window.py                ← painel de controles de trecho (CTkToplevel)
+├── player_subprocess.py            ← subprocesso do player YouTube (pywebview/Edge)
+│
+├── domain/                         ← núcleo de negócio (sem deps externas)
+│   ├── __init__.py
+│   ├── entities.py                 ← Video, Segment, AudioFile, ProcessingResult
+│   ├── exceptions.py               ← IPMadalenaError, OperacaoCancelada, DomainError...
+│   └── ports.py                    ← Protocols: IVideoSource, IAudioDownloader...
+│
+├── infrastructure/                 ← adaptadores que conectam ao domínio
+│   └── youtube/
+│       ├── __init__.py
+│       ├── _utils.py               ← ytdlp_exe(), ffmpeg_dir(), start_process(), check_cancel()
+│       └── ytdlp_source.py         ← YtDlpVideoSource, YtDlpAudioDownloader
+│
+├── historico.json                  ← datas já processadas (gerado em runtime)
+├── config.json                     ← canal YouTube + pasta Drive (gerado em runtime)
 ├── credentials/
-│   └── token.pkl            ← token OAuth salvo (gerado na 1ª execução)
-├── downloads/               ← pasta temporária, limpa após upload
-├── logs/DD-MM-YYYY.log      ← log diário (gerado em runtime)
-├── ffmpeg/bin/ffmpeg.exe    ← conversor local de áudio
-├── instalar.bat             ← instalador script (sem PyInstaller)
-├── build_app.spec           ← spec do PyInstaller para gerar .exe
-├── build_installer.bat      ← gera instalador completo (PyInstaller + Inno Setup)
-└── installer.iss            ← script Inno Setup para IPMadalena_Setup.exe
+│   └── token.pkl                   ← token OAuth salvo (gerado na 1ª execução)
+├── downloads/                      ← pasta temporária, limpa após upload
+├── logs/DD-MM-YYYY.log             ← log diário (gerado em runtime)
+├── ffmpeg/bin/ffmpeg.exe           ← conversor local de áudio
+├── instalar.bat                    ← instalador script (sem PyInstaller)
+├── build_app.spec                  ← spec do PyInstaller para gerar .exe
+├── build_installer.bat             ← gera instalador completo (PyInstaller + Inno Setup)
+└── installer.iss                   ← script Inno Setup para IPMadalena_Setup.exe
 ```
 
 ## Dependências Python
@@ -59,6 +72,34 @@ tkcalendar
 plyer
 pywebview
 ```
+
+## Arquitetura — domain/ e infrastructure/ (Clean Architecture, Fase 1+2)
+
+O projeto está em migração incremental para Clean Architecture. As fases concluídas introduzem:
+
+**`domain/` — núcleo de negócio (zero dependências externas)**
+- `entities.py` — dataclasses imutáveis (`frozen=True`): `Video`, `Segment`, `AudioFile`, `ProcessingResult`
+- `exceptions.py` — hierarquia: `IPMadalenaError` → `DomainError` → `VideoNaoEncontrado`, `SegmentoInvalido`, `ConfiguracaoInvalida`; `OperacaoCancelada` herda direto de `IPMadalenaError`
+- `ports.py` — `typing.Protocol` com `@runtime_checkable`: `IVideoSource`, `IAudioDownloader`, `ICloudStorage`, `IHistoryRepository`, `IConfigRepository`, `INotifier`
+
+**`infrastructure/youtube/` — adaptadores yt-dlp**
+- `_utils.py` — utilitários stateless: `ytdlp_exe()`, `ffmpeg_dir()`, `start_process()`, `check_cancel()`
+- `ytdlp_source.py` — `YtDlpVideoSource` (implementa `IVideoSource`), `YtDlpAudioDownloader` (implementa `IAudioDownloader`)
+
+**Compatibilidade retroativa em `baixar_audio.py`:**
+- `list_videos()` delega para `YtDlpVideoSource` e converte `List[Video]` → `List[dict]`
+- `download_selected_sections()` delega para `YtDlpAudioDownloader` e converte `List[AudioFile]` → `List[str]` (caminhos)
+- `OperacaoCancelada` é re-exportada de `domain.exceptions` (mesma classe, sem duplicação)
+- Nenhuma assinatura pública foi alterada — callers existentes continuam funcionando
+
+**Fases futuras planejadas:**
+- Fase 3: `infrastructure/drive/` — `GoogleDriveStorage` (implementa `ICloudStorage`)
+- Fase 4: `infrastructure/persistence/` — `JsonHistoryRepository`, `JsonConfigRepository`
+- Fase 5: camada `application/` (use cases)
+- Fase 6: `presentation/` (presenter pattern para `App`)
+- Fase 7: remoção das funções legadas de `baixar_audio.py`
+
+---
 
 ## Detalhes técnicos — baixar_audio.py
 
@@ -253,8 +294,12 @@ tests/
 ├── conftest.py              ← sys.path + fixture shared_app (sessão)
 ├── test_baixar_audio.py     ← 39 testes unitários do módulo principal
 ├── test_app.py              ← 45 testes de integração da GUI
-└── test_player_window.py    ← 33 testes do player e utilitários de tempo
+├── test_player_window.py    ← 33 testes do player e utilitários de tempo
+├── test_domain.py           ← 42 testes puros da camada de domínio
+└── test_ytdlp_source.py     ← 26 testes da infraestrutura YouTube (subprocess mockado)
 ```
+
+**Total: 185 testes (186 com setup)**
 
 **Como rodar:**
 ```bash

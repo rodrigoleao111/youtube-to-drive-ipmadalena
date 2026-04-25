@@ -88,8 +88,10 @@ MESES_PT = {
 # Helpers de callback — evitam verificar None em todo lugar
 # ---------------------------------------------------------------------------
 
-class OperacaoCancelada(Exception):
-    pass
+# Re-exportado de domain.exceptions para compatibilidade retroativa.
+# Código legado que importa OperacaoCancelada de baixar_audio continuará
+# funcionando; a exceção lançada pela camada de infra é a mesma classe.
+from domain.exceptions import OperacaoCancelada  # noqa: F401, E402
 
 def _noop(*args, **kwargs):
     pass
@@ -578,60 +580,30 @@ def list_videos(date_str, on_log=None, on_status=None, cancel_event=None):
 
     Retorna lista de dicts:
         {"id": str, "title": str, "upload_date": str}   # upload_date: YYYYMMDD
+
+    Delega para infrastructure.youtube.YtDlpVideoSource; converte os objetos
+    Video de domínio de volta para dicts para manter compatibilidade retroativa.
     """
-    log    = on_log    if callable(on_log)    else _noop
-    status = on_status if callable(on_status) else _noop
+    from infrastructure.youtube.ytdlp_source import YtDlpVideoSource
+    from domain.exceptions import VideoNaoEncontrado
 
-    date          = datetime.strptime(date_str, "%d/%m/%Y")
-    dateafter_str = (date - timedelta(days=1)).strftime("%Y%m%d")
-    channel_url   = load_config()["channel_url"]
+    channel_url = load_config()["channel_url"]
 
-    cmd = [
-        _ytdlp_cmd(),
-        "--simulate",
-        "--print", "%(id)s|||%(title)s|||%(upload_date)s",
-        "--dateafter", dateafter_str,
-        "--break-on-reject",
-        "--socket-timeout", "30",
-        "--encoding", "utf-8",
-        channel_url,
-    ]
-
-    status("Buscando vídeos no YouTube...")
-    log(f"Canal: {channel_url}")
-    log(f"Data: {date_str}")
-
-    process = _start_process(cmd, cancel_event)
-
-    target_date    = date.strftime("%Y%m%d")
-    target_date_p1 = (date + timedelta(days=1)).strftime("%Y%m%d")
-
-    videos = []
-    for line in process.stdout:
-        _check_cancel(cancel_event)
-        line = line.rstrip()
-        if "|||" not in line:
-            continue
-        parts = line.split("|||", 2)
-        if len(parts) == 3:
-            vid_id, title, upload_date = parts
-            upload_date = upload_date.strip()
-            if upload_date not in (target_date, target_date_p1):
-                continue
-            videos.append({"id": vid_id, "title": title, "upload_date": upload_date})
-            log(f"Encontrado: {title}")
-
-    process.wait()
-    _check_cancel(cancel_event)
-
-    if not videos:
-        raise RuntimeError(
-            f"Nenhum vídeo encontrado para {date_str}.\n"
-            "Verifique se houve culto nessa data no canal."
+    try:
+        source = YtDlpVideoSource()
+        videos = source.list_videos(
+            date_str,
+            channel_url,
+            cancel_event=cancel_event,
+            on_log=on_log,
+            on_status=on_status,
         )
+    except VideoNaoEncontrado as exc:
+        # Converte para RuntimeError para não quebrar chamadores existentes
+        raise RuntimeError(str(exc)) from exc
 
-    log(f"{len(videos)} vídeo(s) encontrado(s).")
-    return videos
+    # Converte Video → dict (contrato público de baixar_audio.py)
+    return [{"id": v.id, "title": v.title, "upload_date": v.upload_date} for v in videos]
 
 
 # ---------------------------------------------------------------------------
@@ -741,91 +713,37 @@ def download_selected_sections(
         {"id": str, "title": str, "start": str|None, "end": str|None}
     start/end no formato "HH:MM:SS"; None = vídeo completo.
     Retorna lista de caminhos dos MP3 baixados.
+
+    Delega para infrastructure.youtube.YtDlpAudioDownloader; converte os
+    objetos AudioFile de domínio de volta para caminhos (str) para manter
+    compatibilidade retroativa.
     """
-    log         = on_log               if callable(on_log)               else _noop
-    status      = on_status            if callable(on_status)            else _noop
-    dl_progress = on_download_progress if callable(on_download_progress) else _noop
+    from infrastructure.youtube.ytdlp_source import YtDlpAudioDownloader
+    from domain.entities import Segment
 
-    total_videos = len(videos_with_sections)
+    # Converte dicts de entrada → Segment (domínio)
+    segments = [
+        Segment(
+            video_id=v["id"],
+            title=v["title"],
+            start=v.get("start"),
+            end=v.get("end"),
+        )
+        for v in videos_with_sections
+    ]
 
-    os.makedirs(DOWNLOAD_DIR, exist_ok=True)
-    output_template = os.path.join(DOWNLOAD_DIR, "%(title)s.%(ext)s")
+    downloader = YtDlpAudioDownloader()
+    audio_files = downloader.download(
+        segments,
+        DOWNLOAD_DIR,
+        cancel_event=cancel_event,
+        on_log=on_log,
+        on_status=on_status,
+        on_progress=on_download_progress,
+    )
 
-    _DL_PCT_RE = re.compile(r'\[download\]\s+(\d+\.?\d*)%')
-
-    for current_video, video in enumerate(videos_with_sections):
-        _check_cancel(cancel_event)
-
-        vid_id = video["id"]
-        start  = video.get("start")
-        end    = video.get("end")
-        url    = f"https://www.youtube.com/watch?v={vid_id}"
-
-        status(f"Baixando vídeo {current_video + 1} de {total_videos}...")
-        log(f"Baixando: {video['title']}")
-        if start and end:
-            log(f"  Trecho: {start} → {end}")
-        else:
-            log("  Vídeo completo")
-
-        cmd = [
-            _ytdlp_cmd(),
-            "--extract-audio",
-            "--audio-format", "mp3",
-            "--audio-quality", "0",
-            "--output", output_template,
-            "--socket-timeout", "30",
-            "--encoding", "utf-8",
-            "--extractor-args", "youtube:player_client=ios,android,web",
-        ]
-        if start and end:
-            cmd += ["--download-sections", f"*{start}-{end}"]
-        if FFMPEG_LOCATION:
-            cmd += ["--ffmpeg-location", os.path.dirname(FFMPEG_LOCATION)]
-        cmd.append(url)
-
-        process = _start_process(cmd, cancel_event)
-
-        for line in process.stdout:
-            _check_cancel(cancel_event)
-            line = line.rstrip()
-            if not line:
-                continue
-            if "WARNING" in line and "JavaScript" in line:
-                continue
-            if "[youtube]" in line and "Downloading" in line:
-                continue
-
-            if line.startswith("[download]") and "%" in line:
-                m = _DL_PCT_RE.match(line)
-                if m:
-                    file_pct = float(m.group(1)) / 100.0
-                    overall  = (current_video + file_pct) / total_videos
-                    dl_progress(overall)
-                continue
-
-            if "[download] Destination:" in line:
-                fname = line.split("Destination:")[-1].strip().split("\\")[-1]
-                log(f"Destino: {fname}")
-            elif "[ExtractAudio]" in line:
-                dl_progress((current_video + 1) / total_videos)
-                status("Convertendo para MP3...")
-                log("Convertendo para MP3...")
-            else:
-                log(line)
-
-        process.wait()
-        _check_cancel(cancel_event)
-
-        if process.returncode != 0:
-            raise RuntimeError(
-                f"yt-dlp encerrou com código {process.returncode} "
-                f"ao baixar '{video['title']}'.\n"
-                "Verifique sua conexão e tente novamente."
-            )
-
-    files = glob.glob(os.path.join(DOWNLOAD_DIR, "*.mp3"))
-    return sorted(files)
+    # Compatibilidade retroativa: retorna lista de caminhos (str)
+    return [af.path for af in audio_files]
 
 
 # ---------------------------------------------------------------------------
