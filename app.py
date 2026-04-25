@@ -105,6 +105,7 @@ class App(ctk.CTk):
         self._running      = False
         self._converting   = False
         self._cancel_event = threading.Event()
+        self._dot_pulsing  = False
 
         self._build_ui()
         self.after(100, self._process_queue)
@@ -458,6 +459,38 @@ class App(ctk.CTk):
         text_color, dot_color = _colors.get(state, ("white", "#4a9edd"))
         self.status_label.configure(text=text, text_color=text_color)
         self._status_dot.configure(text_color=dot_color)
+
+        if state == "running":
+            self._start_dot_pulse()
+        else:
+            self._stop_dot_pulse(dot_color)
+
+    def _start_dot_pulse(self):
+        """Inicia a animação de pulsar na bolinha de status (se ainda não estiver ativa)."""
+        if not self._dot_pulsing:
+            self._dot_pulsing = True
+            self._dot_pulse_bright = True
+            self._animate_dot_pulse()
+
+    def _stop_dot_pulse(self, final_color: str):
+        """Para a animação e fixa a bolinha na cor final do estado."""
+        self._dot_pulsing = False
+        try:
+            self._status_dot.configure(text_color=final_color)
+        except Exception:
+            pass
+
+    def _animate_dot_pulse(self):
+        """Alterna a bolinha entre azul vivo e azul escuro a cada 500 ms."""
+        if not self._dot_pulsing:
+            return
+        color = "#4a9edd" if self._dot_pulse_bright else "#1a5a8c"
+        self._dot_pulse_bright = not self._dot_pulse_bright
+        try:
+            self._status_dot.configure(text_color=color)
+            self.after(500, self._animate_dot_pulse)
+        except Exception:
+            self._dot_pulsing = False
 
     # -----------------------------------------------------------------------
     # Controle das barras de progresso
@@ -886,6 +919,7 @@ class App(ctk.CTk):
     def _on_done(self, date_str=None, video_titles=None):
         self._running = False
         self._converting = False
+        self._stop_dot_pulse("#2fa84f")
         self._set_buttons_running(False)
         self.download_bar.set(1)
         self.convert_bar.set(1)
