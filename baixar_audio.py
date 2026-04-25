@@ -309,263 +309,71 @@ def _check_cancel(cancel_event):
 
 
 # ---------------------------------------------------------------------------
-# Google Drive
+# Google Drive — funções públicas delegam para GoogleDriveStorage
 # ---------------------------------------------------------------------------
 
+def _make_drive_storage(*, delete_after_upload: bool = False):
+    """Instancia GoogleDriveStorage com configuração atual do projeto."""
+    from infrastructure.drive.gdrive_storage import GoogleDriveStorage
+    cfg = load_config()
+    return GoogleDriveStorage(
+        token_file          = TOKEN_FILE,
+        oauth_config        = _OAUTH_CLIENT_CONFIG,
+        scopes              = SCOPES,
+        root_folder_id      = cfg["drive_folder_id"],
+        delete_after_upload = delete_after_upload,
+    )
+
+
 def get_drive_service(on_log=None):
-    log = on_log if callable(on_log) else _noop
-    creds = None
-
-    if os.path.exists(TOKEN_FILE):
-        try:
-            with open(TOKEN_FILE, "rb") as f:
-                creds = pickle.load(f)
-        except Exception:
-            log("Token corrompido — removendo e reautenticando...")
-            try:
-                os.remove(TOKEN_FILE)
-            except Exception:
-                pass
-            creds = None
-
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            log("Renovando token de acesso...")
-            try:
-                creds.refresh(Request())
-            except Exception:
-                log("Falha ao renovar token — reautenticando...")
-                try:
-                    os.remove(TOKEN_FILE)
-                except Exception:
-                    pass
-                creds = None
-
-        if not creds or not creds.valid:
-            log("Abrindo navegador para autenticação...")
-            flow = InstalledAppFlow.from_client_config(_OAUTH_CLIENT_CONFIG, SCOPES)
-            creds = flow.run_local_server(host="127.0.0.1", port=8085)
-
-        with open(TOKEN_FILE, "wb") as f:
-            pickle.dump(creds, f)
-
-    return build("drive", "v3", credentials=creds)
+    """Retorna um serviço Drive API autenticado."""
+    return _make_drive_storage().get_service(on_log=on_log)
 
 
 def check_auth_status():
     """Retorna True se o token do Drive está presente e válido."""
-    if not os.path.exists(TOKEN_FILE):
-        return False
-    try:
-        with open(TOKEN_FILE, "rb") as f:
-            creds = pickle.load(f)
-    except Exception:
-        return False
-    if not creds:
-        return False
-    if creds.valid:
-        return True
-    if creds.expired and creds.refresh_token:
-        try:
-            creds.refresh(Request())
-            with open(TOKEN_FILE, "wb") as f:
-                pickle.dump(creds, f)
-            return True
-        except Exception:
-            return False
-    return False
+    return _make_drive_storage().check_auth()
 
 
 def run_auth(on_log=None):
     """Executa o fluxo OAuth do Drive. Levanta exceção em caso de falha."""
-    get_drive_service(on_log=on_log)
+    _make_drive_storage().get_service(on_log=on_log)
 
 
 def find_or_create_month_folder(service, date, on_log=None):
-    log = on_log if callable(on_log) else _noop
+    """Localiza ou cria a pasta do mês no Drive. API mantida para compatibilidade."""
+    from infrastructure.drive.gdrive_storage import GoogleDriveStorage
     cfg = load_config()
-    root_folder_id = cfg["drive_folder_id"]
-    mes = MESES_PT[date.month]
-    ano = date.year
-
-    results = service.files().list(
-        q=(
-            f"'{root_folder_id}' in parents "
-            "and mimeType='application/vnd.google-apps.folder' "
-            "and trashed=false"
-        ),
-        fields="files(id, name)",
-        orderBy="name",
-    ).execute()
-    folders = results.get("files", [])
-
-    candidates = [
-        f"{mes} {ano}", f"{mes}-{ano}", f"{mes}/{ano}",
-        f"{ano}-{date.month:02d}", f"{date.month:02d}/{ano}", mes,
-    ]
-    for folder in folders:
-        for c in candidates:
-            if c.lower() in folder["name"].lower():
-                log(f"Pasta do mês encontrada: {folder['name']}")
-                return folder["id"]
-
-    # Nenhuma encontrada — cria automaticamente
-    folder_name = f"{mes} {ano}"
-    log(f"Criando pasta '{folder_name}' no Drive...")
-    meta = {
-        "name": folder_name,
-        "mimeType": "application/vnd.google-apps.folder",
-        "parents": [root_folder_id],
-    }
-    folder = service.files().create(body=meta, fields="id").execute()
-    return folder["id"]
-
-
-class _ProgressFile:
-    """
-    Wrapper de arquivo para streaming via requests.
-    - Verifica cancelamento a cada leitura (~65 KB).
-    - Atualiza label de stats a cada 1 MB (feedback visual contínuo).
-    - Loga no texto apenas nos marcos 25 %, 50 % e 75 % (evita poluição).
-    - Expõe average_rate_mbps() para o log final de conclusão.
-    """
-    _STATS_EVERY = 1 * 1024 * 1024   # atualiza label a cada 1 MB
-    _MILESTONES  = (25, 50, 75)       # % para logar progresso no texto
-
-    def __init__(self, file_path, file_size, on_log, on_progress, on_upload_stats,
-                 cancel_event):
-        self._f              = open(file_path, "rb")
-        self._size           = file_size
-        self._sent           = 0
-        self._log            = on_log
-        self._progress       = on_progress
-        self._stats          = on_upload_stats
-        self._cancel         = cancel_event
-        self._start_time     = time.time()
-        self._last_stats     = 0      # bytes na última atualização do label
-        self._last_stats_t   = time.time()
-        self._next_milestone = 0      # índice em _MILESTONES
-
-    def read(self, n=-1):
-        if self._cancel and self._cancel.is_set():
-            raise OperacaoCancelada("Upload cancelado pelo usuário.")
-        data = self._f.read(n)
-        if data:
-            self._sent += len(data)
-            pct = int(self._sent / self._size * 100)
-            self._progress(pct)
-
-            # Atualiza label de stats a cada 1 MB
-            if self._sent - self._last_stats >= self._STATS_EVERY:
-                mb_done  = self._sent / (1024 * 1024)
-                mb_total = self._size / (1024 * 1024)
-                now      = time.time()
-                elapsed  = now - self._last_stats_t
-                chunk_mb = (self._sent - self._last_stats) / (1024 * 1024)
-                rate     = chunk_mb / elapsed if elapsed > 0 else 0.0
-                self._stats(mb_done, mb_total, rate)
-                self._last_stats   = self._sent
-                self._last_stats_t = now
-
-            # Loga no texto apenas nos marcos 25 %, 50 %, 75 %
-            if self._next_milestone < len(self._MILESTONES):
-                threshold = self._MILESTONES[self._next_milestone]
-                if pct >= threshold:
-                    mb_done  = self._sent / (1024 * 1024)
-                    mb_total = self._size / (1024 * 1024)
-                    avg_rate = self.average_rate_mbps()
-                    self._log(
-                        f"Upload: {threshold}% — "
-                        f"{mb_done:.1f} / {mb_total:.1f} MB "
-                        f"({avg_rate:.2f} MB/s)"
-                    )
-                    self._next_milestone += 1
-        return data
-
-    def average_rate_mbps(self):
-        """Taxa média desde o início do upload."""
-        elapsed = time.time() - self._start_time
-        return (self._sent / (1024 * 1024)) / elapsed if elapsed > 0 else 0.0
-
-    def __len__(self):
-        return self._size
-
-    def close(self):
-        self._f.close()
+    storage = GoogleDriveStorage(
+        token_file     = TOKEN_FILE,
+        oauth_config   = _OAUTH_CLIENT_CONFIG,
+        scopes         = SCOPES,
+        root_folder_id = cfg["drive_folder_id"],
+    )
+    return storage._find_or_create_month_folder(service, date, on_log=on_log)
 
 
 def upload_to_drive(service, file_path, folder_id, on_log=None, on_progress=None,
                     on_upload_stats=None, cancel_event=None):
     """
-    Faz upload via requests + AuthorizedSession (mais rápido que httplib2).
-    Progresso reportado a cada 1 MB; cancelamento responsivo em < 100 ms.
+    Faz upload de um único arquivo para o Drive.
+    API mantida para compatibilidade; delega para GoogleDriveStorage._upload_single().
     """
-    log          = on_log          if callable(on_log)          else _noop
-    progress     = on_progress     if callable(on_progress)     else _noop
-    upload_stats = on_upload_stats if callable(on_upload_stats) else _noop
-
-    file_name       = os.path.basename(file_path)
-    file_size_bytes = os.path.getsize(file_path)
-    file_size_mb    = file_size_bytes / (1024 * 1024)
-
-    # Verifica duplicata
-    safe_name = file_name.replace("'", "")
-    existing = service.files().list(
-        q=f"'{folder_id}' in parents and name='{safe_name}' and trashed=false",
-        fields="files(id, webViewLink)"
-    ).execute().get("files", [])
-    if existing:
-        link = existing[0].get("webViewLink", "")
-        log("Arquivo já existe no Drive, pulando.")
-        log(f"  → {link}")
-        progress(100)
-        upload_stats(file_size_mb, file_size_mb, 0.0)
-        return existing[0]
-
-    log(f"Enviando '{file_name}' ({file_size_mb:.1f} MB)...")
-    progress(0)
-    upload_stats(0.0, file_size_mb, 0.0)
-
-    # Sessão autenticada via requests (substitui httplib2)
-    creds   = service._http.credentials
-    session = AuthorizedSession(creds)
-
-    # 1. Inicia upload resumível — obtém URI de destino
-    init_resp = session.post(
-        "https://www.googleapis.com/upload/drive/v3/files",
-        params={"uploadType": "resumable", "fields": "id,name,webViewLink"},
-        json={"name": file_name, "parents": [folder_id]},
-        headers={
-            "X-Upload-Content-Type":   "audio/mpeg",
-            "X-Upload-Content-Length": str(file_size_bytes),
-        },
+    from infrastructure.drive.gdrive_storage import GoogleDriveStorage
+    cfg = load_config()
+    storage = GoogleDriveStorage(
+        token_file     = TOKEN_FILE,
+        oauth_config   = _OAUTH_CLIENT_CONFIG,
+        scopes         = SCOPES,
+        root_folder_id = cfg["drive_folder_id"],
     )
-    init_resp.raise_for_status()
-    upload_uri = init_resp.headers["Location"]
-
-    # 2. Streaming do arquivo com progresso e cancelamento
-    pf = _ProgressFile(
-        file_path, file_size_bytes,
-        on_log=log, on_progress=progress, on_upload_stats=upload_stats,
-        cancel_event=cancel_event,
+    result, _ = storage._upload_single(
+        service, file_path, folder_id,
+        on_log          = on_log          if callable(on_log)          else _noop,
+        on_progress     = on_progress     if callable(on_progress)     else _noop,
+        on_upload_stats = on_upload_stats if callable(on_upload_stats) else _noop,
+        cancel_event    = cancel_event,
     )
-    try:
-        upload_resp = session.put(
-            upload_uri,
-            data=pf,
-            headers={"Content-Type": "audio/mpeg"},
-        )
-        upload_resp.raise_for_status()
-        avg_rate = pf.average_rate_mbps()
-    finally:
-        pf.close()
-
-    progress(100)
-    upload_stats(file_size_mb, file_size_mb, avg_rate)
-    result = upload_resp.json()
-    link   = result.get("webViewLink", "")
-    log(f"Upload concluído! {file_size_mb:.1f} MB — taxa média: {avg_rate:.2f} MB/s")
-    log(f"  → {link}")
     return result
 
 
@@ -754,37 +562,41 @@ def upload_files(date_str, files, on_log=None, on_status=None, on_progress=None,
                  on_upload_stats=None, cancel_event=None):
     """
     Recebe lista de caminhos de MP3 e faz upload para a pasta do mês no Drive.
-    Remove os arquivos locais após o upload.
+    Remove os arquivos locais após o upload (somente em modo frozen/produção).
+
+    Delega para infrastructure.drive.GoogleDriveStorage.upload(); converte os
+    caminhos (str) para AudioFile para compatibilidade com o contrato de domínio.
     """
-    log, status, progress = _make_callbacks(on_log, on_status, on_progress)
+    from infrastructure.drive.gdrive_storage import GoogleDriveStorage
+    from domain.entities import AudioFile
 
-    date = datetime.strptime(date_str, "%d/%m/%Y")
+    # Converte caminhos (str) → AudioFile (domínio)
+    audio_files = [
+        AudioFile(
+            path     = p,
+            title    = os.path.splitext(os.path.basename(p))[0],
+            video_id = "",
+        )
+        for p in files
+    ]
 
-    _check_cancel(cancel_event)
-    status("Conectando ao Google Drive...")
-    log("Conectando ao Google Drive...")
-    service = get_drive_service(on_log=log)
-    log("Conectado.")
+    storage = GoogleDriveStorage(
+        token_file          = TOKEN_FILE,
+        oauth_config        = _OAUTH_CLIENT_CONFIG,
+        scopes              = SCOPES,
+        root_folder_id      = load_config()["drive_folder_id"],
+        delete_after_upload = getattr(sys, "frozen", False),
+    )
 
-    _check_cancel(cancel_event)
-    status("Localizando pasta do mês...")
-    folder_id = find_or_create_month_folder(service, date, on_log=log)
-
-    total = len(files)
-    for i, file_path in enumerate(files, 1):
-        _check_cancel(cancel_event)
-        status(f"Enviando arquivo {i} de {total}...")
-        upload_to_drive(service, file_path, folder_id,
-                        on_log=log, on_progress=progress,
-                        on_upload_stats=on_upload_stats,
-                        cancel_event=cancel_event)
-        if getattr(sys, "frozen", False):
-            os.remove(file_path)
-        else:
-            log(f"[DEBUG] Arquivo mantido em: {file_path}")
-
-    status("Concluído!")
-    log(f"✓ {total} arquivo(s) enviado(s) para o Drive.")
+    storage.upload(
+        audio_files,
+        date_str,
+        cancel_event    = cancel_event,
+        on_log          = on_log,
+        on_status       = on_status,
+        on_progress     = on_progress,
+        on_upload_stats = on_upload_stats,
+    )
 
 
 # ---------------------------------------------------------------------------

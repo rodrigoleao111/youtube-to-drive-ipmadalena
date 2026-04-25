@@ -216,8 +216,8 @@ class TestGetDriveServiceToken:
         mock_flow, mock_creds = self._make_mock_flow()
 
         with patch.object(baixar_audio, "TOKEN_FILE", str(token_file)), \
-             patch("baixar_audio.InstalledAppFlow") as MockFlow, \
-             patch("baixar_audio.build"), \
+             patch("infrastructure.drive.gdrive_storage.InstalledAppFlow") as MockFlow, \
+             patch("infrastructure.drive.gdrive_storage.build"), \
              patch("pickle.dump"):
             MockFlow.from_client_config.return_value = mock_flow
             baixar_audio.get_drive_service()
@@ -234,8 +234,8 @@ class TestGetDriveServiceToken:
         logs = []
 
         with patch.object(baixar_audio, "TOKEN_FILE", str(token_file)), \
-             patch("baixar_audio.InstalledAppFlow") as MockFlow, \
-             patch("baixar_audio.build"), \
+             patch("infrastructure.drive.gdrive_storage.InstalledAppFlow") as MockFlow, \
+             patch("infrastructure.drive.gdrive_storage.build"), \
              patch("pickle.dump"):
             MockFlow.from_client_config.return_value = mock_flow
             baixar_audio.get_drive_service(on_log=logs.append)
@@ -252,8 +252,8 @@ class TestGetDriveServiceToken:
         mock_flow, _ = self._make_mock_flow()
 
         with patch.object(baixar_audio, "TOKEN_FILE", str(token_file)), \
-             patch("baixar_audio.InstalledAppFlow") as MockFlow, \
-             patch("baixar_audio.build"), \
+             patch("infrastructure.drive.gdrive_storage.InstalledAppFlow") as MockFlow, \
+             patch("infrastructure.drive.gdrive_storage.build"), \
              patch("pickle.dump"):
             MockFlow.from_client_config.return_value = mock_flow
             baixar_audio.get_drive_service()
@@ -437,15 +437,33 @@ class TestDebugMode:
     Em modo script (sys.frozen ausente/False), upload_files() deve manter
     o arquivo local e logar [DEBUG].
     Em modo frozen (exe instalado), deve remover o arquivo.
+
+    upload_files() delega para GoogleDriveStorage.upload() — patches em
+    infrastructure.drive.gdrive_storage para evitar I/O real.
     """
 
     def _run(self, tmp_path, frozen: bool):
         fake_mp3 = tmp_path / "Culto.mp3"
         fake_mp3.write_bytes(b"ID3" + b"\x00" * 64)
 
-        with patch("baixar_audio.get_drive_service"), \
-             patch("baixar_audio.find_or_create_month_folder", return_value="folder_id"), \
-             patch("baixar_audio.upload_to_drive"), \
+        # Mock do serviço Drive (evita autenticação real)
+        svc = MagicMock()
+        svc.files().list.return_value.execute.side_effect = [
+            {"files": []},   # pastas do mês → nenhuma → cria
+            {"files": []},   # duplicatas → nenhuma → faz upload
+        ]
+        svc.files().create.return_value.execute.return_value = {"id": "folder1"}
+        svc._http.credentials = MagicMock()
+
+        # Mock da sessão HTTP de upload
+        session = MagicMock()
+        session.post.return_value.headers = {"Location": "https://upload.example.com"}
+        session.put.return_value.json.return_value = {"id": "fileid", "webViewLink": ""}
+
+        with patch("infrastructure.drive.gdrive_storage.GoogleDriveStorage.get_service",
+                   return_value=svc), \
+             patch("infrastructure.drive.gdrive_storage.AuthorizedSession",
+                   return_value=session), \
              patch.object(sys, "frozen", frozen, create=True):
             logs = []
             baixar_audio.upload_files(

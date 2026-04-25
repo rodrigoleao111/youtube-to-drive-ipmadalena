@@ -92,8 +92,21 @@ O projeto está em migração incremental para Clean Architecture. As fases conc
 - `OperacaoCancelada` é re-exportada de `domain.exceptions` (mesma classe, sem duplicação)
 - Nenhuma assinatura pública foi alterada — callers existentes continuam funcionando
 
+**`infrastructure/drive/` — adaptador Google Drive (Fase 3)**
+- `gdrive_storage.py` — `GoogleDriveStorage` (implementa `ICloudStorage`)
+  - `get_service()` — autenticação OAuth2, refresh, reauth, salva token
+  - `check_auth()` — verifica se token existe e está válido
+  - `logout()` — remove token (força nova autorização)
+  - `_find_or_create_month_folder()` — localização fuzzy + criação automática
+  - `_upload_single()` — resumable upload com `_ProgressFile` e cancelamento
+  - `upload()` — implementa `ICloudStorage.upload()`, retorna `ProcessingResult`
+- `_ProgressFile` — streaming com progresso byte-a-byte, stats de taxa, cancel em < 100 ms
+
+**Compatibilidade retroativa em `baixar_audio.py` (Fase 3):**
+- `get_drive_service()`, `check_auth_status()`, `run_auth()`, `find_or_create_month_folder()`, `upload_to_drive()`, `upload_files()` → delegam para `GoogleDriveStorage`
+- `_ProgressFile` e lógica de OAuth removidas de `baixar_audio.py`
+
 **Fases futuras planejadas:**
-- Fase 3: `infrastructure/drive/` — `GoogleDriveStorage` (implementa `ICloudStorage`)
 - Fase 4: `infrastructure/persistence/` — `JsonHistoryRepository`, `JsonConfigRepository`
 - Fase 5: camada `application/` (use cases)
 - Fase 6: `presentation/` (presenter pattern para `App`)
