@@ -374,7 +374,7 @@ tests/
 └── test_presenter.py        ← 19 testes do ProcessingPresenter (use cases mockados)
 ```
 
-**Total: 277 testes (278 com setup)**
+**Total: 282 testes (283 com setup)**
 
 **Como rodar:**
 ```bash

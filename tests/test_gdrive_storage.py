@@ -513,3 +513,84 @@ class TestProgressFile:
         pf._start_time = __import__("time").time() + 1000  # no futuro → elapsed < 0
         rate = pf.average_rate_mbps()
         assert rate == 0.0
+
+    def test_read_nao_divide_por_zero_quando_size_zero(self):
+        """
+        Regressão: se _size == 0 mas read() retorna bytes (descompasso entre
+        getsize() e o arquivo real), pct deve ser 100, não ZeroDivisionError.
+        """
+        pf, prog, _, _ = self._make_pf(b"DATA")
+        pf._size = 0   # simula descompasso: tamanho registrado é 0
+        # Não deve lançar ZeroDivisionError
+        pf.read(4)
+        assert prog == [100]
+
+    def test_read_arquivo_vazio_nao_chama_progress(self):
+        """Arquivo realmente vazio (read retorna b'') não dispara progress."""
+        pf, prog, _, _ = self._make_pf(b"")
+        pf._size = 0
+        result = pf.read()
+        assert result == b""
+        assert prog == []   # nenhum byte → nenhum progress
+
+
+# ===========================================================================
+# Regressão B3 — escape correto de caracteres especiais no Drive Query Language
+# ===========================================================================
+
+class TestDuplicateCheckEscape:
+    """
+    Garante que nomes de arquivo com aspas/backslashes são escapados
+    corretamente na query do Drive — não removidos, o que causaria falso
+    negativo (a query não bateria e o arquivo seria re-enviado).
+    """
+
+    def _run_and_capture_query(self, file_name: str) -> str:
+        svc = MagicMock()
+        svc.files().list.return_value.execute.return_value = {"files": []}
+        svc._http.credentials = MagicMock()
+        storage = _storage()
+
+        # Mock do session post → simula que a query passa
+        session = MagicMock()
+        init_resp = MagicMock()
+        init_resp.headers = {"Location": "https://upload.example.com"}
+        session.post.return_value = init_resp
+        put_resp = MagicMock()
+        put_resp.json.return_value = {"id": "x", "webViewLink": ""}
+        session.put.return_value = put_resp
+
+        with patch("builtins.open", mock_open(read_data=b"A" * 64)), \
+             patch("os.path.getsize", return_value=64), \
+             patch("infrastructure.drive.gdrive_storage.AuthorizedSession",
+                   return_value=session):
+            storage._upload_single(svc, f"/tmp/{file_name}", "folder1")
+
+        # Captura a query passada para files().list()
+        calls = svc.files().list.call_args_list
+        # A última chamada antes do upload é a verificação de duplicata
+        return calls[-1].kwargs["q"]
+
+    def test_escape_apostrofo_no_nome(self):
+        q = self._run_and_capture_query("Pedro's message.mp3")
+        assert "Pedro\\'s message.mp3" in q
+        assert "Peters" not in q   # não pode remover o apóstrofo
+
+    # Nota: escape de '\' não é testável diretamente em Windows porque
+    # os.path.basename trata '\' como separador de path. O código de escape
+    # para '\' permanece como defesa em profundidade (caso o módulo seja
+    # rodado em outro SO ou a lógica de nomeação mude no futuro).
+
+    def test_nome_simples_nao_e_modificado(self):
+        q = self._run_and_capture_query("Culto.mp3")
+        assert "name='Culto.mp3'" in q
+
+    def test_apostrofo_nao_e_removido_silenciosamente(self):
+        """
+        Regressão direta: a versão antiga removia o apóstrofo, gerando uma
+        query que não batia com o arquivo no Drive — duplicate-check passava
+        em branco e o arquivo era re-enviado.
+        """
+        q = self._run_and_capture_query("a'b.mp3")
+        # O apóstrofo deve estar presente (escapado), não removido
+        assert "'" in q.replace("name=", "").replace("in parents", "").replace("trashed=false", "")

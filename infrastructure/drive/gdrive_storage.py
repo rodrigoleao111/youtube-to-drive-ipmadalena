@@ -83,7 +83,9 @@ class _ProgressFile:
         data = self._f.read(n)
         if data:
             self._sent += len(data)
-            pct = int(self._sent / self._size * 100)
+            # Guarda contra divisão por zero em arquivos vazios (file_size == 0).
+            # yt-dlp normalmente não gera MP3 vazio, mas falha do ffmpeg pode produzir.
+            pct = int(self._sent / self._size * 100) if self._size else 100
             self._progress(pct)
 
             if self._sent - self._last_stats >= self._STATS_EVERY:
@@ -320,8 +322,11 @@ class GoogleDriveStorage:
         file_size_bytes = os.path.getsize(file_path)
         file_size_mb    = file_size_bytes / (1024 * 1024)
 
-        # Verifica duplicata
-        safe_name = file_name.replace("'", "")
+        # Verifica duplicata.
+        # Escape segundo Drive Query Language: '\' vira '\\' e "'" vira "\'".
+        # Trocar apóstrofos por '' (vazio) causaria falso negativo (a query não bateria
+        # com o arquivo real) e o arquivo seria re-enviado.
+        safe_name = file_name.replace("\\", "\\\\").replace("'", "\\'")
         existing  = service.files().list(
             q=f"'{folder_id}' in parents and name='{safe_name}' and trashed=false",
             fields="files(id, webViewLink)",
