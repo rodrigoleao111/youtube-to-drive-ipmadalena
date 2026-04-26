@@ -107,6 +107,10 @@ class App(ctk.CTk):
         self._cancel_event = threading.Event()
         self._dot_pulsing  = False
 
+        # Adaptador de notificações desktop (implementa INotifier)
+        from infrastructure.notification.plyer_notifier import PlyerNotifier
+        self._notifier = PlyerNotifier()
+
         self._build_ui()
         self.after(100, self._process_queue)
         self.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -960,18 +964,12 @@ class App(ctk.CTk):
             baixar_audio.save_history(date_str, video_titles)
             _file_log(f"Histórico salvo: {date_str} — {len(video_titles)} vídeo(s).")
 
-        # Notificação desktop
-        try:
-            from plyer import notification
-            n = len(video_titles) if video_titles else 0
-            notification.notify(
-                title="IPMadalena — Concluído ✓",
-                message=f"{n} vídeo(s) enviado(s) ao Drive com sucesso!",
-                app_name="IPMadalena",
-                timeout=8,
-            )
-        except Exception:
-            pass  # plyer opcional
+        # Notificação desktop (delegada ao INotifier; falhas são silenciadas)
+        n = len(video_titles) if video_titles else 0
+        self._notifier.notify(
+            title   = "IPMadalena — Concluído ✓",
+            message = f"{n} vídeo(s) enviado(s) ao Drive com sucesso!",
+        )
 
     def _on_error(self, msg):
         self._running = False

@@ -50,9 +50,12 @@ youtube_to_drive/
 │   ├── drive/
 │   │   ├── __init__.py
 │   │   └── gdrive_storage.py       ← GoogleDriveStorage, _ProgressFile
-│   └── persistence/
+│   ├── persistence/
+│   │   ├── __init__.py
+│   │   └── json_repositories.py    ← JsonHistoryRepository, JsonConfigRepository
+│   └── notification/
 │       ├── __init__.py
-│       └── json_repositories.py    ← JsonHistoryRepository, JsonConfigRepository
+│       └── plyer_notifier.py       ← PlyerNotifier (implementa INotifier)
 │
 ├── application/                    ← use cases (orquestradores do domínio)
 │   ├── __init__.py
@@ -129,6 +132,13 @@ O projeto está em migração incremental para Clean Architecture. As fases conc
 - `load_config()` / `save_config()` → delegam para `JsonConfigRepository`
 - `load_history()` / `save_history()` → delegam para `JsonHistoryRepository`
 - Sem alteração nas assinaturas públicas
+
+**`infrastructure/notification/` — adaptador de notificações desktop**
+- `plyer_notifier.py` — `PlyerNotifier` (implementa `INotifier`)
+  - Import lazy de `plyer.notification` (só carregado em `notify()`)
+  - Best-effort: silencia qualquer exceção (plyer ausente, backend inacessível, sem DBus etc.)
+  - Defaults: `app_name="IPMadalena"`, `timeout=8`
+- Instanciado em `App.__init__` como `self._notifier`; `_on_done()` delega via `self._notifier.notify(...)`. Antes a chamada era inline (try/except em volta de `from plyer import notification`).
 
 **`application/` — use cases (Fase 5)**
 - `use_cases.py` — três orquestradores que compõem ports do domínio:
@@ -371,10 +381,11 @@ tests/
 ├── test_ytdlp_source.py     ← 26 testes da infraestrutura YouTube (subprocess mockado)
 ├── test_persistence.py      ← 29 testes dos repositórios JSON (I/O real em tmp_path)
 ├── test_use_cases.py        ← 31 testes dos use cases da camada application (ports mockados)
-└── test_presenter.py        ← 19 testes do ProcessingPresenter (use cases mockados)
+├── test_presenter.py        ← 19 testes do ProcessingPresenter (use cases mockados)
+└── test_plyer_notifier.py   ← 10 testes do PlyerNotifier (plyer mockado)
 ```
 
-**Total: 306 testes (307 com setup)**
+**Total: 316 testes (317 com setup)**
 
 **Como rodar:**
 ```bash
