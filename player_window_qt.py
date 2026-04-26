@@ -11,6 +11,14 @@ Protocolo com o subprocess:
   stdin  → pai envia: {"videos": [...]} (primeira linha, logo após Popen)
   stdout ← filho envia: {"type": "segments", "segments": [...]}
                          {"type": "cancelled"}
+
+Dispatch cross-thread
+---------------------
+_monitor roda em uma Python threading.Thread (sem event loop Qt).
+QTimer.singleShot() chamado de lá não dispara — a thread não tem loop.
+A solução é _Dispatcher(QObject): criado no thread principal, seus sinais
+emitidos de uma thread diferente são entregues ao thread principal via
+QueuedConnection automático do Qt.
 """
 
 import json
@@ -19,13 +27,30 @@ import subprocess
 import sys
 import threading
 
-from PyQt6.QtCore import QTimer
+from PyQt6.QtCore import QObject, QTimer, pyqtSignal
 
+
+# ---------------------------------------------------------------------------
+# Dispatcher thread-safe: bridge entre _monitor e o thread principal
+# ---------------------------------------------------------------------------
+
+class _Dispatcher(QObject):
+    """
+    QObject criado no thread principal.
+    Quando _monitor emite seus sinais de uma thread de background, o Qt
+    usa QueuedConnection automaticamente e entrega os slots no thread principal.
+    """
+    complete = pyqtSignal(list)
+    cancel   = pyqtSignal()
+
+
+# ---------------------------------------------------------------------------
+# Utilitário — comando do subprocess
+# ---------------------------------------------------------------------------
 
 def _build_cmd() -> list[str]:
     """Retorna o comando para iniciar o subprocess Qt do player."""
     if getattr(sys, "frozen", False):
-        # Exe empacotado: usa --player-mode-qt (tratado em app.py antes de Tk)
         return [sys.executable, "--player-mode-qt"]
     script = os.path.join(
         os.path.dirname(os.path.abspath(__file__)),
@@ -34,13 +59,17 @@ def _build_cmd() -> list[str]:
     return [sys.executable, script]
 
 
+# ---------------------------------------------------------------------------
+# PlayerWindowQt
+# ---------------------------------------------------------------------------
+
 class PlayerWindowQt:
     """
     Launcher do player Qt.
 
     Parâmetros
     ----------
-    master      : janela pai CTk (usado para agendar callbacks no thread principal)
+    master      : janela pai (QMainWindow) — mantido por compatibilidade de interface
     videos      : list[{id, title, upload_date}]
     on_complete : callback(segments: list[{id, title, start, end}])
                   start/end → "HH:MM:SS" ou None (vídeo completo)
@@ -51,6 +80,12 @@ class PlayerWindowQt:
         self._master      = master
         self._on_complete = on_complete
         self._on_cancel   = on_cancel
+
+        # Dispatcher criado no thread principal — sinais emitidos de _monitor
+        # (thread de background) são entregues aqui via QueuedConnection automático.
+        self._dispatcher = _Dispatcher()
+        self._dispatcher.complete.connect(on_complete)
+        self._dispatcher.cancel.connect(on_cancel)
 
         extra = {}
         if sys.platform == "win32":
@@ -72,6 +107,8 @@ class PlayerWindowQt:
             self._proc.stdin.write(json.dumps({"videos": videos}) + "\n")
             self._proc.stdin.flush()
         except Exception:
+            # Erro ainda no __init__ (thread principal) — QTimer.singleShot
+            # funciona aqui pois estamos no thread principal com event loop ativo.
             self._proc.terminate()
             QTimer.singleShot(0, on_cancel)
             return
@@ -80,7 +117,7 @@ class PlayerWindowQt:
         threading.Thread(target=self._monitor, daemon=True).start()
 
     def _monitor(self):
-        """Thread: lê stdout do subprocess e dispara o callback correto."""
+        """Thread daemon: lê stdout do subprocess e emite o sinal correto."""
         result = None
         try:
             for line in self._proc.stdout:
@@ -95,7 +132,6 @@ class PlayerWindowQt:
         except Exception:
             pass
         finally:
-            # Garante que o processo encerrou
             try:
                 self._proc.wait(timeout=3)
             except Exception:
@@ -104,8 +140,9 @@ class PlayerWindowQt:
                 except Exception:
                     pass
 
+        # Emite o sinal do _Dispatcher — entregue no thread principal via
+        # QueuedConnection (automaticamente aplicado em emissões cross-thread).
         if result and result.get("type") == "segments":
-            segments = result.get("segments", [])
-            QTimer.singleShot(0, lambda: self._on_complete(segments))
+            self._dispatcher.complete.emit(result.get("segments", []))
         else:
-            QTimer.singleShot(0, self._on_cancel)
+            self._dispatcher.cancel.emit()

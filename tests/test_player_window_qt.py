@@ -7,6 +7,14 @@ Cobre:
   - PlayerWindowQt: subprocess lançado, vídeos enviados via stdin,
     on_complete chamado com segmentos, on_cancel chamado em cancelamento,
     on_cancel chamado em falha do subprocess
+
+Dispatch cross-thread
+---------------------
+_monitor emite sinais Qt (_Dispatcher.complete / .cancel) de uma thread de
+background. No test, não há event loop rodando, então os sinais são entregues
+via QueuedConnection assim que processamos eventos com processEvents().
+O helper _run_with_mock_proc aguarda a thread _monitor terminar (via Event)
+e em seguida drena os eventos pendentes do Qt.
 """
 
 import json
@@ -15,6 +23,7 @@ import threading
 from unittest.mock import MagicMock, patch
 
 import pytest
+from PyQt6.QtWidgets import QApplication
 
 from player_subprocess_qt import _seconds_to_hms, _hms_to_seconds
 from player_window_qt import PlayerWindowQt, _build_cmd
@@ -119,36 +128,45 @@ def _make_mock_proc(stdout_lines: list[str], stdin_ok: bool = True):
 def _run_with_mock_proc(videos, stdout_lines, stdin_ok=True):
     """
     Instancia PlayerWindowQt com subprocess mockado e espera o callback.
-    Retorna (tipo, payload): tipo = 'complete'|'cancel', payload = args.
+    Retorna (tipo, payload): tipo = 'complete'|'cancel'.
 
-    QTimer.singleShot é substituído por chamada direta (síncrona) para
-    não depender de um event loop Qt em execução.
+    Estratégia de entrega de sinal:
+      - _monitor roda em thread daemon e emite sinais Qt.
+      - No ambiente de teste não há event loop rodando; usamos um
+        threading.Event para saber quando _monitor terminou, depois
+        chamamos processEvents() para entregar os sinais pendentes.
     """
-    called = threading.Event()
+    monitor_done = threading.Event()
+
+    # Instrumenta _monitor para sinalizar quando terminar
+    original_monitor = PlayerWindowQt._monitor
+
+    def patched_monitor(self):
+        try:
+            original_monitor(self)
+        finally:
+            monitor_done.set()
+
     result = {}
 
     def on_complete(segs):
         result["type"] = "complete"
         result["segments"] = segs
-        called.set()
 
     def on_cancel():
         result["type"] = "cancel"
-        called.set()
 
     mock_proc = _make_mock_proc(stdout_lines, stdin_ok)
 
-    # Substitui QTimer.singleShot por execução imediata (sem event loop)
-    def _immediate(delay, fn):
-        fn()
-
-    with patch("player_window_qt._build_cmd", return_value=["python", "-c", ""]), \
-         patch("subprocess.Popen", return_value=mock_proc), \
-         patch("player_window_qt.QTimer") as mock_timer:
-        mock_timer.singleShot.side_effect = _immediate
+    with patch.object(PlayerWindowQt, "_monitor", patched_monitor), \
+         patch("player_window_qt._build_cmd", return_value=["python", "-c", ""]), \
+         patch("subprocess.Popen", return_value=mock_proc):
         PlayerWindowQt(None, videos, on_complete, on_cancel)
-        # Aguarda dentro do bloco para manter o patch ativo durante _monitor
-        called.wait(timeout=3)
+
+    # Aguarda _monitor terminar (emit dos sinais foi chamado)
+    monitor_done.wait(timeout=3)
+    # Processa eventos Qt pendentes para entregar os sinais (QueuedConnection)
+    QApplication.instance().processEvents()
 
     return result
 
@@ -170,20 +188,23 @@ SEGMENTS_PAYLOAD = [
 
 class TestPlayerWindowQtSubprocessLancado:
     def _make(self, stdout_lines):
-        """Instancia PlayerWindowQt com proc mockado e aguarda o _monitor concluir."""
+        """Instancia PlayerWindowQt com proc mockado e aguarda _monitor concluir."""
+        monitor_done = threading.Event()
+        original_monitor = PlayerWindowQt._monitor
+
+        def patched_monitor(self):
+            try:
+                original_monitor(self)
+            finally:
+                monitor_done.set()
+
         mock_proc = _make_mock_proc(stdout_lines)
-        done = threading.Event()
-
-        def _immediate(delay, fn):
-            fn()
-            done.set()
-
-        with patch("player_window_qt._build_cmd", return_value=["python", "-c", ""]), \
-             patch("subprocess.Popen", return_value=mock_proc) as mock_popen, \
-             patch("player_window_qt.QTimer") as mock_timer:
-            mock_timer.singleShot.side_effect = _immediate
+        with patch.object(PlayerWindowQt, "_monitor", patched_monitor), \
+             patch("player_window_qt._build_cmd", return_value=["python", "-c", ""]), \
+             patch("subprocess.Popen", return_value=mock_proc) as mock_popen:
             PlayerWindowQt(None, VIDEOS, MagicMock(), MagicMock())
-            done.wait(timeout=3)
+            monitor_done.wait(timeout=3)
+            QApplication.instance().processEvents()
 
         return mock_proc, mock_popen
 
@@ -220,6 +241,7 @@ class TestPlayerWindowQtCallbacks:
         assert result.get("type") == "cancel"
 
     def test_on_cancel_chamado_quando_stdin_quebra(self):
+        """Erro no __init__ (thread principal) → on_cancel via QTimer.singleShot."""
         cancel_called = threading.Event()
 
         def on_cancel():
@@ -236,7 +258,6 @@ class TestPlayerWindowQtCallbacks:
             mock_timer.singleShot.side_effect = _immediate
             PlayerWindowQt(None, VIDEOS, MagicMock(), on_cancel)
 
-        # on_cancel foi chamado de forma síncrona pelo fake singleShot
         assert cancel_called.is_set()
 
     def test_segmentos_completos_preservados(self):
@@ -246,26 +267,38 @@ class TestPlayerWindowQtCallbacks:
         assert result["segments"] == segs
 
 
-class TestPlayerWindowQtTimerAgendado:
-    def test_callback_agendado_via_qtimer_singleshot(self):
-        """on_complete é sempre chamado via QTimer.singleShot(0, ...) — thread-safe."""
-        ready = threading.Event()
-        mock_proc = _make_mock_proc(
-            [json.dumps({"type": "segments", "segments": []}) + "\n"]
-        )
+class TestPlayerWindowQtDispatcher:
+    def test_dispatcher_emite_complete_com_segmentos(self):
+        """_monitor emite dispatcher.complete — entregue no thread principal via processEvents."""
+        line = json.dumps({"type": "segments", "segments": SEGMENTS_PAYLOAD}) + "\n"
+        result = _run_with_mock_proc(VIDEOS, [line])
+        assert result.get("type") == "complete"
 
-        timer_calls: list[tuple] = []
+    def test_dispatcher_emite_cancel_em_falha(self):
+        """_monitor emite dispatcher.cancel em qualquer falha ou cancelamento."""
+        result = _run_with_mock_proc(VIDEOS, [])
+        assert result.get("type") == "cancel"
 
-        def _capture_and_call(delay, fn):
-            timer_calls.append((delay, fn))
-            fn()
+    def test_dispatcher_criado_no_thread_principal(self):
+        """_Dispatcher deve ser instanciado no __init__ (thread principal)."""
+        monitor_done = threading.Event()
+        original_monitor = PlayerWindowQt._monitor
 
-        with patch("player_window_qt._build_cmd", return_value=["python", "-c", ""]), \
-             patch("subprocess.Popen", return_value=mock_proc), \
-             patch("player_window_qt.QTimer") as mock_timer:
-            mock_timer.singleShot.side_effect = _capture_and_call
-            PlayerWindowQt(None, VIDEOS, lambda s: ready.set(), MagicMock())
-            ready.wait(timeout=3)
+        def patched_monitor(self):
+            try:
+                original_monitor(self)
+            finally:
+                monitor_done.set()
 
-        # QTimer.singleShot deve ter sido chamado com delay=0 e um callable
-        assert any(delay == 0 and callable(fn) for delay, fn in timer_calls)
+        mock_proc = _make_mock_proc(['{"type":"cancelled"}\n'])
+        pw = None
+
+        with patch.object(PlayerWindowQt, "_monitor", patched_monitor), \
+             patch("player_window_qt._build_cmd", return_value=["python", "-c", ""]), \
+             patch("subprocess.Popen", return_value=mock_proc):
+            pw = PlayerWindowQt(None, VIDEOS, MagicMock(), MagicMock())
+            monitor_done.wait(timeout=3)
+            QApplication.instance().processEvents()
+
+        from player_window_qt import _Dispatcher
+        assert isinstance(pw._dispatcher, _Dispatcher)
