@@ -98,11 +98,16 @@ def start_process(cmd: list, cancel_event=None) -> subprocess.Popen:
 
     if cancel_event is not None:
         def _watchdog() -> None:
-            cancel_event.wait()
-            try:
-                process.terminate()
-            except Exception:
-                pass
+            # Polla com timeout para não vazar thread quando o subprocess
+            # termina normalmente (cancel_event.wait() sem timeout bloquearia
+            # para sempre, mesmo após process.poll() retornar código de saída).
+            while process.poll() is None:
+                if cancel_event.wait(timeout=0.5):
+                    try:
+                        process.terminate()
+                    except Exception:
+                        pass
+                    return
         threading.Thread(target=_watchdog, daemon=True).start()
 
     return process

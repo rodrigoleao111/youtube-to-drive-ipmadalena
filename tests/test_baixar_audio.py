@@ -114,6 +114,142 @@ class TestCleanupDownloads:
             baixar_audio.cleanup_downloads(on_log=logs.append)
         assert logs == []
 
+    def test_loga_falhas_individuais_sem_interromper(self, tmp_path):
+        """B7: arquivos que falham ao remover são logados, demais continuam."""
+        for name in ["a.mp3", "b.mp3", "c.mp3"]:
+            (tmp_path / name).write_text("x")
+
+        original_remove = os.remove
+        def fake_remove(path):
+            if path.endswith("b.mp3"):
+                raise PermissionError("arquivo em uso")
+            original_remove(path)
+
+        with patch.object(baixar_audio, "DOWNLOAD_DIR", str(tmp_path)), \
+             patch("os.remove", side_effect=fake_remove):
+            logs = []
+            baixar_audio.cleanup_downloads(on_log=logs.append)
+
+        assert any("Aviso" in m and "b.mp3" in m for m in logs), \
+            f"Esperava aviso sobre b.mp3, obteve: {logs}"
+        assert any("2 arquivo" in m for m in logs)   # a.mp3 e c.mp3 removidos
+
+
+# ---------------------------------------------------------------------------
+# update_ytdlp (T3)
+# ---------------------------------------------------------------------------
+
+class TestUpdateYtdlp:
+    """
+    update_ytdlp() tem dois caminhos:
+      - frozen=True  → roda 'yt-dlp -U' (auto-update do standalone)
+      - frozen=False → roda 'pip install --upgrade yt-dlp' + 'yt-dlp --version'
+
+    Os testes mockam baixar_audio._ytdlp_cmd para evitar dependência de
+    sys._MEIPASS (que só existe quando rodando como exe PyInstaller).
+    """
+
+    def _result(self, returncode=0, stdout="", stderr=""):
+        m = MagicMock()
+        m.returncode = returncode
+        m.stdout = stdout
+        m.stderr = stderr
+        return m
+
+    def _patch_frozen(self, frozen: bool):
+        """Helper para mockar sys.frozen e _ytdlp_cmd juntos."""
+        import sys as _sys
+        return [
+            patch.object(_sys, "frozen", frozen, create=True),
+            patch.object(baixar_audio, "_ytdlp_cmd", return_value="yt-dlp"),
+        ]
+
+    def test_modo_frozen_chama_yt_dlp_U(self):
+        patches = self._patch_frozen(True)
+        for p in patches: p.start()
+        try:
+            with patch("subprocess.run") as mock_run:
+                mock_run.return_value = self._result(0, "Updated to 2026.04.19")
+                logs = []
+                baixar_audio.update_ytdlp(on_log=logs.append)
+                cmd = mock_run.call_args[0][0]
+        finally:
+            for p in patches: p.stop()
+
+        assert cmd[1] == "-U"
+        assert any("2026.04.19" in m for m in logs)
+
+    def test_modo_script_chama_pip_install_e_version(self):
+        patches = self._patch_frozen(False)
+        for p in patches: p.start()
+        try:
+            with patch("subprocess.run") as mock_run:
+                mock_run.side_effect = [
+                    self._result(0, ""),                # pip install OK
+                    self._result(0, "2026.04.19\n"),    # yt-dlp --version
+                ]
+                logs = []
+                baixar_audio.update_ytdlp(on_log=logs.append)
+                first_cmd = mock_run.call_args_list[0][0][0]
+        finally:
+            for p in patches: p.stop()
+
+        assert "pip" in first_cmd
+        assert "install" in first_cmd
+        assert "yt-dlp" in first_cmd
+        assert any("2026.04.19" in m for m in logs)
+
+    def test_aviso_quando_pip_falha(self):
+        patches = self._patch_frozen(False)
+        for p in patches: p.start()
+        try:
+            with patch("subprocess.run") as mock_run:
+                mock_run.return_value = self._result(returncode=1, stderr="erro")
+                logs = []
+                baixar_audio.update_ytdlp(on_log=logs.append)
+        finally:
+            for p in patches: p.stop()
+
+        assert any("Aviso" in m for m in logs)
+
+    def test_aviso_quando_subprocess_levanta_excecao(self):
+        patches = self._patch_frozen(False)
+        for p in patches: p.start()
+        try:
+            with patch("subprocess.run", side_effect=OSError("yt-dlp não encontrado")):
+                logs = []
+                baixar_audio.update_ytdlp(on_log=logs.append)
+        finally:
+            for p in patches: p.stop()
+
+        assert any("Aviso" in m and "yt-dlp" in m.lower() for m in logs)
+
+    def test_extrai_versao_do_output_no_modo_frozen(self):
+        patches = self._patch_frozen(True)
+        for p in patches: p.start()
+        try:
+            with patch("subprocess.run") as mock_run:
+                mock_run.return_value = self._result(0, "yt-dlp 2026.01.15 is up to date")
+                logs = []
+                baixar_audio.update_ytdlp(on_log=logs.append)
+        finally:
+            for p in patches: p.stop()
+
+        assert any("2026.01.15" in m for m in logs)
+
+    def test_versao_indeterminada_quando_regex_nao_bate(self):
+        patches = self._patch_frozen(True)
+        for p in patches: p.start()
+        try:
+            with patch("subprocess.run") as mock_run:
+                mock_run.return_value = self._result(0, "output sem versao reconhecivel")
+                logs = []
+                baixar_audio.update_ytdlp(on_log=logs.append)
+        finally:
+            for p in patches: p.stop()
+
+        assert any("?" in m for m in logs)
+
 
 # ---------------------------------------------------------------------------
 # load_history / save_history

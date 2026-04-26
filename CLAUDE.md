@@ -364,8 +364,8 @@ Cultos ao vivo podem ser publicados no YouTube com a data do dia seguinte ao eve
 ```
 tests/
 ├── conftest.py              ← sys.path + fixture shared_app (sessão)
-├── test_baixar_audio.py     ← 20 testes do módulo principal (utilidades + auth wrappers)
-├── test_app.py              ← 45 testes de integração da GUI
+├── test_baixar_audio.py     ← 27 testes do módulo principal (utilidades + auth wrappers + update_ytdlp)
+├── test_app.py              ← 58 testes de integração da GUI (inclui delegação ao presenter)
 ├── test_player_window.py    ← 33 testes do player e utilitários de tempo
 ├── test_domain.py           ← 42 testes puros da camada de domínio
 ├── test_ytdlp_source.py     ← 26 testes da infraestrutura YouTube (subprocess mockado)
@@ -374,7 +374,7 @@ tests/
 └── test_presenter.py        ← 19 testes do ProcessingPresenter (use cases mockados)
 ```
 
-**Total: 282 testes (283 com setup)**
+**Total: 302 testes (303 com setup)**
 
 **Como rodar:**
 ```bash

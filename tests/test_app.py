@@ -498,3 +498,236 @@ class TestFileLogging:
         root_logger.handlers.extend(original_handlers)
 
         assert "App iniciado" in content
+
+
+# ---------------------------------------------------------------------------
+# T4 — _worker, _worker_phase2, _build_presenter (delegação ao presenter)
+# ---------------------------------------------------------------------------
+
+class TestBuildPresenter:
+    """Verifica que _build_presenter() compõe corretamente os use cases."""
+
+    def test_retorna_processing_presenter_com_use_cases(self, application):
+        from presentation.processing_presenter import ProcessingPresenter
+        from application.use_cases import (
+            ListVideosUseCase, DownloadSegmentsUseCase, UploadAudioUseCase,
+        )
+        presenter = application._build_presenter()
+        assert isinstance(presenter, ProcessingPresenter)
+        assert isinstance(presenter.list_videos_uc, ListVideosUseCase)
+        assert isinstance(presenter.download_uc, DownloadSegmentsUseCase)
+        assert isinstance(presenter.upload_uc, UploadAudioUseCase)
+
+    def test_usa_channel_url_do_config(self, application):
+        with patch("baixar_audio.load_config", return_value={
+            "channel_url": "https://youtube.com/@TesteCanal",
+            "drive_folder_id": "fake_folder",
+        }):
+            presenter = application._build_presenter()
+        assert presenter.channel_url == "https://youtube.com/@TesteCanal"
+
+    def test_usa_download_dir_do_baixar_audio(self, application):
+        presenter = application._build_presenter()
+        assert presenter.download_dir == baixar_audio.DOWNLOAD_DIR
+
+    def test_storage_recebe_drive_folder_id_do_config(self, application):
+        with patch("baixar_audio.load_config", return_value={
+            "channel_url": "x", "drive_folder_id": "pasta-custom-123",
+        }):
+            presenter = application._build_presenter()
+        # GoogleDriveStorage guarda em _root_folder_id
+        assert presenter.upload_uc.storage._root_folder_id == "pasta-custom-123"
+
+
+class TestWorker:
+    """Fluxo Fase 1: lista vídeos via presenter e enfileira select_videos."""
+
+    def test_videos_listados_enfileiram_select_videos(self, application):
+        videos = [{"id": "v1", "title": "Culto", "upload_date": "20260419"}]
+        mock_presenter = MagicMock()
+        mock_presenter.list_videos.return_value = videos
+
+        with patch.object(application, "_build_presenter", return_value=mock_presenter):
+            application._worker("19/04/2026")
+
+        msgs = []
+        try:
+            while True:
+                msgs.append(application._queue.get_nowait())
+        except queue.Empty:
+            pass
+
+        assert ("select_videos", ("19/04/2026", videos)) in msgs
+
+    def test_chama_presenter_list_videos_com_args_corretos(self, application):
+        mock_presenter = MagicMock()
+        mock_presenter.list_videos.return_value = []
+
+        with patch.object(application, "_build_presenter", return_value=mock_presenter):
+            application._worker("19/04/2026")
+
+        args, kwargs = mock_presenter.list_videos.call_args
+        assert args[0] == "19/04/2026"
+        assert kwargs["cancel_event"] is application._cancel_event
+        assert callable(kwargs["on_log"])
+        assert callable(kwargs["on_status"])
+
+    def test_operacao_cancelada_enfileira_cancelled(self, application):
+        from domain.exceptions import OperacaoCancelada
+        mock_presenter = MagicMock()
+        mock_presenter.list_videos.side_effect = OperacaoCancelada("cancelado")
+
+        with patch.object(application, "_build_presenter", return_value=mock_presenter):
+            application._worker("19/04/2026")
+
+        msgs = []
+        try:
+            while True:
+                msgs.append(application._queue.get_nowait())
+        except queue.Empty:
+            pass
+
+        assert ("cancelled", None) in msgs
+
+    def test_excecao_generica_enfileira_error(self, application):
+        mock_presenter = MagicMock()
+        mock_presenter.list_videos.side_effect = RuntimeError("falha qualquer")
+
+        with patch.object(application, "_build_presenter", return_value=mock_presenter):
+            application._worker("19/04/2026")
+
+        msgs = []
+        try:
+            while True:
+                msgs.append(application._queue.get_nowait())
+        except queue.Empty:
+            pass
+
+        kinds = [m[0] for m in msgs]
+        assert "error" in kinds
+        err_payload = next(m[1] for m in msgs if m[0] == "error")
+        assert "falha qualquer" in err_payload
+
+
+class TestWorkerPhase2:
+    """Fluxo Fase 2: download + upload via presenter, enfileira done."""
+
+    def _segments(self):
+        return [
+            {"id": "v1", "title": "Culto A", "start": None, "end": None},
+            {"id": "v2", "title": "Culto B", "start": "00:10:00", "end": "01:00:00"},
+        ]
+
+    def test_titulos_sao_enfileirados_em_done(self, application):
+        mock_presenter = MagicMock()
+        mock_presenter.process_segments.return_value = ["Culto A", "Culto B"]
+
+        with patch.object(application, "_build_presenter", return_value=mock_presenter):
+            application._worker_phase2("19/04/2026", self._segments())
+
+        msgs = []
+        try:
+            while True:
+                msgs.append(application._queue.get_nowait())
+        except queue.Empty:
+            pass
+
+        assert ("done", ("19/04/2026", ["Culto A", "Culto B"])) in msgs
+
+    def test_chama_presenter_process_segments_com_callbacks(self, application):
+        mock_presenter = MagicMock()
+        mock_presenter.process_segments.return_value = []
+        segs = self._segments()
+
+        with patch.object(application, "_build_presenter", return_value=mock_presenter):
+            application._worker_phase2("19/04/2026", segs)
+
+        args, kwargs = mock_presenter.process_segments.call_args
+        assert args[0] == "19/04/2026"
+        assert args[1] == segs
+        assert kwargs["cancel_event"] is application._cancel_event
+        # Todos os callbacks principais devem ser repassados
+        for key in ("on_log", "on_status", "on_download_progress",
+                   "on_upload_progress", "on_upload_stats"):
+            assert callable(kwargs[key])
+
+    def test_operacao_cancelada_enfileira_cancelled(self, application):
+        from domain.exceptions import OperacaoCancelada
+        mock_presenter = MagicMock()
+        mock_presenter.process_segments.side_effect = OperacaoCancelada("x")
+
+        with patch.object(application, "_build_presenter", return_value=mock_presenter):
+            application._worker_phase2("19/04/2026", self._segments())
+
+        msgs = []
+        try:
+            while True:
+                msgs.append(application._queue.get_nowait())
+        except queue.Empty:
+            pass
+
+        assert ("cancelled", None) in msgs
+
+    def test_excecao_generica_enfileira_error(self, application):
+        mock_presenter = MagicMock()
+        mock_presenter.process_segments.side_effect = RuntimeError("upload falhou")
+
+        with patch.object(application, "_build_presenter", return_value=mock_presenter):
+            application._worker_phase2("19/04/2026", self._segments())
+
+        msgs = []
+        try:
+            while True:
+                msgs.append(application._queue.get_nowait())
+        except queue.Empty:
+            pass
+
+        kinds = [m[0] for m in msgs]
+        assert "error" in kinds
+        err_payload = next(m[1] for m in msgs if m[0] == "error")
+        assert "upload falhou" in err_payload
+
+    def test_callbacks_repassam_para_a_fila(self, application):
+        """
+        Verifica que os callbacks dados ao presenter realmente colocam
+        mensagens na fila quando invocados.
+        """
+        captured_callbacks = {}
+
+        def fake_process(date_str, segs, **kwargs):
+            captured_callbacks.update(kwargs)
+            return []
+
+        mock_presenter = MagicMock()
+        mock_presenter.process_segments.side_effect = fake_process
+
+        with patch.object(application, "_build_presenter", return_value=mock_presenter):
+            application._worker_phase2("19/04/2026", self._segments())
+
+        # Drena a fila do `done` que veio do worker
+        try:
+            while True:
+                application._queue.get_nowait()
+        except queue.Empty:
+            pass
+
+        # Aciona cada callback e confirma a mensagem correspondente
+        captured_callbacks["on_log"]("oi")
+        captured_callbacks["on_status"]("buscando")
+        captured_callbacks["on_download_progress"](0.5)
+        captured_callbacks["on_upload_progress"](42)
+        captured_callbacks["on_upload_stats"](1.0, 2.0, 0.5)
+
+        msgs = []
+        try:
+            while True:
+                msgs.append(application._queue.get_nowait())
+        except queue.Empty:
+            pass
+
+        kinds = [m[0] for m in msgs]
+        assert "log" in kinds
+        assert "status" in kinds
+        assert "download_progress" in kinds
+        assert "progress" in kinds        # on_upload_progress vira "progress"
+        assert "upload_stats" in kinds

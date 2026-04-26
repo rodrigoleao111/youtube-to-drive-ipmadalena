@@ -275,9 +275,13 @@ class GoogleDriveStorage:
         ).execute()
         folders = results.get("files", [])
 
+        # Candidatos para match fuzzy. Cada candidato inclui o ano para evitar
+        # colisão entre meses iguais de anos diferentes (ex.: pasta "Maio Festival
+        # 2025" não deve casar com busca por Maio/2026). O candidato bare `mes`
+        # foi removido por ser muito permissivo.
         candidates = [
             f"{mes} {ano}", f"{mes}-{ano}", f"{mes}/{ano}",
-            f"{ano}-{date.month:02d}", f"{date.month:02d}/{ano}", mes,
+            f"{ano}-{date.month:02d}", f"{date.month:02d}/{ano}",
         ]
         for folder in folders:
             for c in candidates:

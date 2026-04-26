@@ -47,7 +47,6 @@ if getattr(sys, "frozen", False):
 else:
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-CREDENTIALS_FILE = os.path.join(BASE_DIR, "credentials", "client_secret.json")
 TOKEN_FILE       = os.path.join(BASE_DIR, "credentials", "token.pkl")
 DOWNLOAD_DIR     = os.path.join(BASE_DIR, "downloads")
 HISTORY_FILE     = os.path.join(BASE_DIR, "historico.json")
@@ -69,17 +68,6 @@ def _ytdlp_cmd():
             return bundled
     return "yt-dlp"
 
-
-MESES_PT = {
-    1: "Janeiro", 2: "Fevereiro", 3: "Março",    4: "Abril",
-    5: "Maio",    6: "Junho",     7: "Julho",     8: "Agosto",
-    9: "Setembro",10: "Outubro",  11: "Novembro", 12: "Dezembro",
-}
-
-
-# ---------------------------------------------------------------------------
-# Helpers de callback — evitam verificar None em todo lugar
-# ---------------------------------------------------------------------------
 
 # Re-exportado de domain.exceptions para compatibilidade retroativa.
 # Código legado que importa OperacaoCancelada de baixar_audio continuará
@@ -149,20 +137,27 @@ def check_disk_space(min_mb=500):
 
 
 def cleanup_downloads(on_log=None):
-    """Remove arquivos residuais (MP3/webm) da pasta downloads/."""
+    """Remove arquivos residuais (MP3/webm) da pasta downloads/.
+
+    Falhas individuais (arquivo travado por outro processo, permissão negada)
+    são logadas como aviso mas não interrompem a limpeza dos demais arquivos.
+    """
     log = on_log if callable(on_log) else _noop
     if not os.path.exists(DOWNLOAD_DIR):
         return
     removed = 0
+    failed  = []
     for ext in ("*.mp3", "*.webm", "*.m4a", "*.opus"):
         for f in glob.glob(os.path.join(DOWNLOAD_DIR, ext)):
             try:
                 os.remove(f)
                 removed += 1
-            except Exception:
-                pass
+            except Exception as e:
+                failed.append((os.path.basename(f), str(e)))
     if removed:
         log(f"Limpeza: {removed} arquivo(s) residual(is) removido(s) de downloads/.")
+    for name, reason in failed:
+        log(f"Aviso: não removeu '{name}' — {reason}")
 
 
 def update_ytdlp(on_log=None):

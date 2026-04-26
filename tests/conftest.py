@@ -26,14 +26,22 @@ def shared_app():
     """
     Instância única do App para toda a sessão de testes.
     Evita criar/destruir múltiplas janelas Tk no mesmo processo.
+
+    O patch de update_ytdlp/check_auth_status é mantido APENAS durante
+    a construção do App. A thread daemon que dispara update_ytdlp captura
+    a referência ao Mock no momento do __init__, então é seguro desfazer
+    o patch após o App ser construído. Isso libera o nome real de
+    update_ytdlp para testes específicos que precisam exercitar a função.
     """
     with patch("baixar_audio.update_ytdlp"), \
          patch("baixar_audio.check_auth_status", return_value=True):
         from app import App
         inst = App()
         inst.withdraw()
-        yield inst
-        try:
-            inst.destroy()
-        except Exception:
-            pass
+
+    yield inst
+
+    try:
+        inst.destroy()
+    except Exception:
+        pass
