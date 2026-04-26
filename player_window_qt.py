@@ -19,6 +19,8 @@ import subprocess
 import sys
 import threading
 
+from PyQt6.QtCore import QTimer
+
 
 def _build_cmd() -> list[str]:
     """Retorna o comando para iniciar o subprocess Qt do player."""
@@ -71,7 +73,7 @@ class PlayerWindowQt:
             self._proc.stdin.flush()
         except Exception:
             self._proc.terminate()
-            master.after(0, on_cancel)
+            QTimer.singleShot(0, on_cancel)
             return
 
         # Monitoramento em thread daemon: espera o resultado do subprocess
@@ -104,6 +106,6 @@ class PlayerWindowQt:
 
         if result and result.get("type") == "segments":
             segments = result.get("segments", [])
-            self._master.after(0, lambda: self._on_complete(segments))
+            QTimer.singleShot(0, lambda: self._on_complete(segments))
         else:
-            self._master.after(0, self._on_cancel)
+            QTimer.singleShot(0, self._on_cancel)

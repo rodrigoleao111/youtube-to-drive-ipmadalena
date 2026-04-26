@@ -12,7 +12,7 @@ Cobre:
 import json
 import sys
 import threading
-from unittest.mock import MagicMock, patch, call
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -120,8 +120,10 @@ def _run_with_mock_proc(videos, stdout_lines, stdin_ok=True):
     """
     Instancia PlayerWindowQt com subprocess mockado e espera o callback.
     Retorna (tipo, payload): tipo = 'complete'|'cancel', payload = args.
+
+    QTimer.singleShot é substituído por chamada direta (síncrona) para
+    não depender de um event loop Qt em execução.
     """
-    master = MagicMock()
     called = threading.Event()
     result = {}
 
@@ -136,19 +138,17 @@ def _run_with_mock_proc(videos, stdout_lines, stdin_ok=True):
 
     mock_proc = _make_mock_proc(stdout_lines, stdin_ok)
 
+    # Substitui QTimer.singleShot por execução imediata (sem event loop)
+    def _immediate(delay, fn):
+        fn()
+
     with patch("player_window_qt._build_cmd", return_value=["python", "-c", ""]), \
-         patch("subprocess.Popen", return_value=mock_proc):
-        pw = PlayerWindowQt(master, videos, on_complete, on_cancel)
-
-    # Aguarda thread de monitoramento concluir e after() ser chamado
-    called.wait(timeout=3)
-
-    # Executa o lambda agendado via master.after(0, lambda: ...)
-    for c in master.after.call_args_list:
-        _, kwargs = c if len(c) == 2 else (c[0], {})
-        args = c[0] if c[0] else []
-        if len(args) >= 2 and callable(args[1]):
-            args[1]()   # executa o callback agendado
+         patch("subprocess.Popen", return_value=mock_proc), \
+         patch("player_window_qt.QTimer") as mock_timer:
+        mock_timer.singleShot.side_effect = _immediate
+        PlayerWindowQt(None, videos, on_complete, on_cancel)
+        # Aguarda dentro do bloco para manter o patch ativo durante _monitor
+        called.wait(timeout=3)
 
     return result
 
@@ -169,22 +169,30 @@ SEGMENTS_PAYLOAD = [
 
 
 class TestPlayerWindowQtSubprocessLancado:
-    def test_popen_chamado_ao_instanciar(self):
-        master = MagicMock()
-        mock_proc = _make_mock_proc(['{"type":"cancelled"}\n'])
+    def _make(self, stdout_lines):
+        """Instancia PlayerWindowQt com proc mockado e aguarda o _monitor concluir."""
+        mock_proc = _make_mock_proc(stdout_lines)
+        done = threading.Event()
+
+        def _immediate(delay, fn):
+            fn()
+            done.set()
+
         with patch("player_window_qt._build_cmd", return_value=["python", "-c", ""]), \
-             patch("subprocess.Popen", return_value=mock_proc) as mock_popen:
-            PlayerWindowQt(master, VIDEOS, MagicMock(), MagicMock())
-            assert mock_popen.called
+             patch("subprocess.Popen", return_value=mock_proc) as mock_popen, \
+             patch("player_window_qt.QTimer") as mock_timer:
+            mock_timer.singleShot.side_effect = _immediate
+            PlayerWindowQt(None, VIDEOS, MagicMock(), MagicMock())
+            done.wait(timeout=3)
+
+        return mock_proc, mock_popen
+
+    def test_popen_chamado_ao_instanciar(self):
+        _, mock_popen = self._make(['{"type":"cancelled"}\n'])
+        assert mock_popen.called
 
     def test_lista_de_videos_enviada_via_stdin(self):
-        master = MagicMock()
-        mock_proc = _make_mock_proc(['{"type":"cancelled"}\n'])
-        with patch("player_window_qt._build_cmd", return_value=["python", "-c", ""]), \
-             patch("subprocess.Popen", return_value=mock_proc):
-            PlayerWindowQt(master, VIDEOS, MagicMock(), MagicMock())
-
-        # Verifica que o JSON enviado contém os vídeos
+        mock_proc, _ = self._make(['{"type":"cancelled"}\n'])
         written = mock_proc.stdin.write.call_args[0][0]
         data = json.loads(written.strip())
         assert "videos" in data
@@ -212,20 +220,24 @@ class TestPlayerWindowQtCallbacks:
         assert result.get("type") == "cancel"
 
     def test_on_cancel_chamado_quando_stdin_quebra(self):
-        master = MagicMock()
         cancel_called = threading.Event()
 
         def on_cancel():
             cancel_called.set()
 
         mock_proc = _make_mock_proc([], stdin_ok=False)
-        with patch("player_window_qt._build_cmd", return_value=["python", "-c", ""]), \
-             patch("subprocess.Popen", return_value=mock_proc):
-            PlayerWindowQt(master, VIDEOS, MagicMock(), on_cancel)
 
-        # after(0, on_cancel) deve ter sido agendado
-        cancel_called.wait(timeout=3)
-        assert master.after.called
+        def _immediate(delay, fn):
+            fn()
+
+        with patch("player_window_qt._build_cmd", return_value=["python", "-c", ""]), \
+             patch("subprocess.Popen", return_value=mock_proc), \
+             patch("player_window_qt.QTimer") as mock_timer:
+            mock_timer.singleShot.side_effect = _immediate
+            PlayerWindowQt(None, VIDEOS, MagicMock(), on_cancel)
+
+        # on_cancel foi chamado de forma síncrona pelo fake singleShot
+        assert cancel_called.is_set()
 
     def test_segmentos_completos_preservados(self):
         segs = [{"id": "x", "title": "T", "start": None, "end": None}]
@@ -234,21 +246,26 @@ class TestPlayerWindowQtCallbacks:
         assert result["segments"] == segs
 
 
-class TestPlayerWindowQtAfterAgendado:
-    def test_callback_agendado_no_thread_principal_via_after(self):
-        """on_complete é sempre chamado via master.after(0, ...) — thread-safe."""
-        master = MagicMock()
+class TestPlayerWindowQtTimerAgendado:
+    def test_callback_agendado_via_qtimer_singleshot(self):
+        """on_complete é sempre chamado via QTimer.singleShot(0, ...) — thread-safe."""
         ready = threading.Event()
         mock_proc = _make_mock_proc(
             [json.dumps({"type": "segments", "segments": []}) + "\n"]
         )
-        with patch("player_window_qt._build_cmd", return_value=["python", "-c", ""]), \
-             patch("subprocess.Popen", return_value=mock_proc):
-            PlayerWindowQt(master, VIDEOS, lambda s: ready.set(), MagicMock())
 
-        ready.wait(timeout=3)
-        # master.after deve ter sido chamado com delay=0 e um callable
-        assert master.after.called
-        args = master.after.call_args[0]
-        assert args[0] == 0
-        assert callable(args[1])
+        timer_calls: list[tuple] = []
+
+        def _capture_and_call(delay, fn):
+            timer_calls.append((delay, fn))
+            fn()
+
+        with patch("player_window_qt._build_cmd", return_value=["python", "-c", ""]), \
+             patch("subprocess.Popen", return_value=mock_proc), \
+             patch("player_window_qt.QTimer") as mock_timer:
+            mock_timer.singleShot.side_effect = _capture_and_call
+            PlayerWindowQt(None, VIDEOS, lambda s: ready.set(), MagicMock())
+            ready.wait(timeout=3)
+
+        # QTimer.singleShot deve ter sido chamado com delay=0 e um callable
+        assert any(delay == 0 and callable(fn) for delay, fn in timer_calls)
