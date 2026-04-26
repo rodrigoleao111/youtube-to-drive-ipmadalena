@@ -683,14 +683,53 @@ class App(ctk.CTk):
         self._queue.put(("status", "Buscando vídeos..."))
         threading.Thread(target=self._worker, args=(date_str,), daemon=True).start()
 
+    def _build_presenter(self):
+        """
+        Constrói um ProcessingPresenter com use cases frescos (necessário porque
+        GoogleDriveStorage lê drive_folder_id no construtor; reconstruir garante
+        que mudanças nas configurações sejam refletidas a cada operação).
+        """
+        from application.use_cases import (
+            DownloadSegmentsUseCase,
+            ListVideosUseCase,
+            UploadAudioUseCase,
+        )
+        from infrastructure.drive.gdrive_storage import GoogleDriveStorage
+        from infrastructure.youtube.ytdlp_source import (
+            YtDlpAudioDownloader,
+            YtDlpVideoSource,
+        )
+        from presentation.processing_presenter import ProcessingPresenter
+
+        cfg = baixar_audio.load_config()
+
+        storage = GoogleDriveStorage(
+            token_file          = baixar_audio.TOKEN_FILE,
+            oauth_config        = baixar_audio._OAUTH_CLIENT_CONFIG,
+            scopes              = baixar_audio.SCOPES,
+            root_folder_id      = cfg["drive_folder_id"],
+            delete_after_upload = getattr(sys, "frozen", False),
+        )
+
+        return ProcessingPresenter(
+            list_videos_uc = ListVideosUseCase(source=YtDlpVideoSource()),
+            download_uc    = DownloadSegmentsUseCase(downloader=YtDlpAudioDownloader()),
+            upload_uc      = UploadAudioUseCase(
+                storage = storage,
+                history = baixar_audio._history_repo(),
+            ),
+            channel_url    = cfg["channel_url"],
+            download_dir   = baixar_audio.DOWNLOAD_DIR,
+        )
+
     def _worker(self, date_str):
         """Fase 1 — lista vídeos sem baixar."""
         try:
-            videos = baixar_audio.list_videos(
+            videos = self._build_presenter().list_videos(
                 date_str,
+                cancel_event=self._cancel_event,
                 on_log=lambda m: self._queue.put(("log", m)),
                 on_status=lambda m: self._queue.put(("status", m)),
-                cancel_event=self._cancel_event,
             )
             self._queue.put(("select_videos", (date_str, videos)))
         except baixar_audio.OperacaoCancelada:
@@ -716,26 +755,16 @@ class App(ctk.CTk):
     def _worker_phase2(self, date_str, segments):
         """Fase 2 — baixa (com trechos) e faz upload dos vídeos selecionados."""
         try:
-            files = baixar_audio.download_selected_sections(
+            titles = self._build_presenter().process_segments(
+                date_str,
                 segments,
+                cancel_event=self._cancel_event,
                 on_log=lambda m: self._queue.put(("log", m)),
                 on_status=lambda m: self._queue.put(("status", m)),
                 on_download_progress=lambda p: self._queue.put(("download_progress", p)),
-                cancel_event=self._cancel_event,
-            )
-            if not files:
-                raise RuntimeError("Nenhum arquivo MP3 gerado após o download.")
-
-            baixar_audio.upload_files(
-                date_str,
-                files,
-                on_log=lambda m: self._queue.put(("log", m)),
-                on_status=lambda m: self._queue.put(("status", m)),
-                on_progress=lambda p: self._queue.put(("progress", p)),
+                on_upload_progress=lambda p: self._queue.put(("progress", p)),
                 on_upload_stats=lambda d, t, r: self._queue.put(("upload_stats", (d, t, r))),
-                cancel_event=self._cancel_event,
             )
-            titles = [v["title"] for v in segments]
             self._queue.put(("done", (date_str, titles)))
         except baixar_audio.OperacaoCancelada:
             self._queue.put(("cancelled", None))

@@ -58,6 +58,10 @@ youtube_to_drive/
 │   ├── __init__.py
 │   └── use_cases.py                ← ListVideosUseCase, DownloadSegmentsUseCase, UploadAudioUseCase
 │
+├── presentation/                   ← adaptadores de UI (presenters)
+│   ├── __init__.py
+│   └── processing_presenter.py     ← ProcessingPresenter (compõe os use cases para a GUI)
+│
 ├── historico.json                  ← datas já processadas (gerado em runtime)
 ├── config.json                     ← canal YouTube + pasta Drive (gerado em runtime)
 ├── credentials/
@@ -83,7 +87,7 @@ plyer
 pywebview
 ```
 
-## Arquitetura — domain/, infrastructure/ e application/ (Clean Architecture, Fases 1–5)
+## Arquitetura — domain/, infrastructure/, application/ e presentation/ (Clean Architecture, Fases 1–6)
 
 O projeto está em migração incremental para Clean Architecture. As fases concluídas introduzem:
 
@@ -138,9 +142,19 @@ O projeto está em migração incremental para Clean Architecture. As fases conc
 - `upload_files()` → `UploadAudioUseCase` → `GoogleDriveStorage` + `JsonHistoryRepository`
 - Sem alteração nas assinaturas públicas. O histórico passa a ser gravado também por `upload_files()` via use case; `app._on_done()` continua chamando `save_history()` — como `JsonHistoryRepository.record()` sobrescreve a chave, a segunda gravação é idempotente (apenas atualiza o timestamp)
 
+**`presentation/` — presenter da GUI (Fase 6)**
+- `processing_presenter.py` — `ProcessingPresenter` (dataclass) compõe os três use cases em duas operações de alto nível para a GUI:
+  - `list_videos(date_str, *, cancel_event, on_log, on_status) -> List[dict]` (Fase 1 do fluxo)
+  - `process_segments(date_str, segments_data, *, cancel_event, on_log, on_status, on_download_progress, on_upload_progress, on_upload_stats) -> List[str]` (Fase 2: download + upload + histórico)
+- Não conhece Tk/customtkinter; recebe os use cases via DI e expõe callbacks que a View aciona durante a execução. Conversão `Video → dict` e `dict → Segment` acontece dentro do presenter, isolando a View dos tipos de domínio. `VideoNaoEncontrado` é convertido para `RuntimeError` (mantém contrato histórico de `baixar_audio.list_videos()`)
+
+**`app.py` (Fase 6):**
+- Novo método `_build_presenter()` constrói um `ProcessingPresenter` fresco a cada operação (necessário porque `GoogleDriveStorage` lê `drive_folder_id` no construtor; reconstruir reflete mudanças nas configurações)
+- `_worker()` (Fase 1) e `_worker_phase2()` (Fase 2) delegam ao presenter — não chamam mais `baixar_audio.list_videos()` / `download_selected_sections()` / `upload_files()` diretamente
+- `_worker_preflight()` permanece chamando utilidades de `baixar_audio.*` diretamente (não foi refatorado nesta fase)
+
 **Fases futuras planejadas:**
-- Fase 6: `presentation/` (presenter pattern para `App`)
-- Fase 7: remoção das funções legadas de `baixar_audio.py`
+- Fase 7: remoção das funções legadas de `baixar_audio.py` (`list_videos`, `download_selected_sections`, `upload_files`)
 
 ---
 
@@ -341,10 +355,11 @@ tests/
 ├── test_domain.py           ← 42 testes puros da camada de domínio
 ├── test_ytdlp_source.py     ← 26 testes da infraestrutura YouTube (subprocess mockado)
 ├── test_persistence.py      ← 29 testes dos repositórios JSON (I/O real em tmp_path)
-└── test_use_cases.py        ← 31 testes dos use cases da camada application (ports mockados)
+├── test_use_cases.py        ← 31 testes dos use cases da camada application (ports mockados)
+└── test_presenter.py        ← 19 testes do ProcessingPresenter (use cases mockados)
 ```
 
-**Total: 277 testes (278 com setup)**
+**Total: 296 testes (297 com setup)**
 
 **Como rodar:**
 ```bash
