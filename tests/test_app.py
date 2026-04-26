@@ -13,7 +13,7 @@ Cobre:
 
 Estratégia:
   - Mocks para yt-dlp, Drive, plyer (sem chamadas reais de rede)
-  - App.withdraw() para ocultar a janela durante os testes
+  - App.hide() para ocultar a janela durante os testes
   - _process_queue() chamado diretamente (sem mainloop)
   - _worker_preflight chamado diretamente (sem thread) para inspecionar a fila
 """
@@ -54,10 +54,8 @@ def _reset_app_state(shared_app):
         app._set_buttons_running(False)
     except Exception:
         pass
-    # Limpa log box
-    app.log_box.configure(state="normal")
-    app.log_box.delete("1.0", "end")
-    app.log_box.configure(state="disabled")
+    # Limpa log box (QPlainTextEdit — setReadOnly não impede clear())
+    app.log_box.clear()
     # Drena a fila
     try:
         while True:
@@ -104,9 +102,7 @@ class TestAppInit:
 
     def test_barras_iniciam_ocultas(self, application):
         """O frame de progresso não deve estar visível na inicialização."""
-        # _progress_frame só é empacotado via _show_bars(); no estado idle fica oculto
-        application.update_idletasks()
-        assert not application._progress_frame.winfo_ismapped()
+        assert not application._progress_frame.isVisible()
 
 
 # ---------------------------------------------------------------------------
@@ -117,27 +113,27 @@ class TestQueueProcessing:
     def test_mensagem_log_aparece_no_log_box(self, application):
         application._queue.put(("log", "Olá, mundo de testes"))
         application._process_queue()
-        content = application.log_box.get("1.0", "end")
+        content = application.log_box.toPlainText()
         assert "Olá, mundo de testes" in content
 
     def test_multiplos_logs_ficam_todos_no_box(self, application):
         for i in range(3):
             application._queue.put(("log", f"Linha {i}"))
         application._process_queue()
-        content = application.log_box.get("1.0", "end")
+        content = application.log_box.toPlainText()
         for i in range(3):
             assert f"Linha {i}" in content
 
     def test_mensagem_status_atualiza_label(self, application):
         application._queue.put(("status", "Buscando vídeos no YouTube..."))
         application._process_queue()
-        assert "Buscando" in application.status_label.cget("text")
+        assert "Buscando" in application.status_label.text()
 
     def test_status_concluido_usa_cor_verde(self, application):
         with patch.object(application, "_on_done"):
             application._queue.put(("status", "Concluído!"))
             application._process_queue()
-        assert "#2fa84f" in str(application.status_label.cget("text_color"))
+        assert "#2fa84f" in str(application._status_text_color)
 
     def test_status_convertendo_inicia_animacao(self, application):
         """Quando o status contém 'Convertendo', a flag _converting deve ser ativada."""
@@ -182,7 +178,7 @@ class TestQueueProcessing:
         application._running = True
         application._queue.put(("cancelled", None))
         application._process_queue()
-        text = application.status_label.cget("text")
+        text = application.status_label.text()
         assert "cancelad" in text.lower()
 
     def test_mensagem_error_reseta_running(self, application):
@@ -197,7 +193,7 @@ class TestQueueProcessing:
         with patch.object(application, "_show_error"):
             application._queue.put(("error", "Falha"))
             application._process_queue()
-        assert "#e05252" in str(application.status_label.cget("text_color"))
+        assert "#e05252" in str(application._status_text_color)
 
     def test_mensagem_preflight_error_reseta_running(self, application):
         application._running = True
@@ -377,7 +373,7 @@ class TestCancellation:
         application._running = True
         application._set_buttons_running(True)  # mostra o botão
         application._cancel()
-        assert application.cancel_btn.cget("state") == "disabled"
+        assert not application.cancel_btn.isEnabled()
 
     def test_on_cancelled_oculta_barras(self, application):
         """Após cancelar, as barras devem ser zeradas."""
@@ -394,9 +390,9 @@ class TestCancellation:
 
     def test_on_cancelled_status_idle(self, application):
         application._on_cancelled()
-        # Estado idle → cor cinza
-        assert "gray" in str(application.status_label.cget("text_color")).lower() or \
-               "cancelad" in application.status_label.cget("text").lower()
+        # Estado idle → cor cinza, ou texto menciona cancelamento
+        assert "gray" in str(application._status_text_color).lower() or \
+               "cancelad" in application.status_label.text().lower()
 
 
 # ---------------------------------------------------------------------------
@@ -405,7 +401,7 @@ class TestCancellation:
 
 class TestInputValidation:
     def test_data_vazia_mostra_erro_nao_inicia_worker(self, application):
-        application.date_entry.delete(0, "end")
+        application.date_entry.clear()
         with patch.object(application, "_show_error") as mock_err, \
              patch("threading.Thread") as MockThread:
             application._start()
@@ -413,8 +409,8 @@ class TestInputValidation:
         MockThread.assert_not_called()
 
     def test_formato_errado_mostra_erro(self, application):
-        application.date_entry.delete(0, "end")
-        application.date_entry.insert(0, "2026-04-19")  # ISO, não DD/MM/AAAA
+        application.date_entry.clear()
+        application.date_entry.setText("2026-04-19")  # ISO, não DD/MM/AAAA
         with patch.object(application, "_show_error") as mock_err, \
              patch("threading.Thread") as MockThread:
             application._start()
@@ -422,8 +418,8 @@ class TestInputValidation:
         MockThread.assert_not_called()
 
     def test_data_valida_inicia_thread_preflight(self, application):
-        application.date_entry.delete(0, "end")
-        application.date_entry.insert(0, "19/04/2026")
+        application.date_entry.clear()
+        application.date_entry.setText("19/04/2026")
         with patch("baixar_audio.check_auth_status", return_value=True), \
              patch("threading.Thread") as MockThread:
             mock_t = MagicMock()
@@ -433,8 +429,8 @@ class TestInputValidation:
         mock_t.start.assert_called()
 
     def test_data_valida_seta_running_true(self, application):
-        application.date_entry.delete(0, "end")
-        application.date_entry.insert(0, "19/04/2026")
+        application.date_entry.clear()
+        application.date_entry.setText("19/04/2026")
         with patch("baixar_audio.check_auth_status", return_value=True), \
              patch("threading.Thread"):
             application._start()
@@ -442,8 +438,8 @@ class TestInputValidation:
 
     def test_sem_autorizacao_mostra_erro_e_nao_inicia(self, application):
         """Se Drive não autorizado, _start deve mostrar erro sem iniciar worker."""
-        application.date_entry.delete(0, "end")
-        application.date_entry.insert(0, "19/04/2026")
+        application.date_entry.clear()
+        application.date_entry.setText("19/04/2026")
         with patch("baixar_audio.check_auth_status", return_value=False), \
              patch.object(application, "_show_error") as mock_err, \
              patch("threading.Thread") as MockThread:

@@ -29,17 +29,20 @@ if exist "%APP_DIR%\yt-dlp.exe" (
     echo  OK.
 )
 
-:: --- [2/4] Verificar PyInstaller ---------------------------------------------
+:: --- [2/4] Verificar PyInstaller e hooks ----------------------------------------
 echo.
-echo  [2/4] Verificando PyInstaller...
+echo  [2/4] Verificando PyInstaller e pyinstaller-hooks-contrib...
 pyinstaller --version >nul 2>&1
 if errorlevel 1 (
     echo  Instalando PyInstaller...
-    pip install pyinstaller --quiet
+    pip install pyinstaller pyinstaller-hooks-contrib --quiet
     if errorlevel 1 (
         echo  ERRO: Falha ao instalar PyInstaller.
         pause & exit /b 1
     )
+) else (
+    :: Garante que hooks-contrib esta presente (necessario para PyQt6/WebEngine)
+    pip install pyinstaller-hooks-contrib --quiet
 )
 echo  OK.
 

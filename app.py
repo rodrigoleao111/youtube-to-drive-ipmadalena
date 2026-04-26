@@ -1,18 +1,17 @@
 """
-IPMadalena — Cultos para o Drive
-Interface gráfica principal.
+IPMadalena — Cultos para o Drive  (interface PyQt6)
 """
 
 # ---------------------------------------------------------------------------
-# Modo subprocesso do player (frozen exe: IPMadalena.exe --player-mode ...)
-# Deve ser verificado ANTES de qualquer import do Tkinter/customtkinter.
+# Modo subprocesso do player — verificar ANTES de qualquer import Qt/Tk
 # ---------------------------------------------------------------------------
 import sys as _sys
-if "--player-mode" in _sys.argv:
-    _idx = _sys.argv.index("--player-mode")
+
+if "--player-mode-qt" in _sys.argv:
+    _idx = _sys.argv.index("--player-mode-qt")
     _sys.argv = [_sys.argv[0]] + _sys.argv[_idx + 1:]
-    from player_subprocess import main as _player_main
-    _player_main()
+    from player_subprocess_qt import main as _player_qt_main
+    _player_qt_main()
     _sys.exit(0)
 
 import logging
@@ -23,12 +22,19 @@ import sys
 import threading
 from datetime import datetime
 
-import customtkinter as ctk
-from tkcalendar import Calendar
+from PyQt6.QtCore import QDate, QTimer, Qt
+from PyQt6.QtGui import QIcon
+from PyQt6.QtWidgets import (
+    QApplication, QCheckBox, QDialog, QFrame, QHBoxLayout,
+    QLabel, QLineEdit, QMainWindow, QMessageBox, QPlainTextEdit,
+    QProgressBar, QPushButton, QScrollArea, QSizePolicy,
+    QVBoxLayout, QWidget, QCalendarWidget,
+)
 
 import baixar_audio
 from setup_wizard import SetupWizard
-from player_window import PlayerWindow
+from player_window_qt import PlayerWindowQt as PlayerWindow
+
 
 # ---------------------------------------------------------------------------
 # Instância única — impede abrir dois apps ao mesmo tempo
@@ -38,7 +44,6 @@ _lock_socket = None
 
 
 def _acquire_single_instance():
-    """Tenta reservar uma porta TCP local. Retorna True se conseguiu (primeira instância)."""
     global _lock_socket
     try:
         _lock_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -64,9 +69,7 @@ def _setup_file_logging():
         level=logging.INFO,
         format="%(asctime)s  %(message)s",
         datefmt="%H:%M:%S",
-        handlers=[
-            logging.FileHandler(log_file, encoding="utf-8"),
-        ],
+        handlers=[logging.FileHandler(log_file, encoding="utf-8")],
     )
     logging.info("App iniciado.")
 
@@ -76,52 +79,132 @@ def _file_log(msg: str):
 
 
 # ---------------------------------------------------------------------------
-# Tema
+# Qt Stylesheet (dark theme)
 # ---------------------------------------------------------------------------
-ctk.set_appearance_mode("dark")
-ctk.set_default_color_theme("blue")
+_QSS = """
+QMainWindow, QWidget {
+    background-color: #212121;
+    color: #e0e0e0;
+    font-family: 'Segoe UI', Arial, sans-serif;
+    font-size: 13px;
+}
+QLabel  { color: #e0e0e0; }
+QDialog { background-color: #212121; }
+QLineEdit {
+    background: #333; color: #e0e0e0;
+    border: 1px solid #555; border-radius: 4px;
+    padding: 4px 8px;
+}
+QLineEdit:focus { border: 1px solid #1f6aa5; }
+QPushButton {
+    background: #1f6aa5; color: #fff;
+    border: none; border-radius: 4px;
+    padding: 6px 18px;
+}
+QPushButton:hover    { background: #2980b9; }
+QPushButton:disabled { background: #444; color: #888; }
+QPushButton#cancel_btn  { background: #c0392b; }
+QPushButton#cancel_btn:hover    { background: #e74c3c; }
+QPushButton#cancel_btn:disabled { background: #555; color: #888; }
+QPushButton#icon_btn {
+    background: transparent; font-size: 16px;
+    border: none; border-radius: 4px; padding: 4px 8px;
+}
+QPushButton#icon_btn:hover { background: #444; }
+QPushButton#gray_btn { background: #555; }
+QPushButton#gray_btn:hover { background: #666; }
+QPushButton#red_btn  { background: #c0392b; }
+QPushButton#red_btn:hover { background: #e74c3c; }
+QProgressBar {
+    background: #333; border: none;
+    border-radius: 3px; max-height: 12px;
+    text-align: center;
+}
+QProgressBar::chunk { background: #1f6aa5; border-radius: 3px; }
+QPlainTextEdit {
+    background: #1a1a1a; color: #c8c8c8;
+    border: 1px solid #333; border-radius: 4px;
+    font-family: Consolas, monospace; font-size: 11px;
+}
+QFrame#auth_banner { background: #5a3500; border-radius: 8px; }
+QFrame#date_frame  { background: #2b2b2b; border-radius: 8px; }
+QFrame#sep         { background: #444; }
+QFrame#card        { background: #2b2b2b; border-radius: 6px; }
+QScrollArea        { border: none; }
+QScrollBar:vertical {
+    background: #2b2b2b; width: 8px; border-radius: 4px;
+}
+QScrollBar::handle:vertical {
+    background: #555; border-radius: 4px; min-height: 20px;
+}
+QCalendarWidget { background: #2b2b2b; color: #e0e0e0; }
+"""
+
+
+# ---------------------------------------------------------------------------
+# Barra de progresso com interface get()/set() em escala 0.0–1.0
+# ---------------------------------------------------------------------------
+class _ProgressBar(QProgressBar):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setMinimum(0)
+        self.setMaximum(100)
+        self.setValue(0)
+        self.setTextVisible(False)
+        self.setFixedHeight(12)
+
+    def get(self) -> float:
+        return self.value() / 100.0
+
+    def set(self, value: float):
+        self.setValue(int(max(0.0, min(1.0, value)) * 100))
 
 
 # ---------------------------------------------------------------------------
 # Janela principal
 # ---------------------------------------------------------------------------
-class App(ctk.CTk):
+class App(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.title("IPMadalena — Cultos para o Drive")
-        self.geometry("660x700")
-        self.resizable(False, False)
+        self.setWindowTitle("IPMadalena — Cultos para o Drive")
+        self.setFixedSize(660, 700)
 
-        # Ícone da janela e da barra de tarefas
         _icon = os.path.join(
             getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__))),
             "icon.ico",
         )
         if os.path.exists(_icon):
-            self.iconbitmap(_icon)
+            self.setWindowIcon(QIcon(_icon))
 
-        self._queue        = queue.Queue()
-        self._running      = False
-        self._converting   = False
-        self._cancel_event = threading.Event()
-        self._dot_pulsing  = False
+        # Estado interno
+        self._queue            = queue.Queue()
+        self._running          = False
+        self._converting       = False
+        self._cancel_event     = threading.Event()
+        self._dot_pulsing      = False
+        self._dot_pulse_bright = True
+        self._conv_value       = 0.0
+        self._status_text_color = "gray"   # exposto para testes
 
-        # Adaptador de notificações desktop (implementa INotifier)
         from composition_root import build_notifier
         self._notifier = build_notifier()
 
         self._build_ui()
-        self.after(100, self._process_queue)
-        self.protocol("WM_DELETE_WINDOW", self._on_close)
 
-        # Inicialização em background: atualizar yt-dlp
+        # Timer de polling da fila (worker → GUI)
+        self._queue_timer = QTimer(self)
+        self._queue_timer.timeout.connect(self._process_queue)
+        self._queue_timer.start(100)
+
+        # Atualiza yt-dlp em background
         threading.Thread(target=self._init_update_ytdlp, daemon=True).start()
 
-        # Primeira execução: abre wizard de configuração se ainda não foi autorizado
-        if not os.path.exists(baixar_audio.TOKEN_FILE):
-            self.withdraw()
-            SetupWizard(self, on_complete=self._on_wizard_complete)
+        # Wizard na primeira execução
+        if not baixar_audio.check_auth_status():
+            self.hide()
+            wizard = SetupWizard(self, on_complete=self._on_wizard_complete)
+            wizard.show()
         else:
             self._check_auth_visibility()
 
@@ -130,233 +213,181 @@ class App(ctk.CTk):
     # -----------------------------------------------------------------------
     def _build_ui(self):
         PAD = 28
-        LABEL_W = 78   # largura fixa dos rótulos das barras
 
-        # ── Cabeçalho ────────────────────────────────────────────────────────
-        header_frame = ctk.CTkFrame(self, fg_color="transparent")
-        header_frame.pack(fill="x", padx=PAD, pady=(24, 0))
+        central = QWidget()
+        self.setCentralWidget(central)
+        root = QVBoxLayout(central)
+        root.setContentsMargins(PAD, 24, PAD, 24)
+        root.setSpacing(0)
 
-        ctk.CTkLabel(
-            header_frame,
-            text="IPMadalena — Cultos para o Drive",
-            font=ctk.CTkFont(size=20, weight="bold"),
-        ).pack(side="left")
+        # ── Cabeçalho ──────────────────────────────────────────────────────
+        hdr = QHBoxLayout()
+        title = QLabel("IPMadalena — Cultos para o Drive")
+        title.setStyleSheet("font-size: 20px; font-weight: bold;")
+        gear = QPushButton("⚙")
+        gear.setObjectName("icon_btn")
+        gear.setFixedSize(34, 34)
+        gear.clicked.connect(self._open_settings)
+        hdr.addWidget(title)
+        hdr.addStretch()
+        hdr.addWidget(gear)
+        root.addLayout(hdr)
+        root.addSpacing(4)
 
-        ctk.CTkButton(
-            header_frame,
-            text="⚙",
-            width=34,
-            height=34,
-            font=ctk.CTkFont(size=16),
-            fg_color="transparent",
-            hover_color=("#d0d0d0", "#444444"),
-            command=self._open_settings,
-        ).pack(side="right")
+        sub = QLabel("Baixa o áudio dos cultos do YouTube e envia para o Google Drive")
+        sub.setStyleSheet("color: #888; font-size: 12px;")
+        root.addWidget(sub)
+        root.addSpacing(12)
 
-        ctk.CTkLabel(
-            self,
-            text="Baixa o áudio dos cultos do YouTube e envia para o Google Drive",
-            font=ctk.CTkFont(size=12),
-            text_color="gray",
-            anchor="w",
-        ).pack(fill="x", padx=PAD, pady=(4, 12))
-
-        # ── Banner de autorização Google Drive ────────────────────────────────
-        self._auth_banner = ctk.CTkFrame(self, fg_color="#5a3500", corner_radius=8)
-        # gerenciado por _check_auth_visibility
-
-        ctk.CTkLabel(
-            self._auth_banner,
-            text="⚠  Google Drive não autorizado",
-            font=ctk.CTkFont(size=12, weight="bold"),
-            text_color="#f0a830",
-        ).pack(side="left", padx=(14, 8), pady=10)
-
-        self._auth_btn = ctk.CTkButton(
-            self._auth_banner,
-            text="Autorizar",
-            width=100,
-            font=ctk.CTkFont(size=12),
-            fg_color="#d4820a",
-            hover_color="#b36b08",
-            command=self._start_auth,
+        # ── Banner de autorização (inicialmente oculto) ─────────────────────
+        self._auth_banner = QFrame()
+        self._auth_banner.setObjectName("auth_banner")
+        ab = QHBoxLayout(self._auth_banner)
+        ab.setContentsMargins(14, 6, 14, 6)
+        ab_lbl = QLabel("⚠  Google Drive não autorizado")
+        ab_lbl.setStyleSheet("font-weight: bold; color: #f0a830;")
+        self._auth_btn = QPushButton("Autorizar")
+        self._auth_btn.setStyleSheet(
+            "background: #d4820a; padding: 4px 14px; border-radius: 4px;"
         )
-        self._auth_btn.pack(side="right", padx=14, pady=8)
+        self._auth_btn.clicked.connect(self._start_auth)
+        ab.addWidget(ab_lbl)
+        ab.addStretch()
+        ab.addWidget(self._auth_btn)
+        self._auth_banner.hide()
+        root.addWidget(self._auth_banner)
 
-        # ── Seleção de data ───────────────────────────────────────────────────
-        date_frame = ctk.CTkFrame(self, fg_color=("gray90", "gray16"), corner_radius=10)
-        date_frame.pack(fill="x", padx=PAD, pady=(0, 0))
+        # ── Seleção de data ────────────────────────────────────────────────
+        date_frame = QFrame()
+        date_frame.setObjectName("date_frame")
+        dr = QHBoxLayout(date_frame)
+        dr.setContentsMargins(16, 8, 16, 8)
+        dr.setSpacing(8)
+        dr.addWidget(QLabel("Data do culto:"))
 
-        ctk.CTkLabel(
-            date_frame,
-            text="Data do culto:",
-            font=ctk.CTkFont(size=13),
-        ).pack(side="left", padx=(16, 0), pady=14)
+        self.date_entry = QLineEdit()
+        self.date_entry.setPlaceholderText("DD/MM/AAAA")
+        self.date_entry.setFixedWidth(130)
+        dr.addWidget(self.date_entry)
 
-        self.date_entry = ctk.CTkEntry(
-            date_frame,
-            placeholder_text="DD/MM/AAAA",
-            width=130,
-            font=ctk.CTkFont(size=13),
-        )
-        self.date_entry.pack(side="left", padx=(10, 6), pady=14)
+        cal_btn = QPushButton("📅")
+        cal_btn.setObjectName("icon_btn")
+        cal_btn.setFixedWidth(40)
+        cal_btn.clicked.connect(self._open_calendar)
+        dr.addWidget(cal_btn)
 
-        ctk.CTkButton(
-            date_frame,
-            text="📅",
-            width=40,
-            font=ctk.CTkFont(size=14),
-            fg_color="transparent",
-            hover_color=("#d0d0d0", "#444444"),
-            command=self._open_calendar,
-        ).pack(side="left", pady=14)
+        dr.addStretch()
 
-        self.run_btn = ctk.CTkButton(
-            date_frame,
-            text="Processar",
-            width=120,
-            font=ctk.CTkFont(size=13, weight="bold"),
-            command=self._start,
-        )
-        self.run_btn.pack(side="right", padx=(0, 16), pady=14)
+        self.cancel_btn = QPushButton("Cancelar")
+        self.cancel_btn.setObjectName("cancel_btn")
+        self.cancel_btn.setFixedWidth(100)
+        self.cancel_btn.clicked.connect(self._cancel)
+        self.cancel_btn.hide()
+        dr.addWidget(self.cancel_btn)
 
-        # Botão cancelar — visível apenas durante execução
-        self.cancel_btn = ctk.CTkButton(
-            date_frame,
-            text="Cancelar",
-            width=100,
-            font=ctk.CTkFont(size=13),
-            fg_color="#c0392b",
-            hover_color="#922b21",
-            command=self._cancel,
-        )
-        # NÃO empacotado ainda
+        self.run_btn = QPushButton("Processar")
+        self.run_btn.setStyleSheet("font-weight: bold; padding: 6px 18px;")
+        self.run_btn.setFixedWidth(120)
+        self.run_btn.clicked.connect(self._start)
+        dr.addWidget(self.run_btn)
 
-        # ── Separador ─────────────────────────────────────────────────────────
-        ctk.CTkFrame(self, height=1, fg_color=("gray78", "gray28")).pack(
-            fill="x", padx=PAD, pady=(16, 0)
-        )
+        root.addWidget(date_frame)
+        root.addSpacing(16)
 
-        # ── Status ────────────────────────────────────────────────────────────
-        status_row = ctk.CTkFrame(self, fg_color="transparent")
-        status_row.pack(fill="x", padx=PAD, pady=(12, 8))
+        # ── Separador ──────────────────────────────────────────────────────
+        sep = QFrame()
+        sep.setObjectName("sep")
+        sep.setFrameShape(QFrame.Shape.HLine)
+        sep.setFixedHeight(1)
+        root.addWidget(sep)
+        root.addSpacing(12)
 
-        self._status_dot = ctk.CTkLabel(
-            status_row,
-            text="●",
-            font=ctk.CTkFont(size=11),
-            text_color="gray",
-            width=16,
-        )
-        self._status_dot.pack(side="left", padx=(0, 6))
+        # ── Status ─────────────────────────────────────────────────────────
+        sr = QHBoxLayout()
+        self._status_dot = QLabel("●")
+        self._status_dot.setFixedWidth(16)
+        self._status_dot.setStyleSheet("color: gray; font-size: 11px;")
+        self.status_label = QLabel("Pronto")
+        self.status_label.setStyleSheet("color: gray;")
+        sr.addWidget(self._status_dot)
+        sr.addWidget(self.status_label, stretch=1)
+        root.addLayout(sr)
+        root.addSpacing(8)
 
-        self.status_label = ctk.CTkLabel(
-            status_row,
-            text="Pronto",
-            font=ctk.CTkFont(size=13),
-            text_color="gray",
-            anchor="w",
-        )
-        self.status_label.pack(side="left", fill="x", expand=True)
+        # ── Progresso (oculto no idle) ──────────────────────────────────────
+        self._progress_frame = QWidget()
+        pfl = QVBoxLayout(self._progress_frame)
+        pfl.setContentsMargins(0, 0, 0, 0)
+        pfl.setSpacing(6)
 
-        # ── Seção de progresso (Download / Conversão / Upload) ────────────────
-        # Pack/unpack como bloco — oculta quando idle
-        self._progress_frame = ctk.CTkFrame(self, fg_color="transparent")
-        # empacotado em _show_bars(), removido em _hide_bars()
+        LABEL_W = 78
 
-        def _bar_row(parent, label):
-            row = ctk.CTkFrame(parent, fg_color="transparent")
-            row.pack(fill="x", pady=(0, 7))
-            ctk.CTkLabel(
-                row,
-                text=label,
-                font=ctk.CTkFont(size=11),
-                text_color=("gray50", "gray60"),
-                width=LABEL_W,
-                anchor="w",
-            ).pack(side="left")
-            bar = ctk.CTkProgressBar(row, height=12)
-            bar.pack(side="left", fill="x", expand=True, padx=(0, 8))
-            stats = ctk.CTkLabel(
-                row,
-                text="",
-                font=ctk.CTkFont(family="Consolas", size=11),
-                text_color="gray",
-                width=190,
-                anchor="w",
+        def _bar_row(text):
+            row = QHBoxLayout()
+            lbl = QLabel(text)
+            lbl.setFixedWidth(LABEL_W)
+            lbl.setStyleSheet("color: #666; font-size: 11px;")
+            bar = _ProgressBar()
+            stats = QLabel("")
+            stats.setFixedWidth(190)
+            stats.setStyleSheet(
+                "color: gray; font-family: Consolas; font-size: 11px;"
             )
-            stats.pack(side="left")
+            row.addWidget(lbl)
+            row.addWidget(bar, stretch=1)
+            row.addWidget(stats)
+            pfl.addLayout(row)
             return bar, stats
 
-        self.download_bar,  self.download_stats  = _bar_row(self._progress_frame, "Download")
-        self.convert_bar,   self.convert_stats   = _bar_row(self._progress_frame, "Conversão")
-        self.progress_bar,  self.upload_stats_label = _bar_row(self._progress_frame, "Upload")
+        self.download_bar,  self.download_stats       = _bar_row("Download")
+        self.convert_bar,   self.convert_stats        = _bar_row("Conversão")
+        self.progress_bar,  self.upload_stats_label   = _bar_row("Upload")
 
-        # ── Log ───────────────────────────────────────────────────────────────
-        self._log_label = ctk.CTkLabel(
-            self,
-            text="Log de execução:",
-            font=ctk.CTkFont(size=12),
-            text_color="gray",
-            anchor="w",
-        )
-        self._log_label.pack(fill="x", padx=PAD)
+        self._progress_frame.hide()
+        root.addWidget(self._progress_frame)
 
-        self.log_box = ctk.CTkTextbox(
-            self,
-            font=ctk.CTkFont(family="Consolas", size=11),
-            wrap="word",
-        )
-        self.log_box.pack(fill="both", expand=True, padx=PAD, pady=(4, 24))
-        self.log_box.configure(state="disabled")
+        # ── Log ────────────────────────────────────────────────────────────
+        log_hdr = QLabel("Log de execução:")
+        log_hdr.setStyleSheet("color: #888; font-size: 12px;")
+        root.addWidget(log_hdr)
+        root.addSpacing(4)
+
+        self.log_box = QPlainTextEdit()
+        self.log_box.setReadOnly(True)
+        root.addWidget(self.log_box, stretch=1)
 
     # -----------------------------------------------------------------------
     # Calendário popup
     # -----------------------------------------------------------------------
     def _open_calendar(self):
-        popup = ctk.CTkToplevel(self)
-        popup.title("Selecionar data")
-        popup.geometry("300x300")
-        popup.resizable(False, False)
-        popup.grab_set()
-        popup.focus_force()
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Selecionar data")
+        dlg.setFixedSize(310, 340)
+        layout = QVBoxLayout(dlg)
 
-        initial = datetime.today()
-        typed = self.date_entry.get().strip()
+        cal = QCalendarWidget()
+        cal.setGridVisible(True)
+        initial = QDate.currentDate()
         try:
-            initial = datetime.strptime(typed, "%d/%m/%Y")
+            d = datetime.strptime(self.date_entry.text().strip(), "%d/%m/%Y")
+            initial = QDate(d.year, d.month, d.day)
         except ValueError:
             pass
+        cal.setSelectedDate(initial)
+        layout.addWidget(cal)
 
-        cal = Calendar(
-            popup,
-            selectmode="day",
-            date_pattern="dd/MM/yyyy",
-            locale="pt_BR",
-            year=initial.year,
-            month=initial.month,
-            day=initial.day,
-            background="#2b2b2b",
-            foreground="white",
-            selectbackground="#1f6aa5",
-            headersbackground="#1f1f1f",
-            headersforeground="white",
-            weekendforeground="#aaaaaa",
-            othermonthforeground="#555555",
-            bordercolor="#333333",
-            font=("Helvetica", 11),
-        )
-        cal.pack(fill="both", expand=True, padx=10, pady=(10, 4))
-
-        def _confirmar():
-            self.date_entry.delete(0, "end")
-            self.date_entry.insert(0, cal.get_date())
-            popup.destroy()
-
-        ctk.CTkButton(popup, text="Confirmar", command=_confirmar).pack(pady=8)
+        btn = QPushButton("Confirmar")
+        btn.clicked.connect(lambda: (
+            self.date_entry.setText(
+                cal.selectedDate().toString("dd/MM/yyyy")
+            ),
+            dlg.accept(),
+        ))
+        layout.addWidget(btn)
+        dlg.exec()
 
     # -----------------------------------------------------------------------
-    # Fila de mensagens (thread → GUI)
+    # Fila de mensagens (workers → GUI)
     # -----------------------------------------------------------------------
     def _process_queue(self):
         try:
@@ -372,23 +403,21 @@ class App(ctk.CTk):
                     state   = "done" if is_done else "running"
                     self._set_status(value, state)
                     _file_log(f"[STATUS] {value}")
-                    # Controla animação da barra de conversão
                     lo = value.lower()
                     if "convertendo" in lo:
                         if not self._converting:
                             self._converting = True
-                            self.convert_stats.configure(text="aguardando...")
+                            self._conv_value = 0.0
+                            self.convert_stats.setText("aguardando...")
                             self._animate_conversion()
                     elif self._converting:
-                        # passou da fase de conversão
                         self._converting = False
                         self.convert_bar.set(1.0)
-                        self.convert_stats.configure(text="")
+                        self.convert_stats.setText("")
 
                 elif kind == "download_progress":
                     self.download_bar.set(value)
-                    pct_txt = f"{value * 100:.0f}%"
-                    self.download_stats.configure(text=pct_txt)
+                    self.download_stats.setText(f"{value * 100:.0f}%")
 
                 elif kind == "progress":
                     self.progress_bar.set(value / 100)
@@ -396,14 +425,14 @@ class App(ctk.CTk):
                 elif kind == "upload_stats":
                     mb_done, mb_total, rate = value
                     if mb_done == 0 and rate == 0:
-                        self.upload_stats_label.configure(text="")
+                        self.upload_stats_label.setText("")
                     elif rate > 0:
-                        self.upload_stats_label.configure(
-                            text=f"{mb_done:.1f} / {mb_total:.1f} MB  {rate:.2f} MB/s"
+                        self.upload_stats_label.setText(
+                            f"{mb_done:.1f} / {mb_total:.1f} MB  {rate:.2f} MB/s"
                         )
                     else:
-                        self.upload_stats_label.configure(
-                            text=f"{mb_done:.1f} / {mb_total:.1f} MB"
+                        self.upload_stats_label.setText(
+                            f"{mb_done:.1f} / {mb_total:.1f} MB"
                         )
 
                 elif kind == "select_videos":
@@ -428,125 +457,107 @@ class App(ctk.CTk):
                     self._on_preflight_error(value)
 
                 elif kind == "auth_done":
-                    self._auth_banner.pack_forget()
+                    self._auth_banner.hide()
                     self._append_log("Google Drive autorizado com sucesso!")
                     _file_log("Google Drive autorizado com sucesso.")
 
                 elif kind == "auth_error":
-                    self._auth_btn.configure(state="normal", text="Autorizar")
+                    self._auth_btn.setEnabled(True)
+                    self._auth_btn.setText("Autorizar")
                     self._append_log(f"Erro na autorização: {value}")
                     _file_log(f"Erro na autorização Drive: {value}")
 
         except queue.Empty:
             pass
-        finally:
-            self.after(100, self._process_queue)
 
-    def _append_log(self, msg):
+    def _append_log(self, msg: str):
         now = datetime.now().strftime("%H:%M:%S")
-        self.log_box.configure(state="normal")
-        self.log_box.insert("end", f"[{now}]  {msg}\n")
-        self.log_box.see("end")
-        self.log_box.configure(state="disabled")
+        self.log_box.appendPlainText(f"[{now}]  {msg}")
 
     # -----------------------------------------------------------------------
-    # Status dot + helper
+    # Status dot
     # -----------------------------------------------------------------------
-    def _set_status(self, text, state="running"):
-        """Atualiza texto e cor do status + dot de indicação."""
+    def _set_status(self, text: str, state: str = "running"):
         _colors = {
             "idle":    ("gray",    "gray"),
             "running": ("white",   "#4a9edd"),
             "done":    ("#2fa84f", "#2fa84f"),
             "error":   ("#e05252", "#e05252"),
         }
-        text_color, dot_color = _colors.get(state, ("white", "#4a9edd"))
-        self.status_label.configure(text=text, text_color=text_color)
-        self._status_dot.configure(text_color=dot_color)
-
+        tc, dc = _colors.get(state, ("white", "#4a9edd"))
+        self._status_text_color = tc
+        self.status_label.setText(text)
+        self.status_label.setStyleSheet(f"color: {tc};")
+        self._status_dot.setStyleSheet(f"color: {dc}; font-size: 11px;")
         if state == "running":
             self._start_dot_pulse()
         else:
-            self._stop_dot_pulse(dot_color)
+            self._stop_dot_pulse(dc)
 
     def _start_dot_pulse(self):
-        """Inicia a animação de pulsar na bolinha de status (se ainda não estiver ativa)."""
         if not self._dot_pulsing:
             self._dot_pulsing = True
             self._dot_pulse_bright = True
             self._animate_dot_pulse()
 
     def _stop_dot_pulse(self, final_color: str):
-        """Para a animação e fixa a bolinha na cor final do estado."""
         self._dot_pulsing = False
-        try:
-            self._status_dot.configure(text_color=final_color)
-        except Exception:
-            pass
+        self._status_dot.setStyleSheet(f"color: {final_color}; font-size: 11px;")
 
     def _animate_dot_pulse(self):
-        """Alterna a bolinha entre azul vivo e azul escuro a cada 500 ms."""
         if not self._dot_pulsing:
             return
         color = "#4a9edd" if self._dot_pulse_bright else "#1a5a8c"
         self._dot_pulse_bright = not self._dot_pulse_bright
-        try:
-            self._status_dot.configure(text_color=color)
-            self.after(500, self._animate_dot_pulse)
-        except Exception:
-            self._dot_pulsing = False
+        self._status_dot.setStyleSheet(f"color: {color}; font-size: 11px;")
+        QTimer.singleShot(500, self._animate_dot_pulse)
 
     # -----------------------------------------------------------------------
-    # Controle das barras de progresso
+    # Barras de progresso
     # -----------------------------------------------------------------------
     def _hide_bars(self):
         self._converting = False
-        self._progress_frame.pack_forget()
+        self._conv_value = 0.0
+        self._progress_frame.hide()
         self.download_bar.set(0)
         self.convert_bar.set(0)
         self.progress_bar.set(0)
-        self.download_stats.configure(text="")
-        self.convert_stats.configure(text="")
-        self.upload_stats_label.configure(text="")
+        self.download_stats.setText("")
+        self.convert_stats.setText("")
+        self.upload_stats_label.setText("")
 
     def _show_bars(self):
+        self._conv_value = 0.0
         self.download_bar.set(0)
         self.convert_bar.set(0)
         self.progress_bar.set(0)
-        self.download_stats.configure(text="")
-        self.convert_stats.configure(text="")
-        self.upload_stats_label.configure(text="")
-        self._progress_frame.pack(fill="x", padx=28, pady=(0, 14),
-                                  before=self._log_label)
+        self.download_stats.setText("")
+        self.convert_stats.setText("")
+        self.upload_stats_label.setText("")
+        self._progress_frame.show()
 
-    # -----------------------------------------------------------------------
-    # Animação da barra de conversão
-    # -----------------------------------------------------------------------
     def _animate_conversion(self):
         if not self._converting:
             return
-        current = self.convert_bar.get()
-        # Avança até 90%; os 10% finais preenchemos em _on_done
-        nxt = min(current + 0.018, 0.90)
-        self.convert_bar.set(nxt)
-        self.after(160, self._animate_conversion)
+        self._conv_value = min(self._conv_value + 0.018, 0.90)
+        self.convert_bar.set(self._conv_value)
+        QTimer.singleShot(160, self._animate_conversion)
 
     # -----------------------------------------------------------------------
     # Iniciar / Cancelar
     # -----------------------------------------------------------------------
     def _start(self):
-        date_str = self.date_entry.get().strip()
-
+        date_str = self.date_entry.text().strip()
         if not date_str:
             self._show_error("Informe a data do culto.")
             return
-
         try:
             datetime.strptime(date_str, "%d/%m/%Y")
         except ValueError:
-            self._show_error("Data inválida.\nUse o formato DD/MM/AAAA  (ex: 19/04/2026).")
+            self._show_error(
+                "Data inválida.\nUse o formato DD/MM/AAAA  (ex: 19/04/2026)."
+            )
             return
-
         if not baixar_audio.check_auth_status():
             self._show_error(
                 "Google Drive não autorizado.\n\n"
@@ -554,20 +565,17 @@ class App(ctk.CTk):
             )
             return
 
-        # Limpa UI e reinicia estado
-        self.log_box.configure(state="normal")
-        self.log_box.delete("1.0", "end")
-        self.log_box.configure(state="disabled")
+        self.log_box.clear()
         self._set_status("Verificando...", "running")
         self._cancel_event.clear()
         self._converting = False
-
         self._running = True
         self._show_bars()
         self._set_buttons_running(True)
 
-        # Fase 0: verificações pré-execução
-        threading.Thread(target=self._worker_preflight, args=(date_str,), daemon=True).start()
+        threading.Thread(
+            target=self._worker_preflight, args=(date_str,), daemon=True
+        ).start()
 
     def _cancel(self):
         if not self._running:
@@ -577,99 +585,51 @@ class App(ctk.CTk):
         self._append_log("Cancelamento solicitado...")
         self._set_status("Cancelando...", "running")
         self._hide_bars()
-        self.cancel_btn.configure(state="disabled")
+        self.cancel_btn.setEnabled(False)
 
     def _set_buttons_running(self, running: bool):
-        """Alterna entre estado idle e running nos botões."""
         if running:
-            self.run_btn.configure(state="disabled", text="Processando...")
-            self.cancel_btn.pack(side="right", padx=(0, 16), before=self.run_btn)
+            self.run_btn.setEnabled(False)
+            self.run_btn.setText("Processando...")
+            self.cancel_btn.show()
         else:
-            self.cancel_btn.pack_forget()
-            self.run_btn.configure(state="normal", text="Processar")
-            self.cancel_btn.configure(state="normal")
+            self.cancel_btn.hide()
+            self.run_btn.setEnabled(True)
+            self.run_btn.setText("Processar")
+            self.cancel_btn.setEnabled(True)
 
     # -----------------------------------------------------------------------
-    # Workers (threads de background)
+    # Workers de background
     # -----------------------------------------------------------------------
-
-    def _on_close(self):
-        self.destroy()
-
-    def _on_wizard_complete(self):
-        """Chamado pelo SetupWizard ao concluir — exibe a janela principal."""
-        self._check_auth_visibility()
-        self.deiconify()
-
-    # -----------------------------------------------------------------------
-    # Autorização Google Drive
-    # -----------------------------------------------------------------------
-
-    def _open_settings(self):
-        win = SettingsWindow(self)
-        win.grab_set()
-        win.focus_force()
-        # Quando a janela de configurações fechar, reavalia o banner de auth
-        win.bind("<Destroy>", lambda _: self.after(100, self._check_auth_visibility))
-
-    def _check_auth_visibility(self):
-        """Exibe o banner laranja se o Drive não estiver autorizado."""
-        if baixar_audio.check_auth_status():
-            self._auth_banner.pack_forget()
-        else:
-            self._auth_banner.pack(fill="x", padx=28, pady=(0, 12))
-
-    def _start_auth(self):
-        self._auth_btn.configure(state="disabled", text="Autorizando...")
-        self._append_log("Abrindo navegador para autorização do Google Drive...")
-        _file_log("Iniciando fluxo OAuth do Drive.")
-        threading.Thread(target=self._run_auth_worker, daemon=True).start()
-
-    def _run_auth_worker(self):
-        try:
-            baixar_audio.run_auth(on_log=lambda m: self._queue.put(("log", m)))
-            self._queue.put(("auth_done", None))
-        except Exception as e:
-            self._queue.put(("auth_error", str(e)))
-
-    # -----------------------------------------------------------------------
-    # yt-dlp update
-    # -----------------------------------------------------------------------
-
     def _init_update_ytdlp(self):
-        """Roda em background ao iniciar o app — atualiza yt-dlp silenciosamente."""
         baixar_audio.update_ytdlp(
             on_log=lambda m: self._queue.put(("log", m))
         )
 
-    def _worker_preflight(self, date_str):
-        """
-        Fase 0 — verificações antes de começar:
-        internet, espaço em disco, limpeza de resíduos, histórico.
-        """
+    def _worker_preflight(self, date_str: str):
         log = lambda m: self._queue.put(("log", m))
 
-        # 1. Internet
         log("Verificando conexão com a internet...")
         if not baixar_audio.check_internet():
-            self._queue.put(("preflight_error",
-                             "Sem conexão com a internet.\nVerifique sua rede e tente novamente."))
+            self._queue.put((
+                "preflight_error",
+                "Sem conexão com a internet.\nVerifique sua rede e tente novamente.",
+            ))
             return
 
-        # 2. Espaço em disco
         log("Verificando espaço em disco...")
         ok, free_mb = baixar_audio.check_disk_space(min_mb=500)
         if not ok:
-            self._queue.put(("preflight_error",
-                             f"Espaço insuficiente em disco: {free_mb:.0f} MB livres.\n"
-                             "São necessários pelo menos 500 MB."))
+            self._queue.put((
+                "preflight_error",
+                f"Espaço insuficiente em disco: {free_mb:.0f} MB livres.\n"
+                "São necessários pelo menos 500 MB.",
+            ))
             return
         log(f"Espaço livre: {free_mb:.0f} MB — OK.")
 
-        # 3. Limpeza de resíduos
         baixar_audio.cleanup_downloads(on_log=log)
 
-        # 4. Histórico — avisa se data já foi processada
         history = baixar_audio.load_history()
         if date_str in history:
             entry = history[date_str]
@@ -680,24 +640,19 @@ class App(ctk.CTk):
                 processado_em = dt.strftime("%d/%m/%Y às %H:%M")
             except Exception:
                 pass
-            # Passa para a GUI via fila para exibir popup (não pode abrir popup da thread)
             self._queue.put(("history_warning", (date_str, videos, processado_em)))
-            return  # GUI retomará chamando _worker_after_preflight
+            return
 
         self._queue.put(("status", "Buscando vídeos..."))
-        threading.Thread(target=self._worker, args=(date_str,), daemon=True).start()
+        threading.Thread(
+            target=self._worker, args=(date_str,), daemon=True
+        ).start()
 
     def _build_presenter(self):
-        """
-        Delega ao composition_root, que centraliza o wiring de todas as
-        camadas. Reconstruir a cada operação garante que mudanças em
-        drive_folder_id/channel_url sejam refletidas.
-        """
         from composition_root import build_processing_presenter
         return build_processing_presenter()
 
-    def _worker(self, date_str):
-        """Fase 1 — lista vídeos sem baixar."""
+    def _worker(self, date_str: str):
         try:
             videos = self._build_presenter().list_videos(
                 date_str,
@@ -711,8 +666,7 @@ class App(ctk.CTk):
         except Exception as e:
             self._queue.put(("error", str(e)))
 
-    def _show_player_window(self, date_str, selected_videos):
-        """Abre PlayerWindow para o usuário marcar trechos antes do download."""
+    def _show_player_window(self, date_str: str, selected_videos: list):
         def _on_complete(segments):
             self._append_log("Trechos confirmados. Iniciando download...")
             threading.Thread(
@@ -724,10 +678,12 @@ class App(ctk.CTk):
         def _on_cancel():
             self._on_cancelled()
 
-        PlayerWindow(self, selected_videos, on_complete=_on_complete, on_cancel=_on_cancel)
+        PlayerWindow(
+            self, selected_videos,
+            on_complete=_on_complete, on_cancel=_on_cancel,
+        )
 
-    def _worker_phase2(self, date_str, segments):
-        """Fase 2 — baixa (com trechos) e faz upload dos vídeos selecionados."""
+    def _worker_phase2(self, date_str: str, segments: list):
         try:
             titles = self._build_presenter().process_segments(
                 date_str,
@@ -746,163 +702,176 @@ class App(ctk.CTk):
             self._queue.put(("error", str(e)))
 
     # -----------------------------------------------------------------------
-    # Popup de aviso de histórico
+    # Configurações e autorização
     # -----------------------------------------------------------------------
-    def _show_history_warning(self, date_str, videos, processado_em):
-        """Avisa que a data já foi processada e pergunta se quer continuar."""
-        popup = ctk.CTkToplevel(self)
-        popup.title("Data já processada")
-        popup.geometry("480x280")
-        popup.resizable(False, False)
-        popup.grab_set()
-        popup.focus_force()
+    def _open_settings(self):
+        dlg = SettingsDialog(self)
+        dlg.finished.connect(lambda _: self._check_auth_visibility())
+        dlg.exec()
 
-        ctk.CTkLabel(
-            popup,
-            text="⚠  Data já processada",
-            font=ctk.CTkFont(size=14, weight="bold"),
-            text_color="#e0a020",
-        ).pack(pady=(20, 6))
+    def _check_auth_visibility(self):
+        if baixar_audio.check_auth_status():
+            self._auth_banner.hide()
+        else:
+            self._auth_banner.show()
 
-        ctk.CTkLabel(
-            popup,
-            text=f"A data {date_str} já foi processada em {processado_em}.",
-            font=ctk.CTkFont(size=12),
-            wraplength=440,
-            justify="center",
-        ).pack(padx=20)
+    def _start_auth(self):
+        self._auth_btn.setEnabled(False)
+        self._auth_btn.setText("Autorizando...")
+        self._append_log("Abrindo navegador para autorização do Google Drive...")
+        _file_log("Iniciando fluxo OAuth do Drive.")
+        threading.Thread(target=self._run_auth_worker, daemon=True).start()
 
+    def _run_auth_worker(self):
+        try:
+            baixar_audio.run_auth(
+                on_log=lambda m: self._queue.put(("log", m))
+            )
+            self._queue.put(("auth_done", None))
+        except Exception as e:
+            self._queue.put(("auth_error", str(e)))
+
+    # -----------------------------------------------------------------------
+    # Popups (modais — executados no thread principal via queue)
+    # -----------------------------------------------------------------------
+    def _show_history_warning(self, date_str: str, videos: list, processado_em: str):
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Data já processada")
+        dlg.setFixedSize(480, 280)
+        layout = QVBoxLayout(dlg)
+        layout.setSpacing(10)
+
+        lbl = QLabel("⚠  Data já processada")
+        lbl.setStyleSheet("font-size: 14px; font-weight: bold; color: #e0a020;")
+        layout.addWidget(lbl)
+        layout.addWidget(QLabel(
+            f"A data {date_str} já foi processada em {processado_em}."
+        ))
         if videos:
             nomes = "\n".join(f"  • {v}" for v in videos[:5])
             if len(videos) > 5:
                 nomes += f"\n  … e mais {len(videos) - 5} vídeo(s)"
-            ctk.CTkLabel(
-                popup,
-                text=nomes,
-                font=ctk.CTkFont(family="Consolas", size=11),
-                text_color="gray",
-                justify="left",
-                anchor="w",
-            ).pack(padx=30, pady=(6, 0), fill="x")
+            v_lbl = QLabel(nomes)
+            v_lbl.setStyleSheet("color: gray; font-family: Consolas; font-size: 11px;")
+            layout.addWidget(v_lbl)
+        layout.addWidget(QLabel("Deseja processar novamente?"))
 
-        ctk.CTkLabel(
-            popup,
-            text="Deseja processar novamente?",
-            font=ctk.CTkFont(size=12),
-            justify="center",
-        ).pack(pady=(12, 4))
+        btn_row = QHBoxLayout()
+        btn_sim = QPushButton("Sim, continuar")
+        btn_nao = QPushButton("Não, cancelar")
+        btn_nao.setObjectName("gray_btn")
+        btn_row.addWidget(btn_sim)
+        btn_row.addWidget(btn_nao)
+        layout.addLayout(btn_row)
 
-        btn_frame = ctk.CTkFrame(popup, fg_color="transparent")
-        btn_frame.pack(pady=(0, 16))
+        _result = {"action": "cancel"}
 
         def _continuar():
-            popup.destroy()
-            threading.Thread(target=self._worker, args=(date_str,), daemon=True).start()
+            _result["action"] = "continue"
+            dlg.accept()
 
         def _cancelar():
-            popup.destroy()
+            _result["action"] = "cancel"
+            dlg.reject()
+
+        btn_sim.clicked.connect(_continuar)
+        btn_nao.clicked.connect(_cancelar)
+        dlg.exec()
+
+        if _result["action"] == "continue":
+            threading.Thread(
+                target=self._worker, args=(date_str,), daemon=True
+            ).start()
+        else:
             self._on_cancelled()
 
-        ctk.CTkButton(
-            btn_frame, text="Sim, continuar", width=140,
-            command=_continuar,
-        ).pack(side="left", padx=8)
+    def _show_video_selection(self, date_str: str, videos: list):
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Vídeos encontrados")
+        dlg.setFixedSize(560, 420)
+        layout = QVBoxLayout(dlg)
+        layout.setSpacing(8)
 
-        ctk.CTkButton(
-            btn_frame, text="Não, cancelar", width=140,
-            fg_color="#555", hover_color="#444",
-            command=_cancelar,
-        ).pack(side="left", padx=8)
+        t_lbl = QLabel(f"Vídeos encontrados para {date_str}")
+        t_lbl.setStyleSheet("font-size: 14px; font-weight: bold;")
+        layout.addWidget(t_lbl)
+        s_lbl = QLabel("Selecione os vídeos que deseja baixar e enviar para o Drive:")
+        s_lbl.setStyleSheet("color: gray; font-size: 12px;")
+        layout.addWidget(s_lbl)
 
-    # -----------------------------------------------------------------------
-    # Popup de seleção de vídeos
-    # -----------------------------------------------------------------------
-    def _show_video_selection(self, date_str, videos):
-        popup = ctk.CTkToplevel(self)
-        popup.title("Vídeos encontrados")
-        popup.geometry("560x400")
-        popup.resizable(False, False)
-        popup.grab_set()
-        popup.focus_force()
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        container = QWidget()
+        cl = QVBoxLayout(container)
+        cl.setSpacing(4)
 
-        ctk.CTkLabel(
-            popup,
-            text=f"Vídeos encontrados para {date_str}",
-            font=ctk.CTkFont(size=14, weight="bold"),
-        ).pack(pady=(18, 4))
-
-        ctk.CTkLabel(
-            popup,
-            text="Selecione os vídeos que deseja baixar e enviar para o Drive:",
-            font=ctk.CTkFont(size=12),
-            text_color="gray",
-        ).pack(pady=(0, 12))
-
-        scroll_frame = ctk.CTkScrollableFrame(popup, height=220)
-        scroll_frame.pack(fill="x", padx=20, pady=(0, 12))
-
-        check_vars = []
+        check_boxes = []
         for video in videos:
-            var = ctk.BooleanVar(value=True)
-            check_vars.append(var)
-
-            row = ctk.CTkFrame(scroll_frame, fg_color=("gray90", "gray20"), corner_radius=8)
-            row.pack(fill="x", pady=4, padx=2)
-
-            ctk.CTkCheckBox(
-                row, text="", variable=var,
-                width=28, checkbox_width=20, checkbox_height=20,
-            ).pack(side="left", padx=(10, 4), pady=10)
-
-            info = ctk.CTkFrame(row, fg_color="transparent")
-            info.pack(side="left", fill="x", expand=True, pady=8)
-
-            ctk.CTkLabel(
-                info, text=video["title"],
-                font=ctk.CTkFont(size=12, weight="bold"),
-                anchor="w", wraplength=420,
-            ).pack(anchor="w")
-
+            card = QFrame()
+            card.setObjectName("card")
+            ch = QHBoxLayout(card)
+            ch.setContentsMargins(10, 8, 10, 8)
+            chk = QCheckBox()
+            chk.setChecked(True)
+            check_boxes.append(chk)
+            ch.addWidget(chk)
+            info = QVBoxLayout()
+            vt = QLabel(video["title"])
+            vt.setStyleSheet("font-weight: bold; font-size: 12px;")
+            vt.setWordWrap(True)
+            info.addWidget(vt)
             try:
                 d = datetime.strptime(video["upload_date"], "%Y%m%d")
                 date_fmt = f"Publicado em {d.strftime('%d/%m/%Y')}"
             except Exception:
                 date_fmt = video["upload_date"]
+            dl = QLabel(date_fmt)
+            dl.setStyleSheet("color: gray; font-size: 11px;")
+            info.addWidget(dl)
+            ch.addLayout(info, stretch=1)
+            cl.addWidget(card)
 
-            ctk.CTkLabel(
-                info, text=date_fmt,
-                font=ctk.CTkFont(size=11), text_color="gray", anchor="w",
-            ).pack(anchor="w")
+        scroll.setWidget(container)
+        layout.addWidget(scroll, stretch=1)
 
-        def _cancelar():
-            popup.destroy()
-            self._on_cancelled()
+        _result = {"action": "cancel", "selected": []}
 
         def _prosseguir():
-            selected = [v for v, chk in zip(videos, check_vars) if chk.get()]
-            popup.destroy()
+            selected = [v for v, chk in zip(videos, check_boxes) if chk.isChecked()]
             if not selected:
-                self._on_error("Nenhum vídeo selecionado.")
                 return
+            _result["action"] = "proceed"
+            _result["selected"] = selected
+            dlg.accept()
+
+        def _cancelar():
+            _result["action"] = "cancel"
+            dlg.reject()
+
+        btn_proc = QPushButton("Prosseguir")
+        btn_proc.setStyleSheet("font-weight: bold;")
+        btn_proc.clicked.connect(_prosseguir)
+        layout.addWidget(btn_proc)
+        dlg.rejected.connect(_cancelar)
+        dlg.exec()
+
+        if _result["action"] == "proceed":
+            selected = _result["selected"]
             self._append_log(
                 f"{len(selected)} vídeo(s) selecionado(s). "
                 "Abrindo player para seleção de trecho..."
             )
             self._queue.put(("open_player", (date_str, selected)))
+        else:
+            self._on_cancelled()
 
-        popup.protocol("WM_DELETE_WINDOW", _cancelar)
-
-        ctk.CTkButton(
-            popup, text="Prosseguir", width=160,
-            font=ctk.CTkFont(size=13, weight="bold"),
-            command=_prosseguir,
-        ).pack(pady=(0, 16))
+    def _show_error(self, msg: str):
+        QMessageBox.critical(self, "Erro", msg)
 
     # -----------------------------------------------------------------------
     # Callbacks de finalização
     # -----------------------------------------------------------------------
-    def _on_preflight_error(self, msg):
-        """Falha nas verificações pré-execução — volta ao estado idle."""
+    def _on_preflight_error(self, msg: str):
         self._running = False
         self._set_buttons_running(False)
         self._hide_bars()
@@ -927,21 +896,19 @@ class App(ctk.CTk):
         self.download_bar.set(1)
         self.convert_bar.set(1)
         self.progress_bar.set(1)
-        self.convert_stats.configure(text="")
+        self.convert_stats.setText("")
 
-        # Salva histórico
         if date_str and video_titles:
             baixar_audio.save_history(date_str, video_titles)
             _file_log(f"Histórico salvo: {date_str} — {len(video_titles)} vídeo(s).")
 
-        # Notificação desktop (delegada ao INotifier; falhas são silenciadas)
         n = len(video_titles) if video_titles else 0
         self._notifier.notify(
-            title   = "IPMadalena — Concluído ✓",
-            message = f"{n} vídeo(s) enviado(s) ao Drive com sucesso!",
+            title="IPMadalena — Concluído ✓",
+            message=f"{n} vídeo(s) enviado(s) ao Drive com sucesso!",
         )
 
-    def _on_error(self, msg):
+    def _on_error(self, msg: str):
         self._running = False
         self._converting = False
         self._set_buttons_running(False)
@@ -951,188 +918,113 @@ class App(ctk.CTk):
         _file_log(f"ERRO: {msg}")
         self._show_error(msg)
 
-    def _show_error(self, msg):
-        dialog = ctk.CTkToplevel(self)
-        dialog.title("Erro")
-        dialog.geometry("420x200")
-        dialog.resizable(False, False)
-        dialog.grab_set()
-        dialog.focus_force()
+    def _on_wizard_complete(self):
+        self._check_auth_visibility()
+        self.show()
 
-        ctk.CTkLabel(
-            dialog,
-            text="⚠  Ocorreu um erro",
-            font=ctk.CTkFont(size=14, weight="bold"),
-            text_color="#e05252",
-        ).pack(pady=(20, 8))
-
-        ctk.CTkLabel(
-            dialog, text=msg,
-            font=ctk.CTkFont(size=12),
-            wraplength=380, justify="center",
-        ).pack(padx=20)
-
-        ctk.CTkButton(dialog, text="OK", width=100, command=dialog.destroy).pack(pady=16)
+    # -----------------------------------------------------------------------
+    # Fechar
+    # -----------------------------------------------------------------------
+    def closeEvent(self, event):
+        self._queue_timer.stop()
+        event.accept()
 
 
 # ---------------------------------------------------------------------------
-# Janela de configurações
+# Configurações (dialog modal)
 # ---------------------------------------------------------------------------
-class SettingsWindow(ctk.CTkToplevel):
+class SettingsDialog(QDialog):
 
-    def __init__(self, master):
-        super().__init__(master)
-        self.title("Configurações")
-        self.geometry("540x490")
-        self.resizable(False, False)
-
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Configurações")
+        self.setFixedSize(540, 490)
         self._auth_running = False
         self._build_ui()
 
-    # -----------------------------------------------------------------------
-    # Layout
-    # -----------------------------------------------------------------------
     def _build_ui(self):
-        # ── Título ───────────────────────────────────────────────────────────
-        ctk.CTkLabel(
-            self,
-            text="Configurações",
-            font=ctk.CTkFont(size=18, weight="bold"),
-        ).pack(pady=(22, 16))
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(28, 22, 28, 22)
+        layout.setSpacing(10)
 
-        content = ctk.CTkFrame(self, fg_color="transparent")
-        content.pack(fill="both", expand=True, padx=28)
+        title = QLabel("Configurações")
+        title.setStyleSheet("font-size: 18px; font-weight: bold;")
+        layout.addWidget(title)
 
-        # ── Seção: Google Drive ───────────────────────────────────────────────
-        self._section_label(content, "Google Drive")
+        # ── Google Drive ────────────────────────────────────────────────────
+        layout.addWidget(self._section_label("Google Drive"))
 
-        auth_row = ctk.CTkFrame(content, fg_color=("gray92", "gray17"), corner_radius=8)
-        auth_row.pack(fill="x", pady=(4, 12))
-
-        self._auth_status_label = ctk.CTkLabel(
-            auth_row,
-            text="",
-            font=ctk.CTkFont(size=12),
-            anchor="w",
-        )
-        self._auth_status_label.pack(side="left", padx=14, pady=12)
-
-        self._auth_action_btn = ctk.CTkButton(
-            auth_row,
-            text="",
-            width=110,
-            font=ctk.CTkFont(size=12),
-            command=self._toggle_auth,
-        )
-        self._auth_action_btn.pack(side="right", padx=12, pady=8)
+        auth_card = QFrame()
+        auth_card.setObjectName("card")
+        ac = QHBoxLayout(auth_card)
+        ac.setContentsMargins(14, 10, 14, 10)
+        self._auth_status_label = QLabel("")
+        self._auth_action_btn = QPushButton("")
+        self._auth_action_btn.setFixedWidth(110)
+        self._auth_action_btn.clicked.connect(self._toggle_auth)
+        ac.addWidget(self._auth_status_label, stretch=1)
+        ac.addWidget(self._auth_action_btn)
+        layout.addWidget(auth_card)
 
         self._refresh_auth_status()
 
-        # ── Seção: Canal do YouTube ───────────────────────────────────────────
-        self._section_label(content, "Canal do YouTube")
-
+        # ── Canal do YouTube ────────────────────────────────────────────────
+        layout.addWidget(self._section_label("Canal do YouTube"))
         cfg = baixar_audio.load_config()
+        self._channel_entry = QLineEdit(cfg["channel_url"])
+        layout.addWidget(self._channel_entry)
+        yt_hint = QLabel("Ex: https://www.youtube.com/@SeuCanal/streams")
+        yt_hint.setStyleSheet("color: gray; font-size: 11px;")
+        layout.addWidget(yt_hint)
 
-        self._channel_entry = ctk.CTkEntry(
-            content,
-            font=ctk.CTkFont(size=12),
-            height=36,
+        # ── Pasta do Google Drive ───────────────────────────────────────────
+        layout.addWidget(self._section_label("Pasta do Google Drive"))
+        self._folder_entry = QLineEdit(cfg["drive_folder_id"])
+        layout.addWidget(self._folder_entry)
+        dr_hint = QLabel(
+            "ID da pasta raiz no Drive (encontrado no final da URL da pasta)"
         )
-        self._channel_entry.insert(0, cfg["channel_url"])
-        self._channel_entry.pack(fill="x", pady=(4, 2))
+        dr_hint.setStyleSheet("color: gray; font-size: 11px;")
+        layout.addWidget(dr_hint)
 
-        ctk.CTkLabel(
-            content,
-            text="Ex: https://www.youtube.com/@SeuCanal/streams",
-            font=ctk.CTkFont(size=11),
-            text_color="gray",
-            anchor="w",
-        ).pack(fill="x", pady=(0, 12))
+        layout.addStretch()
 
-        # ── Seção: Pasta do Google Drive ──────────────────────────────────────
-        self._section_label(content, "Pasta do Google Drive")
+        # ── Botões ──────────────────────────────────────────────────────────
+        btn_row = QHBoxLayout()
+        btn_save = QPushButton("Salvar")
+        btn_save.setStyleSheet("font-weight: bold;")
+        btn_save.clicked.connect(self._save)
+        btn_close = QPushButton("Fechar")
+        btn_close.setObjectName("gray_btn")
+        btn_close.clicked.connect(self.accept)
+        btn_row.addStretch()
+        btn_row.addWidget(btn_save)
+        btn_row.addWidget(btn_close)
+        layout.addLayout(btn_row)
 
-        self._folder_entry = ctk.CTkEntry(
-            content,
-            font=ctk.CTkFont(size=12),
-            height=36,
-        )
-        self._folder_entry.insert(0, cfg["drive_folder_id"])
-        self._folder_entry.pack(fill="x", pady=(4, 2))
+        self._feedback_label = QLabel("")
+        self._feedback_label.setStyleSheet("color: #2fa84f; font-size: 11px;")
+        layout.addWidget(self._feedback_label)
 
-        ctk.CTkLabel(
-            content,
-            text="ID da pasta raiz no Drive (encontrado no final da URL da pasta)",
-            font=ctk.CTkFont(size=11),
-            text_color="gray",
-            anchor="w",
-        ).pack(fill="x", pady=(0, 16))
+    def _section_label(self, text: str) -> QLabel:
+        lbl = QLabel(text)
+        lbl.setStyleSheet("font-size: 13px; font-weight: bold;")
+        return lbl
 
-        # ── Botões ────────────────────────────────────────────────────────────
-        btn_row = ctk.CTkFrame(content, fg_color="transparent")
-        btn_row.pack(fill="x", pady=(0, 4))
-
-        ctk.CTkButton(
-            btn_row,
-            text="Fechar",
-            width=110,
-            fg_color=("gray75", "gray30"),
-            hover_color=("gray65", "gray25"),
-            command=self.destroy,
-        ).pack(side="right", padx=(8, 0))
-
-        ctk.CTkButton(
-            btn_row,
-            text="Salvar",
-            width=110,
-            font=ctk.CTkFont(weight="bold"),
-            command=self._save,
-        ).pack(side="right")
-
-        self._feedback_label = ctk.CTkLabel(
-            content,
-            text="",
-            font=ctk.CTkFont(size=11),
-            text_color="#2fa84f",
-            anchor="w",
-        )
-        self._feedback_label.pack(fill="x", pady=(6, 0))
-
-    # -----------------------------------------------------------------------
-    # Helpers de layout
-    # -----------------------------------------------------------------------
-    def _section_label(self, parent, text):
-        ctk.CTkLabel(
-            parent,
-            text=text,
-            font=ctk.CTkFont(size=13, weight="bold"),
-            anchor="w",
-        ).pack(fill="x", pady=(0, 2))
-
-    # -----------------------------------------------------------------------
-    # Auth
-    # -----------------------------------------------------------------------
     def _refresh_auth_status(self):
-        authorized = baixar_audio.check_auth_status()
-        if authorized:
-            self._auth_status_label.configure(
-                text="✓  Autorizado",
-                text_color="#2fa84f",
-            )
-            self._auth_action_btn.configure(
-                text="Logout",
-                fg_color=("#c0392b", "#922b21"),
-                hover_color=("#922b21", "#7b241c"),
+        if baixar_audio.check_auth_status():
+            self._auth_status_label.setText("✓  Autorizado")
+            self._auth_status_label.setStyleSheet("color: #2fa84f;")
+            self._auth_action_btn.setText("Logout")
+            self._auth_action_btn.setStyleSheet(
+                "background: #c0392b; border-radius: 4px;"
             )
         else:
-            self._auth_status_label.configure(
-                text="✗  Não autorizado",
-                text_color="#e05252",
-            )
-            self._auth_action_btn.configure(
-                text="Autorizar",
-                fg_color=("#1f6aa5", "#144870"),
-                hover_color=("#144870", "#0f3555"),
+            self._auth_status_label.setText("✗  Não autorizado")
+            self._auth_status_label.setStyleSheet("color: #e05252;")
+            self._auth_action_btn.setText("Autorizar")
+            self._auth_action_btn.setStyleSheet(
+                "background: #1f6aa5; border-radius: 4px;"
             )
 
     def _toggle_auth(self):
@@ -1144,68 +1036,54 @@ class SettingsWindow(ctk.CTkToplevel):
     def _do_logout(self):
         baixar_audio.logout_drive()
         self._refresh_auth_status()
-        self._feedback_label.configure(
-            text="Logout realizado. Autorize novamente antes de processar.",
-            text_color="#e0a020",
+        self._feedback_label.setText(
+            "Logout realizado. Autorize novamente antes de processar."
         )
+        self._feedback_label.setStyleSheet("color: #e0a020; font-size: 11px;")
 
     def _do_authorize(self):
         if self._auth_running:
             return
         self._auth_running = True
-        self._auth_action_btn.configure(state="disabled", text="Autorizando...")
+        self._auth_action_btn.setEnabled(False)
+        self._auth_action_btn.setText("Autorizando...")
         threading.Thread(target=self._auth_worker, daemon=True).start()
 
     def _auth_worker(self):
         try:
             baixar_audio.run_auth()
-            self.after(0, self._on_auth_done)
+            QTimer.singleShot(0, self._on_auth_done)
         except Exception as e:
-            self.after(0, lambda: self._on_auth_error(str(e)))
+            QTimer.singleShot(0, lambda: self._on_auth_error(str(e)))
 
     def _on_auth_done(self):
         self._auth_running = False
-        self._auth_action_btn.configure(state="normal")
+        self._auth_action_btn.setEnabled(True)
         self._refresh_auth_status()
-        self._feedback_label.configure(
-            text="Google Drive autorizado com sucesso!",
-            text_color="#2fa84f",
-        )
+        self._feedback_label.setText("Google Drive autorizado com sucesso!")
+        self._feedback_label.setStyleSheet("color: #2fa84f; font-size: 11px;")
 
-    def _on_auth_error(self, msg):
+    def _on_auth_error(self, msg: str):
         self._auth_running = False
-        self._auth_action_btn.configure(state="normal")
+        self._auth_action_btn.setEnabled(True)
         self._refresh_auth_status()
-        self._feedback_label.configure(
-            text=f"Erro na autorização: {msg}",
-            text_color="#e05252",
-        )
+        self._feedback_label.setText(f"Erro na autorização: {msg}")
+        self._feedback_label.setStyleSheet("color: #e05252; font-size: 11px;")
 
-    # -----------------------------------------------------------------------
-    # Salvar configurações
-    # -----------------------------------------------------------------------
     def _save(self):
-        channel = self._channel_entry.get().strip()
-        folder  = self._folder_entry.get().strip()
-
+        channel = self._channel_entry.text().strip()
+        folder  = self._folder_entry.text().strip()
         if not channel:
-            self._feedback_label.configure(
-                text="URL do canal não pode estar vazia.",
-                text_color="#e05252",
-            )
+            self._feedback_label.setText("URL do canal não pode estar vazia.")
+            self._feedback_label.setStyleSheet("color: #e05252; font-size: 11px;")
             return
         if not folder:
-            self._feedback_label.configure(
-                text="ID da pasta não pode estar vazio.",
-                text_color="#e05252",
-            )
+            self._feedback_label.setText("ID da pasta não pode estar vazio.")
+            self._feedback_label.setStyleSheet("color: #e05252; font-size: 11px;")
             return
-
         baixar_audio.save_config(channel_url=channel, drive_folder_id=folder)
-        self._feedback_label.configure(
-            text="Configurações salvas com sucesso!",
-            text_color="#2fa84f",
-        )
+        self._feedback_label.setText("Configurações salvas com sucesso!")
+        self._feedback_label.setStyleSheet("color: #2fa84f; font-size: 11px;")
 
 
 # ---------------------------------------------------------------------------
@@ -1213,17 +1091,19 @@ class SettingsWindow(ctk.CTkToplevel):
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
     if not _acquire_single_instance():
-        # Já existe uma instância rodando — avisa e sai
-        import tkinter as tk
-        import tkinter.messagebox as mb
-        root = tk.Tk()
-        root.withdraw()
-        mb.showerror(
+        _q = QApplication(sys.argv)
+        QMessageBox.critical(
+            None,
             "IPMadalena já está aberto",
-            "O aplicativo já está em execução.\nFeche a janela existente antes de abrir novamente.",
+            "O aplicativo já está em execução.\n"
+            "Feche a janela existente antes de abrir novamente.",
         )
-        root.destroy()
+        sys.exit(1)
     else:
         _setup_file_logging()
-        app = App()
-        app.mainloop()
+        _q = QApplication(sys.argv)
+        _q.setStyle("Fusion")
+        _q.setStyleSheet(_QSS)
+        win = App()
+        win.show()
+        sys.exit(_q.exec())

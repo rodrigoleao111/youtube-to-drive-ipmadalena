@@ -1,9 +1,13 @@
 # -*- mode: python ; coding: utf-8 -*-
 """
-PyInstaller spec — IPMadalena Cultos para o Drive
+PyInstaller spec -- IPMadalena Cultos para o Drive (PyQt6 + QWebEngine)
 Uso:
     pyinstaller build_app.spec
-Saída em dist/IPMadalena/
+Saida em dist/IPMadalena/
+
+Requisitos antes de rodar:
+    pip install pyinstaller pyinstaller-hooks-contrib
+    (pyinstaller-hooks-contrib fornece os hooks para PyQt6/WebEngine)
 """
 
 import os
@@ -14,8 +18,6 @@ from PyInstaller.utils.hooks import collect_all, collect_data_files
 block_cipher = None
 
 # ── yt-dlp: preferir standalone local (baixado por build_installer.bat) ──────
-# O launcher pip (Scripts/yt-dlp.exe) não funciona fora do ambiente Python.
-# O binário standalone (github.com/yt-dlp/yt-dlp/releases) é auto-suficiente.
 _ytdlp_local = os.path.join(".", "yt-dlp.exe")
 if os.path.exists(_ytdlp_local):
     _ytdlp = _ytdlp_local
@@ -27,45 +29,53 @@ if _ytdlp:
     extra_binaries.append((_ytdlp, "."))
     print(f"INFO: bundling yt-dlp de: {_ytdlp}")
 else:
-    print("AVISO: yt-dlp não encontrado. Execute build_installer.bat para baixar o standalone.")
+    print("AVISO: yt-dlp nao encontrado. Execute build_installer.bat para baixar o standalone.")
 
-# ── ffmpeg: incluir do diretório local ───────────────────────────────────────
+# ── ffmpeg: incluir do diretorio local ───────────────────────────────────────
 _ffmpeg = os.path.join("ffmpeg", "bin", "ffmpeg.exe")
 if os.path.exists(_ffmpeg):
     extra_binaries.append((_ffmpeg, os.path.join("ffmpeg", "bin")))
 else:
-    print("AVISO: ffmpeg não encontrado em ffmpeg/bin/ffmpeg.exe")
+    print("AVISO: ffmpeg nao encontrado em ffmpeg/bin/ffmpeg.exe")
 
-# ── customtkinter: coleta assets (temas, imagens) ────────────────────────────
-ctk_datas, ctk_bins, ctk_hidden = collect_all("customtkinter")
+# ── PyQt6 WebEngine: collect_all aciona os hooks do pyinstaller-hooks-contrib ─
+# Inclui QtWebEngineProcess.exe, plugins Qt, locales, resources, DLLs ICU.
+qt6_we_d,  qt6_we_b,  qt6_we_h  = collect_all("PyQt6.QtWebEngineWidgets")
+qt6_wec_d, qt6_wec_b, qt6_wec_h = collect_all("PyQt6.QtWebEngineCore")
 
-# ── tkcalendar/babel: dados de localização ───────────────────────────────────
-babel_datas = collect_data_files("babel")
-
-# ── pywebview: coleta assets do framework ────────────────────────────────────
-try:
-    wv_datas, wv_bins, wv_hidden = collect_all("webview")
-except Exception:
-    wv_datas, wv_bins, wv_hidden = [], [], []
+# ── Modulos adicionais PyQt6 usados diretamente ───────────────────────────────
+# Os hooks do pyinstaller-hooks-contrib ja cuidam dos binarios Qt6; aqui
+# apenas garantimos que os hidden imports sejam reconhecidos pelo analisador.
+_qt6_hidden = [
+    "PyQt6",
+    "PyQt6.sip",
+    "PyQt6.QtCore",
+    "PyQt6.QtGui",
+    "PyQt6.QtWidgets",
+    "PyQt6.QtNetwork",
+    "PyQt6.QtWebEngineCore",
+    "PyQt6.QtWebEngineWidgets",
+    # player_subprocess_qt e importado condicionalmente via --player-mode-qt
+    "player_subprocess_qt",
+]
 
 a = Analysis(
     ["app.py"],
     pathex=[os.path.abspath(".")],
-    binaries=extra_binaries + ctk_bins + wv_bins,
-    datas=ctk_datas + babel_datas + wv_datas + [
-        ("setup_wizard.py", "."),
-        ("player_window.py", "."),
-        ("player_subprocess.py", "."),
-        ("icon.ico", "."),          # ícone da janela (barra de tarefas)
+    binaries=extra_binaries + qt6_we_b + qt6_wec_b,
+    datas=qt6_we_d + qt6_wec_d + [
+        # Modulos Python locais (importados condicionalmente)
+        ("setup_wizard.py",        "."),
+        ("player_window_qt.py",    "."),
+        ("player_subprocess_qt.py", "."),
+        # Icone da janela / barra de tarefas
+        ("icon.ico", "."),
     ],
-    hiddenimports=ctk_hidden + wv_hidden + [
-        "tkcalendar",
-        "babel.numbers",
-        "babel.dates",
-        "plyer.platforms.win.notification",
-        "plyer.platforms.win",
+    hiddenimports=qt6_we_h + qt6_wec_h + _qt6_hidden + [
+        # Google APIs
         "google.auth",
         "google.auth.transport",
+        "google.auth.transport.requests",
         "google.oauth2",
         "google.oauth2.credentials",
         "google_auth_oauthlib",
@@ -73,15 +83,26 @@ a = Analysis(
         "googleapiclient",
         "googleapiclient.discovery",
         "googleapiclient.http",
+        # Notificacao desktop
+        "plyer.platforms.win.notification",
+        "plyer.platforms.win",
+        # Compatibilidade pkg_resources
         "pkg_resources.py2_warn",
-        "webview",
-        "webview.platforms.edgechromium",
-        "webview.js",
-        "webview.js.css",
     ],
     hookspath=[],
     runtime_hooks=[],
-    excludes=["matplotlib", "numpy", "pandas", "PIL"],
+    excludes=[
+        # UI legada (substituida por PyQt6)
+        "customtkinter",
+        "tkcalendar",
+        "babel",
+        "webview",          # pywebview
+        # Nao usado
+        "matplotlib",
+        "numpy",
+        "pandas",
+        "PIL",
+    ],
     cipher=block_cipher,
     noarchive=False,
 )
@@ -109,6 +130,12 @@ coll = COLLECT(
     a.datas,
     strip=False,
     upx=True,
-    upx_exclude=[],
+    upx_exclude=[
+        # Nao comprimir DLLs Qt6/WebEngine — UPX pode corrompê-las
+        "Qt6*.dll",
+        "QtWebEngine*.dll",
+        "QtWebEngineProcess.exe",
+        "*.pak",
+    ],
     name="IPMadalena",
 )

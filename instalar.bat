@@ -42,13 +42,15 @@ echo  [2/5] Instalando dependencias Python...
 python -m pip install --upgrade pip --quiet
 python -m pip install ^
     yt-dlp ^
-    customtkinter ^
-    tkcalendar ^
+    PyQt6 ^
+    PyQt6-Qt6 ^
+    PyQt6-sip ^
+    PyQt6-WebEngine ^
+    PyQt6-WebEngine-Qt6 ^
     google-api-python-client ^
     google-auth-oauthlib ^
     google-auth ^
     plyer ^
-    pywebview ^
     --quiet
 if errorlevel 1 (
     echo  ERRO: Falha ao instalar dependencias.

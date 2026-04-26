@@ -4,7 +4,7 @@
 
 #define AppName      "IPMadalena — Cultos para o Drive"
 #define AppShortName "IPMadalena"
-#define AppVersion   "2.0.1"
+#define AppVersion   "2.1.0"
 #define AppPublisher "Igreja Presbiteriana de Madalena"
 #define AppExeName   "IPMadalena.exe"
 

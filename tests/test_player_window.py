@@ -117,13 +117,30 @@ class TestBuildPlayerCmd:
 
 
 # ---------------------------------------------------------------------------
-# Fixture — usa o App compartilhado da sessão como janela pai
+# Fixture — raiz CTk dedicada para o PlayerWindow (CTk/Tkinter legado)
 # ---------------------------------------------------------------------------
 
+@pytest.fixture(scope="session")
+def _ctk_root():
+    """
+    Instância CTk dedicada para os testes do PlayerWindow (CTk/Tkinter).
+    Separada do shared_app (QMainWindow) pois são toolkits distintos.
+    Uma única instância de sessão evita criar/destruir múltiplas raízes Tcl.
+    """
+    import customtkinter as ctk
+    root = ctk.CTk()
+    root.withdraw()
+    yield root
+    try:
+        root.destroy()
+    except Exception:
+        pass
+
+
 @pytest.fixture
-def root(shared_app):
-    """Reutiliza a instância App da sessão para evitar múltiplas janelas Tk."""
-    return shared_app
+def root(_ctk_root):
+    """Raiz CTk para o PlayerWindow nos testes."""
+    return _ctk_root
 
 
 # ---------------------------------------------------------------------------
