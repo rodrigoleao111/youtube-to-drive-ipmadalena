@@ -154,7 +154,9 @@ class TestGetService:
              patch("pickle.load", return_value=creds), \
              patch("infrastructure.drive.gdrive_storage.build") as mock_build:
             _storage().get_service()
-        mock_build.assert_called_once_with("drive", "v3", credentials=creds)
+        mock_build.assert_called_once_with(
+            "drive", "v3", credentials=creds, cache_discovery=False
+        )
 
     def test_remove_token_corrompido_e_reauthentifica(self):
         with patch("os.path.exists", return_value=True), \
@@ -184,11 +186,38 @@ class TestGetService:
         with patch("os.path.exists", return_value=False), \
              patch("builtins.open", mock_open()), \
              patch("pickle.dump") as mock_dump, \
+             patch("os.makedirs"), \
              patch("infrastructure.drive.gdrive_storage.InstalledAppFlow") as mock_flow, \
              patch("infrastructure.drive.gdrive_storage.build"):
             mock_flow.from_client_config.return_value.run_local_server.return_value = MagicMock()
             _storage().get_service()
         mock_dump.assert_called_once()
+
+    def test_cria_diretorio_credentials_se_nao_existir(self, tmp_path):
+        """B6: pickle.dump falharia se credentials/ não existisse no primeiro run."""
+        # Caminho que NÃO existe (pasta credentials/ ainda não foi criada)
+        fake_token = tmp_path / "credentials" / "token.pkl"
+        assert not fake_token.parent.exists()
+
+        creds = MagicMock()
+        creds.valid = True
+
+        from infrastructure.drive.gdrive_storage import GoogleDriveStorage
+        storage = GoogleDriveStorage(
+            token_file=str(fake_token),
+            oauth_config={"installed": {}},
+            scopes=["x"],
+            root_folder_id="root",
+        )
+
+        with patch("infrastructure.drive.gdrive_storage.InstalledAppFlow") as mock_flow, \
+             patch("infrastructure.drive.gdrive_storage.build"), \
+             patch("pickle.dump"):
+            mock_flow.from_client_config.return_value.run_local_server.return_value = creds
+            storage.get_service()
+
+        # Diretório foi criado (independentemente de pickle.dump escrever bytes reais)
+        assert fake_token.parent.exists()
 
 
 # ===========================================================================

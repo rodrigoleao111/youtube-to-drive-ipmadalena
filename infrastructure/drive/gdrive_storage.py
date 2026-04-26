@@ -164,6 +164,14 @@ class GoogleDriveStorage:
         self._root_folder_id      = root_folder_id
         self._delete_after_upload = delete_after_upload
 
+    def _save_token(self, creds) -> None:
+        """Persiste o token OAuth em disco, garantindo que o diretório existe."""
+        token_dir = os.path.dirname(self._token_file)
+        if token_dir:
+            os.makedirs(token_dir, exist_ok=True)
+        with open(self._token_file, "wb") as f:
+            pickle.dump(creds, f)
+
     # -------------------------------------------------------------------
     # Autenticação
     # -------------------------------------------------------------------
@@ -210,10 +218,11 @@ class GoogleDriveStorage:
                 )
                 creds = flow.run_local_server(host="127.0.0.1", port=8085)
 
-            with open(self._token_file, "wb") as f:
-                pickle.dump(creds, f)
+            self._save_token(creds)
 
-        return build("drive", "v3", credentials=creds)
+        # cache_discovery=False silencia o warning "file_cache is only supported
+        # with oauth2client<4.0.0" emitido em ambientes sem cache backend.
+        return build("drive", "v3", credentials=creds, cache_discovery=False)
 
     def check_auth(self) -> bool:
         """Retorna True se o token existe e está válido (ou pode ser renovado)."""
@@ -231,8 +240,7 @@ class GoogleDriveStorage:
         if creds.expired and creds.refresh_token:
             try:
                 creds.refresh(Request())
-                with open(self._token_file, "wb") as f:
-                    pickle.dump(creds, f)
+                self._save_token(creds)
                 return True
             except Exception:
                 return False

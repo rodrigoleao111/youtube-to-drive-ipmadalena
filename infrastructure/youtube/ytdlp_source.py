@@ -116,7 +116,8 @@ class YtDlpVideoSource:
 # IAudioDownloader
 # ---------------------------------------------------------------------------
 
-_DL_PCT_RE = re.compile(r'\[download\]\s+(\d+\.?\d*)%')
+_DL_PCT_RE          = re.compile(r'\[download\]\s+(\d+\.?\d*)%')
+_EXTRACT_DEST_RE    = re.compile(r"\[ExtractAudio\] Destination:\s*(.+)$")
 
 
 class YtDlpAudioDownloader:
@@ -125,6 +126,11 @@ class YtDlpAudioDownloader:
     de trecho quando start/end estiverem presentes no Segment.
 
     Implementa o contrato IAudioDownloader (duck typing / Protocol).
+
+    Cada AudioFile retornado preserva o video_id do Segment de origem; o
+    caminho do arquivo é capturado da linha `[ExtractAudio] Destination:`
+    do stdout do yt-dlp (em vez de globar o diretório), evitando que
+    arquivos pré-existentes em output_dir contaminem o resultado.
     """
 
     def download(
@@ -140,7 +146,10 @@ class YtDlpAudioDownloader:
         """
         Baixa cada segmento como MP3 em output_dir.
 
-        Retorna a lista de AudioFile gerados (um por segmento com sucesso).
+        Retorna a lista de AudioFile gerados (um por segmento com sucesso),
+        na ordem dos segments de entrada. Cada AudioFile traz o video_id
+        original e o caminho real do arquivo conforme reportado pelo yt-dlp.
+
         Lança RuntimeError se yt-dlp retornar código != 0.
         Lança OperacaoCancelada se cancel_event for sinalizado.
         """
@@ -153,6 +162,8 @@ class YtDlpAudioDownloader:
         output_template = os.path.join(output_dir, "%(title)s.%(ext)s")
 
         os.makedirs(output_dir, exist_ok=True)
+
+        results: List[AudioFile] = []
 
         for idx, seg in enumerate(segments):
             check_cancel(cancel_event)
@@ -184,6 +195,8 @@ class YtDlpAudioDownloader:
 
             process = start_process(cmd, cancel_event)
 
+            extracted_path: Optional[str] = None
+
             for line in process.stdout:
                 check_cancel(cancel_event)
                 line = line.rstrip()
@@ -202,9 +215,13 @@ class YtDlpAudioDownloader:
                     continue
 
                 if "[download] Destination:" in line:
-                    fname = line.split("Destination:")[-1].strip().split("\\")[-1]
+                    fname = os.path.basename(line.split("Destination:", 1)[-1].strip())
                     log(f"Destino: {fname}")
-                elif "[ExtractAudio]" in line:
+                elif line.startswith("[ExtractAudio]"):
+                    m = _EXTRACT_DEST_RE.match(line)
+                    if m:
+                        # Captura o caminho real do MP3 gerado por este segmento.
+                        extracted_path = m.group(1).strip()
                     dl_progress((idx + 1) / total)
                     status("Convertendo para MP3...")
                     log("Convertendo para MP3...")
@@ -221,8 +238,26 @@ class YtDlpAudioDownloader:
                     "Verifique sua conexão e tente novamente."
                 )
 
-        mp3_files = sorted(glob.glob(os.path.join(output_dir, "*.mp3")))
-        return [
-            AudioFile(path=p, title=os.path.splitext(os.path.basename(p))[0], video_id="")
-            for p in mp3_files
-        ]
+            if extracted_path and os.path.exists(extracted_path):
+                results.append(AudioFile(
+                    path     = extracted_path,
+                    title    = os.path.splitext(os.path.basename(extracted_path))[0],
+                    video_id = seg.video_id,
+                ))
+            else:
+                # Fallback defensivo: yt-dlp terminou OK mas não emitiu
+                # `[ExtractAudio] Destination:` reconhecível. Procura o MP3
+                # mais recente em output_dir cujo nome contenha o título do
+                # segment — evita devolver arquivos arbitrários.
+                pattern = os.path.join(output_dir, "*.mp3")
+                candidates = [p for p in glob.glob(pattern)
+                              if seg.title.lower()[:20] in os.path.basename(p).lower()]
+                if candidates:
+                    latest = max(candidates, key=os.path.getmtime)
+                    results.append(AudioFile(
+                        path     = latest,
+                        title    = os.path.splitext(os.path.basename(latest))[0],
+                        video_id = seg.video_id,
+                    ))
+
+        return results

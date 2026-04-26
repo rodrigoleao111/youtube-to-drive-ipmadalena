@@ -375,12 +375,101 @@ class TestYtDlpAudioDownloader:
     # Retorno de AudioFile
     # -------------------------------------------------------------------
 
-    def test_retorna_audio_files_encontrados(self):
-        proc = _make_process([])
-        mp3_files = ["/tmp/out/culto.mp3", "/tmp/out/culto2.mp3"]
+    def test_retorna_audio_files_capturados_do_stdout(self, tmp_path):
+        """
+        Captura o caminho real do MP3 a partir da linha
+        `[ExtractAudio] Destination: ...` emitida pelo yt-dlp.
+        """
+        mp3 = tmp_path / "Culto.mp3"
+        mp3.write_bytes(b"ID3")
+        proc = _make_process([f"[ExtractAudio] Destination: {mp3}"])
+
         with patch("infrastructure.youtube.ytdlp_source.start_process", return_value=proc), \
-             patch("infrastructure.youtube.ytdlp_source.ffmpeg_dir", return_value=None), \
-             patch("glob.glob", return_value=mp3_files):
-            result = self._dl().download([self._seg()], "/tmp/out")
-        assert len(result) == 2
-        assert all(r.path in mp3_files for r in result)
+             patch("infrastructure.youtube.ytdlp_source.ffmpeg_dir", return_value=None):
+            result = self._dl().download(
+                [self._seg(vid_id="abc123", title="Culto")],
+                str(tmp_path),
+            )
+
+        assert len(result) == 1
+        assert result[0].path == str(mp3)
+        assert result[0].video_id == "abc123"   # video_id preservado
+        assert result[0].title == "Culto"
+
+    def test_video_id_preservado_para_cada_segment(self, tmp_path):
+        """Multi-segment: cada AudioFile traz o video_id do seu Segment."""
+        mp3_a = tmp_path / "CultoA.mp3"; mp3_a.write_bytes(b"x")
+        mp3_b = tmp_path / "CultoB.mp3"; mp3_b.write_bytes(b"y")
+
+        # Cada chamada a start_process recebe um stdout diferente
+        procs = [
+            _make_process([f"[ExtractAudio] Destination: {mp3_a}"]),
+            _make_process([f"[ExtractAudio] Destination: {mp3_b}"]),
+        ]
+        proc_iter = iter(procs)
+
+        segs = [self._seg(vid_id="aaa", title="CultoA"),
+                self._seg(vid_id="bbb", title="CultoB")]
+
+        with patch("infrastructure.youtube.ytdlp_source.start_process",
+                   side_effect=lambda *a, **k: next(proc_iter)), \
+             patch("infrastructure.youtube.ytdlp_source.ffmpeg_dir", return_value=None):
+            result = self._dl().download(segs, str(tmp_path))
+
+        assert [r.video_id for r in result] == ["aaa", "bbb"]
+        assert [r.path for r in result] == [str(mp3_a), str(mp3_b)]
+
+    def test_nao_pega_arquivos_preexistentes_no_output_dir(self, tmp_path):
+        """
+        Regressão B1: antes o downloader globava *.mp3 ao final, pegando
+        arquivos pré-existentes (de runs anteriores) que não foram limpos.
+        Agora só retorna o que o yt-dlp acabou de gerar.
+        """
+        # Pré-existentes (residuais de outro run que o cleanup esqueceu)
+        old1 = tmp_path / "antigo1.mp3"; old1.write_bytes(b"velho")
+        old2 = tmp_path / "antigo2.mp3"; old2.write_bytes(b"velho")
+
+        # Arquivo realmente gerado por este run
+        new = tmp_path / "Culto novo.mp3"; new.write_bytes(b"novo")
+        proc = _make_process([f"[ExtractAudio] Destination: {new}"])
+
+        with patch("infrastructure.youtube.ytdlp_source.start_process", return_value=proc), \
+             patch("infrastructure.youtube.ytdlp_source.ffmpeg_dir", return_value=None):
+            result = self._dl().download(
+                [self._seg(title="Culto novo")],
+                str(tmp_path),
+            )
+
+        # Apenas o arquivo novo deve estar no resultado
+        assert len(result) == 1
+        assert result[0].path == str(new)
+        # Os antigos NÃO entram
+        paths = [r.path for r in result]
+        assert str(old1) not in paths
+        assert str(old2) not in paths
+
+    def test_ordem_de_retorno_segue_ordem_dos_segments(self, tmp_path):
+        """
+        Regressão B1: ordem do retorno antes era alfabética (sorted glob).
+        Agora segue a ordem dos segments fornecidos.
+        """
+        # Cria com nomes que NÃO ordenam alfabeticamente como os segments
+        mp3_z = tmp_path / "Z_primeiro.mp3";  mp3_z.write_bytes(b"x")
+        mp3_a = tmp_path / "A_segundo.mp3";   mp3_a.write_bytes(b"y")
+
+        procs = [
+            _make_process([f"[ExtractAudio] Destination: {mp3_z}"]),
+            _make_process([f"[ExtractAudio] Destination: {mp3_a}"]),
+        ]
+        proc_iter = iter(procs)
+
+        segs = [self._seg(vid_id="primeiro", title="Z_primeiro"),
+                self._seg(vid_id="segundo",  title="A_segundo")]
+
+        with patch("infrastructure.youtube.ytdlp_source.start_process",
+                   side_effect=lambda *a, **k: next(proc_iter)), \
+             patch("infrastructure.youtube.ytdlp_source.ffmpeg_dir", return_value=None):
+            result = self._dl().download(segs, str(tmp_path))
+
+        # Z primeiro, A segundo — ordem dos segments, não ordem alfabética
+        assert [r.video_id for r in result] == ["primeiro", "segundo"]
