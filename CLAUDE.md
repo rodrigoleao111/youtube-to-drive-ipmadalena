@@ -54,6 +54,10 @@ youtube_to_drive/
 │       ├── __init__.py
 │       └── json_repositories.py    ← JsonHistoryRepository, JsonConfigRepository
 │
+├── application/                    ← use cases (orquestradores do domínio)
+│   ├── __init__.py
+│   └── use_cases.py                ← ListVideosUseCase, DownloadSegmentsUseCase, UploadAudioUseCase
+│
 ├── historico.json                  ← datas já processadas (gerado em runtime)
 ├── config.json                     ← canal YouTube + pasta Drive (gerado em runtime)
 ├── credentials/
@@ -79,7 +83,7 @@ plyer
 pywebview
 ```
 
-## Arquitetura — domain/ e infrastructure/ (Clean Architecture, Fases 1–4)
+## Arquitetura — domain/, infrastructure/ e application/ (Clean Architecture, Fases 1–5)
 
 O projeto está em migração incremental para Clean Architecture. As fases concluídas introduzem:
 
@@ -122,8 +126,19 @@ O projeto está em migração incremental para Clean Architecture. As fases conc
 - `load_history()` / `save_history()` → delegam para `JsonHistoryRepository`
 - Sem alteração nas assinaturas públicas
 
+**`application/` — use cases (Fase 5)**
+- `use_cases.py` — três orquestradores que compõem ports do domínio:
+  - `ListVideosUseCase(source: IVideoSource)` — wrapper fino sobre `IVideoSource.list_videos()`
+  - `DownloadSegmentsUseCase(downloader: IAudioDownloader)` — wrapper fino sobre `IAudioDownloader.download()`
+  - `UploadAudioUseCase(storage, history)` — orquestra `ICloudStorage.upload()` + `IHistoryRepository.record()`; grava no histórico apenas quando `result.uploaded_files` é não vazio; aceita `**extra_storage_kwargs` para repassar callbacks de UI específicos do storage (ex.: `on_upload_stats`)
+
+**Compatibilidade retroativa em `baixar_audio.py` (Fase 5):**
+- `list_videos()` → `ListVideosUseCase` → `YtDlpVideoSource`
+- `download_selected_sections()` → `DownloadSegmentsUseCase` → `YtDlpAudioDownloader`
+- `upload_files()` → `UploadAudioUseCase` → `GoogleDriveStorage` + `JsonHistoryRepository`
+- Sem alteração nas assinaturas públicas. O histórico passa a ser gravado também por `upload_files()` via use case; `app._on_done()` continua chamando `save_history()` — como `JsonHistoryRepository.record()` sobrescreve a chave, a segunda gravação é idempotente (apenas atualiza o timestamp)
+
 **Fases futuras planejadas:**
-- Fase 5: camada `application/` (use cases)
 - Fase 6: `presentation/` (presenter pattern para `App`)
 - Fase 7: remoção das funções legadas de `baixar_audio.py`
 
@@ -325,10 +340,11 @@ tests/
 ├── test_player_window.py    ← 33 testes do player e utilitários de tempo
 ├── test_domain.py           ← 42 testes puros da camada de domínio
 ├── test_ytdlp_source.py     ← 26 testes da infraestrutura YouTube (subprocess mockado)
-└── test_persistence.py      ← 29 testes dos repositórios JSON (I/O real em tmp_path)
+├── test_persistence.py      ← 29 testes dos repositórios JSON (I/O real em tmp_path)
+└── test_use_cases.py        ← 31 testes dos use cases da camada application (ports mockados)
 ```
 
-**Total: 246 testes (247 com setup)**
+**Total: 277 testes (278 com setup)**
 
 **Como rodar:**
 ```bash

@@ -372,17 +372,19 @@ def list_videos(date_str, on_log=None, on_status=None, cancel_event=None):
     Retorna lista de dicts:
         {"id": str, "title": str, "upload_date": str}   # upload_date: YYYYMMDD
 
-    Delega para infrastructure.youtube.YtDlpVideoSource; converte os objetos
-    Video de domínio de volta para dicts para manter compatibilidade retroativa.
+    Delega para application.ListVideosUseCase → infrastructure.youtube.YtDlpVideoSource;
+    converte os objetos Video de domínio de volta para dicts para manter
+    compatibilidade retroativa.
     """
+    from application.use_cases import ListVideosUseCase
     from infrastructure.youtube.ytdlp_source import YtDlpVideoSource
     from domain.exceptions import VideoNaoEncontrado
 
     channel_url = load_config()["channel_url"]
+    use_case = ListVideosUseCase(source=YtDlpVideoSource())
 
     try:
-        source = YtDlpVideoSource()
-        videos = source.list_videos(
+        videos = use_case.execute(
             date_str,
             channel_url,
             cancel_event=cancel_event,
@@ -505,10 +507,11 @@ def download_selected_sections(
     start/end no formato "HH:MM:SS"; None = vídeo completo.
     Retorna lista de caminhos dos MP3 baixados.
 
-    Delega para infrastructure.youtube.YtDlpAudioDownloader; converte os
-    objetos AudioFile de domínio de volta para caminhos (str) para manter
-    compatibilidade retroativa.
+    Delega para application.DownloadSegmentsUseCase →
+    infrastructure.youtube.YtDlpAudioDownloader; converte os objetos AudioFile
+    de domínio de volta para caminhos (str) para manter compatibilidade retroativa.
     """
+    from application.use_cases import DownloadSegmentsUseCase
     from infrastructure.youtube.ytdlp_source import YtDlpAudioDownloader
     from domain.entities import Segment
 
@@ -523,8 +526,8 @@ def download_selected_sections(
         for v in videos_with_sections
     ]
 
-    downloader = YtDlpAudioDownloader()
-    audio_files = downloader.download(
+    use_case = DownloadSegmentsUseCase(downloader=YtDlpAudioDownloader())
+    audio_files = use_case.execute(
         segments,
         DOWNLOAD_DIR,
         cancel_event=cancel_event,
@@ -547,9 +550,15 @@ def upload_files(date_str, files, on_log=None, on_status=None, on_progress=None,
     Recebe lista de caminhos de MP3 e faz upload para a pasta do mês no Drive.
     Remove os arquivos locais após o upload (somente em modo frozen/produção).
 
-    Delega para infrastructure.drive.GoogleDriveStorage.upload(); converte os
-    caminhos (str) para AudioFile para compatibilidade com o contrato de domínio.
+    Delega para application.UploadAudioUseCase →
+    infrastructure.drive.GoogleDriveStorage + infrastructure.persistence.JsonHistoryRepository;
+    converte os caminhos (str) para AudioFile para compatibilidade com o contrato de domínio.
+
+    Nota: o histórico também é gravado por app._on_done() via save_history(); como
+    JsonHistoryRepository.record() sobrescreve a mesma chave, a segunda gravação é
+    idempotente e apenas atualiza o timestamp para o momento de conclusão da UI.
     """
+    from application.use_cases import UploadAudioUseCase
     from infrastructure.drive.gdrive_storage import GoogleDriveStorage
     from domain.entities import AudioFile
 
@@ -571,9 +580,10 @@ def upload_files(date_str, files, on_log=None, on_status=None, on_progress=None,
         delete_after_upload = getattr(sys, "frozen", False),
     )
 
-    storage.upload(
-        audio_files,
+    use_case = UploadAudioUseCase(storage=storage, history=_history_repo())
+    use_case.execute(
         date_str,
+        audio_files,
         cancel_event    = cancel_event,
         on_log          = on_log,
         on_status       = on_status,
