@@ -43,10 +43,16 @@ youtube_to_drive/
 │   └── ports.py                    ← Protocols: IVideoSource, IAudioDownloader...
 │
 ├── infrastructure/                 ← adaptadores que conectam ao domínio
-│   └── youtube/
+│   ├── youtube/
+│   │   ├── __init__.py
+│   │   ├── _utils.py               ← ytdlp_exe(), ffmpeg_dir(), start_process(), check_cancel()
+│   │   └── ytdlp_source.py         ← YtDlpVideoSource, YtDlpAudioDownloader
+│   ├── drive/
+│   │   ├── __init__.py
+│   │   └── gdrive_storage.py       ← GoogleDriveStorage, _ProgressFile
+│   └── persistence/
 │       ├── __init__.py
-│       ├── _utils.py               ← ytdlp_exe(), ffmpeg_dir(), start_process(), check_cancel()
-│       └── ytdlp_source.py         ← YtDlpVideoSource, YtDlpAudioDownloader
+│       └── json_repositories.py    ← JsonHistoryRepository, JsonConfigRepository
 │
 ├── historico.json                  ← datas já processadas (gerado em runtime)
 ├── config.json                     ← canal YouTube + pasta Drive (gerado em runtime)
@@ -73,7 +79,7 @@ plyer
 pywebview
 ```
 
-## Arquitetura — domain/ e infrastructure/ (Clean Architecture, Fase 1+2)
+## Arquitetura — domain/ e infrastructure/ (Clean Architecture, Fases 1–4)
 
 O projeto está em migração incremental para Clean Architecture. As fases concluídas introduzem:
 
@@ -106,8 +112,17 @@ O projeto está em migração incremental para Clean Architecture. As fases conc
 - `get_drive_service()`, `check_auth_status()`, `run_auth()`, `find_or_create_month_folder()`, `upload_to_drive()`, `upload_files()` → delegam para `GoogleDriveStorage`
 - `_ProgressFile` e lógica de OAuth removidas de `baixar_audio.py`
 
+**`infrastructure/persistence/` — repositórios JSON (Fase 4)**
+- `json_repositories.py` — dois repositórios:
+  - `JsonHistoryRepository`: `load()`, `save()` (silencia I/O errors), `is_processed()`, `record()` (adiciona timestamp ISO)
+  - `JsonConfigRepository`: `load()` (preenche defaults), `save()` (lança exceção em erro), `get()`, `update()` (strips strings, ignora None)
+
+**Compatibilidade retroativa em `baixar_audio.py` (Fase 4):**
+- `load_config()` / `save_config()` → delegam para `JsonConfigRepository`
+- `load_history()` / `save_history()` → delegam para `JsonHistoryRepository`
+- Sem alteração nas assinaturas públicas
+
 **Fases futuras planejadas:**
-- Fase 4: `infrastructure/persistence/` — `JsonHistoryRepository`, `JsonConfigRepository`
 - Fase 5: camada `application/` (use cases)
 - Fase 6: `presentation/` (presenter pattern para `App`)
 - Fase 7: remoção das funções legadas de `baixar_audio.py`
@@ -309,10 +324,11 @@ tests/
 ├── test_app.py              ← 45 testes de integração da GUI
 ├── test_player_window.py    ← 33 testes do player e utilitários de tempo
 ├── test_domain.py           ← 42 testes puros da camada de domínio
-└── test_ytdlp_source.py     ← 26 testes da infraestrutura YouTube (subprocess mockado)
+├── test_ytdlp_source.py     ← 26 testes da infraestrutura YouTube (subprocess mockado)
+└── test_persistence.py      ← 29 testes dos repositórios JSON (I/O real em tmp_path)
 ```
 
-**Total: 185 testes (186 com setup)**
+**Total: 246 testes (247 com setup)**
 
 **Como rodar:**
 ```bash

@@ -105,37 +105,29 @@ def _make_callbacks(on_log, on_status, on_progress):
 
 
 # ---------------------------------------------------------------------------
-# Configurações persistidas
+# Configurações persistidas — delegam para JsonConfigRepository
 # ---------------------------------------------------------------------------
+
+def _config_repo():
+    """Instancia JsonConfigRepository com os defaults do projeto."""
+    from infrastructure.persistence.json_repositories import JsonConfigRepository
+    return JsonConfigRepository(
+        file_path = CONFIG_FILE,
+        defaults  = {
+            "channel_url":     _DEFAULT_CHANNEL_URL,
+            "drive_folder_id": _DEFAULT_DRIVE_FOLDER_ID,
+        },
+    )
+
 
 def load_config() -> dict:
     """Retorna o dict de configuração (lê config.json ou usa defaults)."""
-    defaults = {
-        "channel_url":    _DEFAULT_CHANNEL_URL,
-        "drive_folder_id": _DEFAULT_DRIVE_FOLDER_ID,
-    }
-    if not os.path.exists(CONFIG_FILE):
-        return defaults
-    try:
-        with open(CONFIG_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        # garante que todas as chaves existam
-        for k, v in defaults.items():
-            data.setdefault(k, v)
-        return data
-    except Exception:
-        return defaults
+    return _config_repo().load()
 
 
 def save_config(channel_url: str = None, drive_folder_id: str = None):
     """Persiste as configurações em config.json (apenas os campos fornecidos)."""
-    cfg = load_config()
-    if channel_url is not None:
-        cfg["channel_url"] = channel_url.strip()
-    if drive_folder_id is not None:
-        cfg["drive_folder_id"] = drive_folder_id.strip()
-    with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-        json.dump(cfg, f, ensure_ascii=False, indent=2)
+    _config_repo().update(channel_url=channel_url, drive_folder_id=drive_folder_id)
 
 
 def logout_drive():
@@ -236,29 +228,20 @@ def update_ytdlp(on_log=None):
         log(f"Aviso: erro ao verificar atualização do yt-dlp: {e}")
 
 
+def _history_repo():
+    """Instancia JsonHistoryRepository com o caminho padrão do projeto."""
+    from infrastructure.persistence.json_repositories import JsonHistoryRepository
+    return JsonHistoryRepository(file_path=HISTORY_FILE)
+
+
 def load_history():
     """Carrega o histórico de datas já processadas."""
-    if os.path.exists(HISTORY_FILE):
-        try:
-            with open(HISTORY_FILE, encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
-            return {}
-    return {}
+    return _history_repo().load()
 
 
 def save_history(date_str, video_titles):
     """Registra a data e os vídeos processados no histórico."""
-    history = load_history()
-    history[date_str] = {
-        "processado_em": datetime.now().isoformat(),
-        "videos": video_titles,
-    }
-    try:
-        with open(HISTORY_FILE, "w", encoding="utf-8") as f:
-            json.dump(history, f, ensure_ascii=False, indent=2)
-    except Exception:
-        pass
+    _history_repo().record(date_str, video_titles)
 
 
 # ---------------------------------------------------------------------------
