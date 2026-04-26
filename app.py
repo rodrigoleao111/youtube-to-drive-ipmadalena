@@ -108,8 +108,8 @@ class App(ctk.CTk):
         self._dot_pulsing  = False
 
         # Adaptador de notificações desktop (implementa INotifier)
-        from infrastructure.notification.plyer_notifier import PlyerNotifier
-        self._notifier = PlyerNotifier()
+        from composition_root import build_notifier
+        self._notifier = build_notifier()
 
         self._build_ui()
         self.after(100, self._process_queue)
@@ -689,42 +689,12 @@ class App(ctk.CTk):
 
     def _build_presenter(self):
         """
-        Constrói um ProcessingPresenter com use cases frescos (necessário porque
-        GoogleDriveStorage lê drive_folder_id no construtor; reconstruir garante
-        que mudanças nas configurações sejam refletidas a cada operação).
+        Delega ao composition_root, que centraliza o wiring de todas as
+        camadas. Reconstruir a cada operação garante que mudanças em
+        drive_folder_id/channel_url sejam refletidas.
         """
-        from application.use_cases import (
-            DownloadSegmentsUseCase,
-            ListVideosUseCase,
-            UploadAudioUseCase,
-        )
-        from infrastructure.drive.gdrive_storage import GoogleDriveStorage
-        from infrastructure.youtube.ytdlp_source import (
-            YtDlpAudioDownloader,
-            YtDlpVideoSource,
-        )
-        from presentation.processing_presenter import ProcessingPresenter
-
-        cfg = baixar_audio.load_config()
-
-        storage = GoogleDriveStorage(
-            token_file          = baixar_audio.TOKEN_FILE,
-            oauth_config        = baixar_audio._OAUTH_CLIENT_CONFIG,
-            scopes              = baixar_audio.SCOPES,
-            root_folder_id      = cfg["drive_folder_id"],
-            delete_after_upload = getattr(sys, "frozen", False),
-        )
-
-        return ProcessingPresenter(
-            list_videos_uc = ListVideosUseCase(source=YtDlpVideoSource()),
-            download_uc    = DownloadSegmentsUseCase(downloader=YtDlpAudioDownloader()),
-            upload_uc      = UploadAudioUseCase(
-                storage = storage,
-                history = baixar_audio._history_repo(),
-            ),
-            channel_url    = cfg["channel_url"],
-            download_dir   = baixar_audio.DOWNLOAD_DIR,
-        )
+        from composition_root import build_processing_presenter
+        return build_processing_presenter()
 
     def _worker(self, date_str):
         """Fase 1 — lista vídeos sem baixar."""

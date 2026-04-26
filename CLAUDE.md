@@ -65,6 +65,8 @@ youtube_to_drive/
 │   ├── __init__.py
 │   └── processing_presenter.py     ← ProcessingPresenter (compõe os use cases para a GUI)
 │
+├── composition_root.py             ← fábrica única do ProcessingPresenter (DI)
+│
 ├── historico.json                  ← datas já processadas (gerado em runtime)
 ├── config.json                     ← canal YouTube + pasta Drive (gerado em runtime)
 ├── credentials/
@@ -162,6 +164,12 @@ O projeto está em migração incremental para Clean Architecture. As fases conc
 - Novo método `_build_presenter()` constrói um `ProcessingPresenter` fresco a cada operação (necessário porque `GoogleDriveStorage` lê `drive_folder_id` no construtor; reconstruir reflete mudanças nas configurações)
 - `_worker()` (Fase 1) e `_worker_phase2()` (Fase 2) delegam ao presenter — não chamam mais `baixar_audio.list_videos()` / `download_selected_sections()` / `upload_files()` diretamente
 - `_worker_preflight()` permanece chamando utilidades de `baixar_audio.*` diretamente (não foi refatorado nesta fase)
+
+**`composition_root.py` — fábrica única do grafo de dependências**
+- `build_processing_presenter()` retorna um `ProcessingPresenter` com todos os adaptadores (yt-dlp, Drive, JSON repos) wired
+- `build_notifier()` retorna um `PlyerNotifier` (implementa `INotifier`)
+- Único módulo do projeto que conhece todas as camadas (domain, application, infrastructure, presentation) — é o lugar legítimo onde a regra "camadas internas não conhecem externas" é deliberadamente quebrada
+- `app._build_presenter()` e `baixar_audio.run()` ambos delegam ao composition root, eliminando a duplicação de wiring que existia antes
 
 **Limpeza final em `baixar_audio.py` (Fase 7)**
 
@@ -382,10 +390,11 @@ tests/
 ├── test_persistence.py      ← 29 testes dos repositórios JSON (I/O real em tmp_path)
 ├── test_use_cases.py        ← 31 testes dos use cases da camada application (ports mockados)
 ├── test_presenter.py        ← 19 testes do ProcessingPresenter (use cases mockados)
-└── test_plyer_notifier.py   ← 10 testes do PlyerNotifier (plyer mockado)
+├── test_plyer_notifier.py   ← 10 testes do PlyerNotifier (plyer mockado)
+└── test_composition_root.py ← 14 testes do composition root (DI/wiring)
 ```
 
-**Total: 316 testes (317 com setup)**
+**Total: 330 testes (331 com setup)**
 
 **Como rodar:**
 ```bash

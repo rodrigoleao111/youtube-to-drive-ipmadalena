@@ -269,40 +269,16 @@ def run(date_str, on_log=None, on_status=None, on_progress=None):
     e faz upload para o Drive. A GUI usa o `ProcessingPresenter` diretamente,
     com seleção manual de vídeos e trechos.
 
-    Delega para `presentation.ProcessingPresenter`, que internamente compõe
-    os use cases das fases 1 e 2 do fluxo.
+    Delega ao `composition_root`, que constrói o presenter com toda a
+    infraestrutura wired.
     """
-    from application.use_cases import (
-        DownloadSegmentsUseCase,
-        ListVideosUseCase,
-        UploadAudioUseCase,
-    )
-    from infrastructure.drive.gdrive_storage import GoogleDriveStorage
-    from infrastructure.youtube.ytdlp_source import (
-        YtDlpAudioDownloader,
-        YtDlpVideoSource,
-    )
-    from presentation.processing_presenter import ProcessingPresenter
+    from composition_root import build_processing_presenter
 
     log      = on_log      if callable(on_log)      else _noop
     status   = on_status   if callable(on_status)   else _noop
     progress = on_progress if callable(on_progress) else _noop
 
-    cfg = load_config()
-    storage = GoogleDriveStorage(
-        token_file          = TOKEN_FILE,
-        oauth_config        = _OAUTH_CLIENT_CONFIG,
-        scopes              = SCOPES,
-        root_folder_id      = cfg["drive_folder_id"],
-        delete_after_upload = getattr(sys, "frozen", False),
-    )
-    presenter = ProcessingPresenter(
-        list_videos_uc = ListVideosUseCase(source=YtDlpVideoSource()),
-        download_uc    = DownloadSegmentsUseCase(downloader=YtDlpAudioDownloader()),
-        upload_uc      = UploadAudioUseCase(storage=storage, history=_history_repo()),
-        channel_url    = cfg["channel_url"],
-        download_dir   = DOWNLOAD_DIR,
-    )
+    presenter = build_processing_presenter()
 
     videos = presenter.list_videos(date_str, on_log=log, on_status=status)
     segments = [{"id": v["id"], "title": v["title"]} for v in videos]   # vídeos completos
