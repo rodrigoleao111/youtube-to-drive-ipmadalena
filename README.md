@@ -119,24 +119,124 @@ Clique no ícone ⚙ no canto superior direito para acessar a tela de configura�
 
 ```
 youtube_to_drive/
-├── app.py                   ← interface gráfica (customtkinter)
-├── baixar_audio.py          ← módulo principal (lógica + CLI)
-├── setup_wizard.py          ← assistente de configuração inicial
-├── player_window.py         ← painel de controles de seleção de trecho
-├── player_subprocess.py     ← subprocesso do player YouTube (Edge WebView2)
-├── historico.json           ← datas já processadas (gerado automaticamente)
-├── config.json              ← canal e pasta Drive (gerado automaticamente)
-├── credentials/
-│   └── token.pkl            ← token de acesso (gerado automaticamente)
-├── downloads/               ← pasta temporária (limpa após upload no executável)
-├── logs/
-│   └── DD-MM-YYYY.log       ← log diário (gerado automaticamente)
-├── ffmpeg/bin/ffmpeg.exe    ← conversor de áudio
-├── instalar.bat             ← instalador sem compilar
-├── build_app.spec           ← spec do PyInstaller
-├── build_installer.bat      ← gera IPMadalena_Setup.exe
-└── installer.iss            ← script Inno Setup
+│
+├── domain/                         ← núcleo de negócio (zero deps externas)
+│   ├── entities.py                 Video, Segment, AudioFile, ProcessingResult
+│   ├── ports.py                    Protocols: IVideoSource, ICloudStorage, ...
+│   └── exceptions.py               OperacaoCancelada, VideoNaoEncontrado, ...
+│
+├── infrastructure/                 ← adaptadores que implementam os ports
+│   ├── youtube/                    yt-dlp: listagem e download
+│   ├── drive/                      Google Drive: OAuth + upload streaming
+│   ├── persistence/                JSON: history e config
+│   └── notification/               plyer: notificação desktop
+│
+├── application/                    ← use cases (orquestradores do domínio)
+│   └── use_cases.py                ListVideos, DownloadSegments, UploadAudio
+│
+├── presentation/                   ← adaptadores de UI
+│   └── processing_presenter.py     compõe use cases para a GUI
+│
+├── composition_root.py             ← fábrica única do presenter (DI)
+│
+├── app.py                          ← interface gráfica (customtkinter)
+├── baixar_audio.py                 ← constantes, utilidades de SO, CLI
+├── setup_wizard.py                 ← wizard de primeira execução
+├── player_window.py                ← painel de controles de trecho
+├── player_subprocess.py            ← subprocesso do player YouTube (WebView2)
+│
+├── tests/                          ← suíte completa (pytest + mocks)
+│
+├── historico.json                  ← datas já processadas (runtime)
+├── config.json                     ← canal e pasta Drive (runtime)
+├── credentials/token.pkl           ← token OAuth (runtime)
+├── downloads/                      ← pasta temporária (runtime)
+├── logs/DD-MM-YYYY.log             ← log diário (runtime)
+├── ffmpeg/bin/ffmpeg.exe           ← conversor de áudio local
+│
+├── instalar.bat                    ← instalador sem compilar
+├── build_app.spec                  ← spec do PyInstaller
+├── build_installer.bat             ← gera IPMadalena_Setup.exe
+└── installer.iss                   ← script Inno Setup
 ```
+
+---
+
+## Arquitetura
+
+O projeto segue **Clean Architecture** com 4 camadas conectadas por um *composition root*:
+
+```
+                  ┌────────────────────────────┐
+                  │  presentation/             │  ProcessingPresenter
+                  │  (compõe use cases)        │
+                  └─────────────┬──────────────┘
+                                │
+                  ┌─────────────▼──────────────┐
+                  │  application/              │  ListVideosUseCase
+                  │  (orquestração de domínio) │  DownloadSegmentsUseCase
+                  └─────────────┬──────────────┘  UploadAudioUseCase
+                                │
+                  ┌─────────────▼──────────────┐
+                  │  domain/                   │  Entities: Video, Segment, ...
+                  │  (núcleo, sem deps)        │  Ports:    IVideoSource, ...
+                  └─────────────▲──────────────┘  Exceptions: OperacaoCancelada
+                                │ implementa
+                  ┌─────────────┴──────────────┐
+                  │  infrastructure/           │  YtDlpVideoSource
+                  │  (adaptadores)             │  GoogleDriveStorage
+                  └────────────────────────────┘  JsonHistoryRepository
+                                                  PlyerNotifier
+                                ▲
+                                │ wired por
+                  ┌─────────────┴──────────────┐
+                  │  composition_root.py       │  build_processing_presenter()
+                  │  (único módulo que conhece │  build_notifier()
+                  │   todas as camadas)        │
+                  └────────────────────────────┘
+```
+
+**Princípios:**
+- O **domínio** define contratos via `typing.Protocol` (`@runtime_checkable`) e não importa nada de fora.
+- A **infraestrutura** implementa esses Protocols por *duck typing* (sem herança).
+- O **composition root** é o único lugar onde a regra "camadas internas não conhecem externas" é deliberadamente quebrada — porque ele *precisa* conhecer todas para conectá-las.
+
+Detalhes técnicos completos (port-by-port, decisões de design, problemas conhecidos resolvidos) estão em [`CLAUDE.md`](CLAUDE.md).
+
+---
+
+## Testes
+
+Suíte com **331 testes** usando apenas `pytest` e `unittest.mock` — sem dependências adicionais:
+
+```bash
+python -m pytest tests/
+```
+
+Atalho:
+
+```bash
+run_tests.bat
+```
+
+Distribuição por camada:
+
+| Arquivo | Testes | Cobertura |
+|---|---:|---|
+| `test_domain.py` | 42 | Entidades, exceções, Protocols (puro) |
+| `test_ytdlp_source.py` | 29 | Adaptadores yt-dlp (subprocess mockado) |
+| `test_gdrive_storage.py` | 38 | Drive OAuth + upload (HTTP/Drive API mockados) |
+| `test_persistence.py` | 29 | Repositórios JSON (I/O real em `tmp_path`) |
+| `test_plyer_notifier.py` | 10 | PlyerNotifier (plyer mockado) |
+| `test_use_cases.py` | 31 | Use cases da camada application (ports mockados) |
+| `test_presenter.py` | 19 | ProcessingPresenter (use cases mockados) |
+| `test_composition_root.py` | 14 | Wiring/DI |
+| `test_baixar_audio.py` | 27 | Utilidades + CLI + auth wrappers |
+| `test_app.py` | 58 | Integração da GUI |
+| `test_player_window.py` | 33 | Player + utilitários de tempo |
+
+**Não testado automaticamente** (requer execução manual com rede e credenciais ativas):
+fluxo real com YouTube, popup de seleção (interação humana), upload real para Drive, notificação desktop visível, player webview abrindo a página do YouTube.
 
 ---
 
