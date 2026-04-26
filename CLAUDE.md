@@ -153,8 +153,23 @@ O projeto está em migração incremental para Clean Architecture. As fases conc
 - `_worker()` (Fase 1) e `_worker_phase2()` (Fase 2) delegam ao presenter — não chamam mais `baixar_audio.list_videos()` / `download_selected_sections()` / `upload_files()` diretamente
 - `_worker_preflight()` permanece chamando utilidades de `baixar_audio.*` diretamente (não foi refatorado nesta fase)
 
-**Fases futuras planejadas:**
-- Fase 7: remoção das funções legadas de `baixar_audio.py` (`list_videos`, `download_selected_sections`, `upload_files`)
+**Limpeza final em `baixar_audio.py` (Fase 7)**
+
+Removidas as funções legadas que haviam sido mantidas como wrappers de compatibilidade retroativa nas fases anteriores:
+- `list_videos()`, `download_selected()`, `download_selected_sections()`, `upload_files()` (substituídas pelo `ProcessingPresenter`)
+- `find_or_create_month_folder()`, `upload_to_drive()` (encapsuladas em `GoogleDriveStorage`)
+- `_start_process()`, `_check_cancel()`, `_make_callbacks()` (movidas para `infrastructure/youtube/_utils.py`)
+
+A função `run()` (CLI) foi reescrita para usar o `ProcessingPresenter` diretamente, processando todos os vídeos da data inteiros (sem corte de trecho). Imports obsoletos removidos (`pickle`, `threading`, `json`, `time`, `googleapiclient`, `google_auth_oauthlib`, `google.auth`); `baixar_audio.py` reduziu de 647 → 352 linhas.
+
+O que permanece em `baixar_audio.py`:
+- Constantes (`BASE_DIR`, `TOKEN_FILE`, `DOWNLOAD_DIR`, `LOGS_DIR`, `_OAUTH_CLIENT_CONFIG`, etc.)
+- Re-export de `OperacaoCancelada` (do domínio)
+- Wrappers finos: `load_config`, `save_config`, `load_history`, `save_history`, `get_drive_service`, `check_auth_status`, `run_auth`, `logout_drive`
+- Utilidades de robustez: `check_internet`, `check_disk_space`, `cleanup_downloads`, `update_ytdlp`
+- CLI: `run()`, `main()`
+
+Tests removidos (cobertos por outras suítes): `TestCancelEvent` (→ `test_ytdlp_source.TestCheckCancel`), `TestSocketTimeout` e `TestDownloadSelectedSections` (→ `test_ytdlp_source.TestYtDlpAudioDownloader`), `TestDebugMode` (→ `test_gdrive_storage.TestUpload`).
 
 ---
 
@@ -349,7 +364,7 @@ Cultos ao vivo podem ser publicados no YouTube com a data do dia seguinte ao eve
 ```
 tests/
 ├── conftest.py              ← sys.path + fixture shared_app (sessão)
-├── test_baixar_audio.py     ← 39 testes unitários do módulo principal
+├── test_baixar_audio.py     ← 20 testes do módulo principal (utilidades + auth wrappers)
 ├── test_app.py              ← 45 testes de integração da GUI
 ├── test_player_window.py    ← 33 testes do player e utilitários de tempo
 ├── test_domain.py           ← 42 testes puros da camada de domínio
@@ -359,7 +374,7 @@ tests/
 └── test_presenter.py        ← 19 testes do ProcessingPresenter (use cases mockados)
 ```
 
-**Total: 296 testes (297 com setup)**
+**Total: 277 testes (278 com setup)**
 
 **Como rodar:**
 ```bash
