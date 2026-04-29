@@ -20,15 +20,16 @@ import queue
 import socket
 import sys
 import threading
+import urllib.request
 from datetime import datetime
 
 from PyQt6.QtCore import QDate, QTimer, Qt
-from PyQt6.QtGui import QIcon
+from PyQt6.QtGui import QIcon, QPixmap
 from PyQt6.QtWidgets import (
-    QApplication, QCheckBox, QDialog, QFrame, QHBoxLayout,
+    QApplication, QDialog, QFrame, QGridLayout, QHBoxLayout,
     QLabel, QLineEdit, QMainWindow, QMessageBox, QPlainTextEdit,
-    QProgressBar, QPushButton, QScrollArea, QSizePolicy,
-    QVBoxLayout, QWidget, QCalendarWidget,
+    QProgressBar, QPushButton, QScrollArea,
+    QStackedWidget, QVBoxLayout, QWidget,
 )
 
 import baixar_audio
@@ -79,66 +80,299 @@ def _file_log(msg: str):
 
 
 # ---------------------------------------------------------------------------
-# Qt Stylesheet (dark theme)
+# Paleta de cores — única fonte da verdade
 # ---------------------------------------------------------------------------
-_QSS = """
-QMainWindow, QWidget {
-    background-color: #212121;
-    color: #e0e0e0;
+class _Palette:
+    # Semântica
+    GREEN        = "#2ea84f"   # ação principal
+    GREEN_HOVER  = "#37c15e"   # hover primário
+    GREEN_DIM    = "#1c6630"   # pulse escuro do dot
+    RED          = "#c0392b"
+    RED_HOVER    = "#e74c3c"
+    ERROR        = "#e05252"
+    WARN         = "#e0a020"
+    WARN_LABEL   = "#f0a830"
+    WARN_BTN_BG  = "#c87800"
+    HINT         = "#888"      # texto secundário neutro (legível em dark e light)
+
+    # Dark (prefixo D_)
+    D_BG         = "#1e1e1e"
+    D_SIDEBAR    = "#161616"
+    D_CARD       = "#272727"
+    D_CARD2      = "#222222"
+    D_INPUT      = "#2c2c2c"
+    D_SEP        = "#2c2c2c"
+    D_LOG        = "#181818"
+    D_BORDER     = "#272727"
+    D_TEXT       = "#f0f0f0"
+    D_TEXT_SUB   = "#777"
+    D_TEXT_BRAND = "#bbb"
+    D_TEXT_VER   = "#383838"
+    D_GRAY_BTN   = "#444"
+    D_GRAY_HOV   = "#555"
+    D_GRAY_TEXT  = "#ccc"
+    D_GRAY_HTEXT = "#eee"
+    D_SCROLL_T   = "#1e1e1e"
+    D_SCROLL_H   = "#444"
+    D_THUMB      = "#191919"
+    D_WARN_BG    = "#5a3500"
+    D_HOVER_NAV  = "#232323"
+    D_HOVER_THEME = "#252525"
+    D_HOVER_ICON = "#333"
+    D_BTN_DIS    = "#333"
+    D_BTN_DIS_T  = "#555"
+    D_CAN_DIS    = "#3a3a3a"
+    D_CAN_DIS_T  = "#666"
+
+    # Light (prefixo L_)
+    L_BG         = "#ffffff"
+    L_SIDEBAR    = "#f3f3f3"
+    L_CARD       = "#f7f7f7"
+    L_CARD2      = "#fafafa"
+    L_CARD_BD    = "#e8e8e8"
+    L_INPUT      = "#ffffff"
+    L_INPUT_BD   = "#d0d0d0"
+    L_SEP        = "#e4e4e4"
+    L_LOG        = "#f8f8f8"
+    L_BORDER     = "#e0e0e0"
+    L_TEXT       = "#1a1a1a"
+    L_TEXT_SUB   = "#666"
+    L_TEXT_BRAND = "#666"
+    L_TEXT_VER   = "#aaa"
+    L_GRAY_BTN   = "#e0e0e0"
+    L_GRAY_HOV   = "#d0d0d0"
+    L_GRAY_TEXT  = "#333"
+    L_GRAY_HTEXT = "#111"
+    L_SCROLL_T   = "#f0f0f0"
+    L_SCROLL_H   = "#c0c0c0"
+    L_THUMB      = "#e8e8e8"
+    L_WARN_BG    = "#fff3cd"
+    L_WARN_BD    = "#ffd060"
+    L_HOVER_NAV  = "#eaeaea"
+    L_HOVER_THEME = "#e8e8e8"
+    L_HOVER_ICON = "#e8e8e8"
+    L_BTN_DIS    = "#d8d8d8"
+    L_BTN_DIS_T  = "#aaa"
+    L_CAN_DIS    = "#e0e0e0"
+    L_CAN_DIS_T  = "#aaa"
+
+
+P = _Palette  # alias curto para uso nos QSS
+
+
+# ---------------------------------------------------------------------------
+# Stylesheet — Modo Escuro
+# ---------------------------------------------------------------------------
+_QSS_DARK = f"""
+QMainWindow, QWidget {{
+    background-color: {P.D_BG};
+    color: {P.D_TEXT};
     font-family: 'Segoe UI', Arial, sans-serif;
     font-size: 13px;
-}
-QLabel  { color: #e0e0e0; }
-QDialog { background-color: #212121; }
-QLineEdit {
-    background: #333; color: #e0e0e0;
-    border: 1px solid #555; border-radius: 4px;
-    padding: 4px 8px;
-}
-QLineEdit:focus { border: 1px solid #1f6aa5; }
-QPushButton {
-    background: #1f6aa5; color: #fff;
+}}
+QLabel  {{ background: transparent; color: {P.D_TEXT}; }}
+QDialog {{ background-color: {P.D_BG}; }}
+
+/* ── Sidebar ── */
+QWidget#sidebar {{
+    background-color: {P.D_SIDEBAR};
+    border-right: 1px solid {P.D_BORDER};
+}}
+QPushButton#nav_btn {{
+    background: transparent; color: {P.D_TEXT_SUB};
+    text-align: left; padding: 0 0 0 20px;
+    border: none; border-left: 3px solid transparent;
+    border-radius: 0; font-size: 13px; font-weight: normal; min-height: 44px;
+}}
+QPushButton#nav_btn:hover {{ background: {P.D_HOVER_NAV}; color: {P.D_TEXT_BRAND}; }}
+QPushButton#theme_btn {{
+    background: transparent; color: {P.D_BTN_DIS_T};
     border: none; border-radius: 4px;
-    padding: 6px 18px;
-}
-QPushButton:hover    { background: #2980b9; }
-QPushButton:disabled { background: #444; color: #888; }
-QPushButton#cancel_btn  { background: #c0392b; }
-QPushButton#cancel_btn:hover    { background: #e74c3c; }
-QPushButton#cancel_btn:disabled { background: #555; color: #888; }
-QPushButton#icon_btn {
+    font-size: 18px; padding: 4px;
+    min-height: 32px;
+}}
+QPushButton#theme_btn:hover {{ background: {P.D_HOVER_THEME}; color: {P.L_TEXT_VER}; }}
+
+/* ── Inputs ── */
+QLineEdit {{
+    background: {P.D_INPUT}; color: {P.D_TEXT};
+    border: 1px solid {P.D_GRAY_BTN}; border-radius: 5px; padding: 5px 9px;
+}}
+QLineEdit:focus {{ border: 1px solid {P.GREEN}; }}
+
+/* ── Buttons ── */
+QPushButton {{
+    background: {P.GREEN}; color: #fff;
+    border: none; border-radius: 5px; padding: 6px 18px;
+}}
+QPushButton:hover    {{ background: {P.GREEN_HOVER}; }}
+QPushButton:disabled {{ background: {P.D_BTN_DIS}; color: {P.D_BTN_DIS_T}; }}
+QPushButton#cancel_btn          {{ background: {P.RED}; }}
+QPushButton#cancel_btn:hover    {{ background: {P.RED_HOVER}; }}
+QPushButton#cancel_btn:disabled {{ background: {P.D_CAN_DIS}; color: {P.D_CAN_DIS_T}; }}
+QPushButton#icon_btn {{
     background: transparent; font-size: 16px;
     border: none; border-radius: 4px; padding: 4px 8px;
-}
-QPushButton#icon_btn:hover { background: #444; }
-QPushButton#gray_btn { background: #555; }
-QPushButton#gray_btn:hover { background: #666; }
-QPushButton#red_btn  { background: #c0392b; }
-QPushButton#red_btn:hover { background: #e74c3c; }
-QProgressBar {
-    background: #333; border: none;
+}}
+QPushButton#icon_btn:hover {{ background: {P.D_HOVER_ICON}; }}
+QPushButton#gray_btn       {{ background: {P.D_GRAY_BTN}; color: {P.D_GRAY_TEXT}; }}
+QPushButton#gray_btn:hover {{ background: {P.D_GRAY_HOV}; color: {P.D_GRAY_HTEXT}; }}
+QPushButton#red_btn        {{ background: {P.RED}; }}
+QPushButton#red_btn:hover  {{ background: {P.RED_HOVER}; }}
+
+/* ── Progress ── */
+QProgressBar {{
+    background: {P.D_INPUT}; border: none;
     border-radius: 3px; max-height: 12px;
-    text-align: center;
-}
-QProgressBar::chunk { background: #1f6aa5; border-radius: 3px; }
-QPlainTextEdit {
-    background: #1a1a1a; color: #c8c8c8;
-    border: 1px solid #333; border-radius: 4px;
+}}
+QProgressBar::chunk {{ background: {P.GREEN}; border-radius: 3px; }}
+
+/* ── Log ── */
+QPlainTextEdit {{
+    background: {P.D_LOG}; color: #c0c0c0;
+    border: 1px solid {P.D_SEP}; border-radius: 5px;
     font-family: Consolas, monospace; font-size: 11px;
-}
-QFrame#auth_banner { background: #5a3500; border-radius: 8px; }
-QFrame#date_frame  { background: #2b2b2b; border-radius: 8px; }
-QFrame#sep         { background: #444; }
-QFrame#card        { background: #2b2b2b; border-radius: 6px; }
-QScrollArea        { border: none; }
-QScrollBar:vertical {
-    background: #2b2b2b; width: 8px; border-radius: 4px;
-}
-QScrollBar::handle:vertical {
-    background: #555; border-radius: 4px; min-height: 20px;
-}
-QCalendarWidget { background: #2b2b2b; color: #e0e0e0; }
+}}
+
+/* ── Frames / cards ── */
+QFrame#auth_banner {{ background: {P.D_WARN_BG}; border-radius: 8px; }}
+QFrame#date_frame  {{ background: {P.D_CARD}; border-radius: 8px; }}
+QFrame#section_sep {{ background: {P.D_SEP}; }}
+QFrame#card        {{ background: {P.D_CARD}; border-radius: 8px; }}
+QFrame#cfg_card    {{ background: {P.D_CARD2}; border-radius: 8px; border: 1px solid {P.D_SEP}; }}
+
+/* ── Scroll ── */
+QScrollArea             {{ border: none; background: transparent; }}
+QWidget#scroll_contents {{ background: transparent; }}
+QScrollBar:vertical {{ background: {P.D_SCROLL_T}; width: 6px; border-radius: 3px; }}
+QScrollBar::handle:vertical {{ background: {P.D_SCROLL_H}; border-radius: 3px; min-height: 24px; }}
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}
+
+/* ── Thumb ── */
+QLabel#thumb {{ background: {P.D_THUMB}; border-radius: 5px; color: {P.D_GRAY_BTN}; font-size: 20px; }}
 """
+
+# ---------------------------------------------------------------------------
+# Stylesheet — Modo Claro
+# ---------------------------------------------------------------------------
+_QSS_LIGHT = f"""
+QMainWindow, QWidget {{
+    background-color: {P.L_BG};
+    color: {P.L_TEXT};
+    font-family: 'Segoe UI', Arial, sans-serif;
+    font-size: 13px;
+}}
+QLabel  {{ background: transparent; color: {P.L_TEXT}; }}
+QDialog {{ background-color: {P.L_BG}; }}
+
+/* ── Sidebar ── */
+QWidget#sidebar {{
+    background-color: {P.L_SIDEBAR};
+    border-right: 1px solid {P.L_BORDER};
+}}
+QPushButton#nav_btn {{
+    background: transparent; color: {P.L_TEXT_SUB};
+    text-align: left; padding: 0 0 0 20px;
+    border: none; border-left: 3px solid transparent;
+    border-radius: 0; font-size: 13px; font-weight: normal; min-height: 44px;
+}}
+QPushButton#nav_btn:hover {{ background: {P.L_HOVER_NAV}; color: {P.L_GRAY_TEXT}; }}
+QPushButton#theme_btn {{
+    background: transparent; color: {P.L_TEXT_VER};
+    border: none; border-radius: 4px;
+    font-size: 18px; padding: 4px;
+    min-height: 32px;
+}}
+QPushButton#theme_btn:hover {{ background: {P.L_HOVER_THEME}; color: {P.L_TEXT_SUB}; }}
+
+/* ── Inputs ── */
+QLineEdit {{
+    background: {P.L_INPUT}; color: {P.L_TEXT};
+    border: 1px solid {P.L_INPUT_BD}; border-radius: 5px; padding: 5px 9px;
+}}
+QLineEdit:focus {{ border: 1px solid {P.GREEN}; }}
+
+/* ── Buttons ── */
+QPushButton {{
+    background: {P.GREEN}; color: #fff;
+    border: none; border-radius: 5px; padding: 6px 18px;
+}}
+QPushButton:hover    {{ background: {P.GREEN_HOVER}; }}
+QPushButton:disabled {{ background: {P.L_BTN_DIS}; color: {P.L_BTN_DIS_T}; }}
+QPushButton#cancel_btn          {{ background: {P.RED}; }}
+QPushButton#cancel_btn:hover    {{ background: {P.RED_HOVER}; }}
+QPushButton#cancel_btn:disabled {{ background: {P.L_CAN_DIS}; color: {P.L_CAN_DIS_T}; }}
+QPushButton#icon_btn {{
+    background: transparent; font-size: 16px;
+    border: none; border-radius: 4px; padding: 4px 8px;
+}}
+QPushButton#icon_btn:hover {{ background: {P.L_HOVER_ICON}; }}
+QPushButton#gray_btn       {{ background: {P.L_GRAY_BTN}; color: {P.L_GRAY_TEXT}; }}
+QPushButton#gray_btn:hover {{ background: {P.L_GRAY_HOV}; color: {P.L_GRAY_HTEXT}; }}
+QPushButton#red_btn        {{ background: {P.RED}; color: #fff; }}
+QPushButton#red_btn:hover  {{ background: {P.RED_HOVER}; }}
+
+/* ── Progress ── */
+QProgressBar {{
+    background: {P.L_CARD_BD}; border: none;
+    border-radius: 3px; max-height: 12px;
+}}
+QProgressBar::chunk {{ background: {P.GREEN}; border-radius: 3px; }}
+
+/* ── Log ── */
+QPlainTextEdit {{
+    background: {P.L_LOG}; color: {P.L_GRAY_TEXT};
+    border: 1px solid {P.L_BORDER}; border-radius: 5px;
+    font-family: Consolas, monospace; font-size: 11px;
+}}
+
+/* ── Frames / cards ── */
+QFrame#auth_banner {{ background: {P.L_WARN_BG}; border-radius: 8px; border: 1px solid {P.L_WARN_BD}; }}
+QFrame#date_frame  {{ background: {P.L_CARD}; border-radius: 8px; border: 1px solid {P.L_CARD_BD}; }}
+QFrame#section_sep {{ background: {P.L_SEP}; }}
+QFrame#card        {{ background: {P.L_CARD}; border-radius: 8px; border: 1px solid {P.L_CARD_BD}; }}
+QFrame#cfg_card    {{ background: {P.L_CARD2}; border-radius: 8px; border: 1px solid {P.L_SEP}; }}
+
+/* ── Scroll ── */
+QScrollArea             {{ border: none; background: transparent; }}
+QWidget#scroll_contents {{ background: transparent; }}
+QScrollBar:vertical {{ background: {P.L_SCROLL_T}; width: 6px; border-radius: 3px; }}
+QScrollBar::handle:vertical {{ background: {P.L_SCROLL_H}; border-radius: 3px; min-height: 24px; }}
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}
+
+/* ── Thumb ── */
+QLabel#thumb {{ background: {P.L_THUMB}; border-radius: 5px; color: {P.L_TEXT_VER}; font-size: 20px; }}
+"""
+
+# Estilos de nav ativo/inativo por tema (aplicados inline em _switch_page)
+_NAV_ACTIVE = {
+    True: (   # dark
+        f"background: {P.D_HOVER_NAV}; color: {P.D_TEXT}; "
+        f"text-align: left; padding: 0 0 0 17px; "
+        f"border: none; border-left: 3px solid {P.GREEN}; "
+        f"border-radius: 0; font-size: 13px; font-weight: bold; min-height: 44px;"
+    ),
+    False: (   # light
+        f"background: {P.L_HOVER_NAV}; color: {P.L_TEXT}; "
+        f"text-align: left; padding: 0 0 0 17px; "
+        f"border: none; border-left: 3px solid {P.GREEN}; "
+        f"border-radius: 0; font-size: 13px; font-weight: bold; min-height: 44px;"
+    ),
+}
+_NAV_IDLE = {
+    True: (   # dark
+        f"background: transparent; color: {P.D_TEXT_SUB}; "
+        f"text-align: left; padding: 0 0 0 20px; "
+        f"border: none; border-left: 3px solid transparent; "
+        f"border-radius: 0; font-size: 13px; font-weight: normal; min-height: 44px;"
+    ),
+    False: (   # light
+        f"background: transparent; color: {P.L_TEXT_SUB}; "
+        f"text-align: left; padding: 0 0 0 20px; "
+        f"border: none; border-left: 3px solid transparent; "
+        f"border-radius: 0; font-size: 13px; font-weight: normal; min-height: 44px;"
+    ),
+}
 
 
 # ---------------------------------------------------------------------------
@@ -161,6 +395,330 @@ class _ProgressBar(QProgressBar):
 
 
 # ---------------------------------------------------------------------------
+# Calendário customizado — QLabel clicável (evita problemas de cascade do
+# QPushButton com o Fusion style que impedia a renderização do texto)
+# ---------------------------------------------------------------------------
+class _DayCell(QLabel):
+    """Célula de dia: QLabel com cursor de mão e callback de clique."""
+
+    def __init__(self):
+        super().__init__()
+        self.setFixedSize(38, 38)
+        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._cb = None
+
+    def mousePressEvent(self, event):
+        if self._cb and self.isEnabled() and event.button() == Qt.MouseButton.LeftButton:
+            self._cb()
+        super().mousePressEvent(event)
+
+
+# ---------------------------------------------------------------------------
+# Toggle de seleção (substitui QCheckBox — evita problemas de cascade do
+# Fusion style que afetava cor e tamanho)
+# ---------------------------------------------------------------------------
+class _CheckCell(QLabel):
+    """Toggle de seleção: QLabel estilizado como checkbox verde/cinza."""
+
+    def __init__(self):
+        super().__init__("✓")
+        self._checked = True
+        self.setFixedSize(28, 28)
+        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._refresh()
+
+    def isChecked(self) -> bool:
+        return self._checked
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._checked = not self._checked
+            self._refresh()
+        super().mousePressEvent(event)
+
+    def _refresh(self):
+        if self._checked:
+            self.setStyleSheet(
+                f"color: #fff; font-size: 15px; font-weight: bold;"
+                f"background: {P.GREEN}; border-radius: 7px;"
+            )
+        else:
+            self.setStyleSheet(
+                f"color: transparent; font-size: 15px;"
+                f"background: transparent;"
+                f"border: 2px solid {P.HINT}; border-radius: 7px;"
+            )
+
+
+class _CalendarDialog(QDialog):
+
+    _MONTHS = [
+        "Janeiro", "Fevereiro", "Março", "Abril", "Maio", "Junho",
+        "Julho", "Agosto", "Setembro", "Outubro", "Novembro", "Dezembro",
+    ]
+    _DOW = ["Dom", "Seg", "Ter", "Qua", "Qui", "Sex", "Sáb"]
+
+    def __init__(self, parent=None, initial_date: QDate = None, dark_mode: bool = True):
+        super().__init__(parent)
+        self.setWindowTitle("Selecionar data")
+        self.setFixedSize(296, 358)
+        self._selected  = initial_date or QDate.currentDate()
+        self._viewing   = QDate(self._selected.year(), self._selected.month(), 1)
+        self._dark_mode = dark_mode
+        self._build_ui()
+        self._render()
+
+    def _build_ui(self):
+        root = QVBoxLayout(self)
+        root.setContentsMargins(14, 14, 14, 14)
+        root.setSpacing(6)
+
+        # ── Navegação de mês ────────────────────────────────────────────────
+        hdr = QHBoxLayout()
+        hdr.setSpacing(0)
+
+        self._prev_btn = QPushButton("‹")
+        self._prev_btn.setObjectName("icon_btn")
+        self._prev_btn.setFixedSize(32, 32)
+        self._prev_btn.clicked.connect(self._prev_month)
+
+        self._month_lbl = QLabel()
+        self._month_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._month_lbl.setStyleSheet("font-weight: bold; font-size: 13px;")
+
+        self._next_btn = QPushButton("›")
+        self._next_btn.setObjectName("icon_btn")
+        self._next_btn.setFixedSize(32, 32)
+        self._next_btn.clicked.connect(self._next_month)
+
+        hdr.addWidget(self._prev_btn)
+        hdr.addWidget(self._month_lbl, stretch=1)
+        hdr.addWidget(self._next_btn)
+        root.addLayout(hdr)
+
+        # ── Cabeçalho dos dias da semana ────────────────────────────────────
+        dow_row = QHBoxLayout()
+        dow_row.setSpacing(2)
+        for d in self._DOW:
+            lbl = QLabel(d)
+            lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            lbl.setFixedWidth(38)
+            lbl.setStyleSheet(
+                f"color: {P.HINT}; font-size: 10px; font-weight: bold;"
+            )
+            dow_row.addWidget(lbl)
+        root.addLayout(dow_row)
+
+        # Separador
+        sep = QFrame()
+        sep.setObjectName("section_sep")
+        sep.setFrameShape(QFrame.Shape.HLine)
+        sep.setFixedHeight(1)
+        root.addWidget(sep)
+
+        # ── Grade 6 × 7 de _DayCell ─────────────────────────────────────────
+        self._grid = QGridLayout()
+        self._grid.setSpacing(2)
+        self._grid.setContentsMargins(0, 2, 0, 2)
+
+        self._cells: list[list[_DayCell]] = []
+        for row in range(6):
+            row_cells: list[_DayCell] = []
+            for col in range(7):
+                cell = _DayCell()
+                self._grid.addWidget(cell, row, col)
+                row_cells.append(cell)
+            self._cells.append(row_cells)
+        root.addLayout(self._grid)
+
+        root.addStretch()
+
+        # ── Confirmar ───────────────────────────────────────────────────────
+        confirm = QPushButton("Confirmar")
+        confirm.setStyleSheet("font-weight: bold; padding: 7px;")
+        confirm.clicked.connect(self.accept)
+        root.addWidget(confirm)
+
+    def _render(self):
+        import calendar as _cal
+
+        yr    = self._viewing.year()
+        mo    = self._viewing.month()
+        today = QDate.currentDate()
+        txt   = P.D_TEXT if self._dark_mode else P.L_TEXT
+
+        self._month_lbl.setText(f"{self._MONTHS[mo - 1]}  {yr}")
+
+        weeks = _cal.Calendar(firstweekday=6).monthdayscalendar(yr, mo)
+
+        # Faixa discreta na coluna do domingo (col 0)
+        sun_bg = "rgba(255, 90, 90, 0.07)"
+
+        for row in range(6):
+            for col in range(7):
+                cell = self._cells[row][col]
+                cell._cb = None
+                is_sun = (col == 0)
+
+                if row < len(weeks) and weeks[row][col] != 0:
+                    day  = weeks[row][col]
+                    date = QDate(yr, mo, day)
+                    is_sel   = (date == self._selected)
+                    is_today = (date == today)
+
+                    cell.setText(str(day))
+                    cell.setVisible(True)
+                    cell.setEnabled(True)
+
+                    if is_sel:
+                        cell.setStyleSheet(
+                            f"color: #fff; font-size: 13px; font-weight: bold;"
+                            f"background: {P.GREEN}; border-radius: 19px;"
+                        )
+                    elif is_today:
+                        cell.setStyleSheet(
+                            f"color: {P.GREEN}; font-size: 13px; font-weight: bold;"
+                            f"background: {sun_bg if is_sun else 'transparent'};"
+                            f"border: 2px solid {P.GREEN}; border-radius: 19px;"
+                        )
+                    else:
+                        bg = sun_bg if is_sun else "transparent"
+                        cell.setStyleSheet(
+                            f"color: {txt}; font-size: 13px;"
+                            f"background: {bg}; border: none;"
+                        )
+
+                    cell._cb = lambda d=date: self._select(d)
+                else:
+                    cell.setText("")
+                    cell.setVisible(False)
+                    cell.setEnabled(False)
+
+    def _select(self, date: QDate):
+        self._selected = date
+        self._render()
+
+    def _prev_month(self):
+        self._viewing = self._viewing.addMonths(-1)
+        self._render()
+
+    def _next_month(self):
+        self._viewing = self._viewing.addMonths(1)
+        self._render()
+
+    def selected_date(self) -> QDate:
+        return self._selected
+
+
+# ---------------------------------------------------------------------------
+# Helpers de thumbnail — nível de módulo para facilitar mock nos testes
+# ---------------------------------------------------------------------------
+
+def _ssl_ctx():
+    """Contexto SSL sem verificação de certificado.
+
+    Necessário em redes corporativas com proxies de inspeção SSL (MITM),
+    onde o certificado do servidor intermediário não é reconhecido pela
+    cadeia padrão do Python.
+    """
+    import ssl
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    return ctx
+
+
+def _try_cdn_thumbnail(video_id: str):
+    """Tenta baixar thumbnail do YouTube CDN em múltiplas qualidades.
+
+    Retorna ``bytes`` com a imagem ou ``None`` se todas as tentativas falharem.
+    Imagens menores que 500 bytes são descartadas (placeholders de 404).
+    Usa contexto SSL sem verificação para lidar com proxies corporativos.
+    """
+    ctx = _ssl_ctx()
+    for quality in ("maxresdefault", "hqdefault", "mqdefault", "sddefault", "default"):
+        try:
+            url = f"https://img.youtube.com/vi/{video_id}/{quality}.jpg"
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=8, context=ctx) as resp:
+                data = bytes(resp.read())
+            if len(data) > 500:   # filtra placeholder de 404 (<500 B)
+                return data
+        except Exception:
+            continue
+    return None
+
+
+def _try_ytdlp_thumbnail(video_id: str):
+    """Extrai frame de thumbnail baixando ~10 s de vídeo com yt-dlp + ffmpeg.
+
+    Usa exatamente o mesmo caminho de rede do download de áudio
+    (--extractor-args youtube:player_client=ios,android,web + format 18),
+    que é comprovadamente funcional neste ambiente.
+    Nenhuma requisição HTTP direta ao CDN do YouTube é realizada.
+
+    Fluxo:
+      1. yt-dlp baixa os primeiros 10 segundos do vídeo (05:00-05:10) em formato
+         18 (MP4 com áudio) para um diretório temporário.
+      2. ffmpeg extrai 1 frame (-vframes 1) como JPEG.
+      3. Os bytes do JPEG são retornados; arquivos temporários são limpos.
+
+    Retorna ``bytes`` com a imagem JPEG ou ``None`` em qualquer falha.
+    """
+    import subprocess
+    import tempfile
+    from infrastructure.youtube._utils import ytdlp_exe, ffmpeg_dir
+
+    try:
+        ytdlp = ytdlp_exe()
+        ffmpeg_bin = os.path.join(ffmpeg_dir(), "ffmpeg.exe") if sys.platform == "win32" \
+            else "ffmpeg"
+        flags = 0x08000000 if sys.platform == "win32" else 0
+        url = f"https://www.youtube.com/watch?v={video_id}"
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            video_path = os.path.join(tmpdir, "clip.mp4")
+            frame_path = os.path.join(tmpdir, "thumb.jpg")
+
+            # Passo 1: baixar ~10 s do vídeo no mesmo formato do download de áudio
+            subprocess.run(
+                [ytdlp,
+                 "--download-sections", "*00:05:00-00:05:10",
+                 "-f", "18",
+                 "--no-playlist",
+                 "--extractor-args", "youtube:player_client=ios,android,web",
+                 "--encoding", "utf-8",
+                 "--output", video_path,
+                 url],
+                capture_output=True, timeout=60,
+                creationflags=flags,
+            )
+
+            if not os.path.isfile(video_path) or os.path.getsize(video_path) < 1000:
+                return None
+
+            # Passo 2: extrair 1 frame com ffmpeg
+            subprocess.run(
+                [ffmpeg_bin,
+                 "-y", "-i", video_path,
+                 "-vframes", "1",
+                 "-q:v", "2",
+                 frame_path],
+                capture_output=True, timeout=15,
+                creationflags=flags,
+            )
+
+            if os.path.isfile(frame_path) and os.path.getsize(frame_path) > 500:
+                with open(frame_path, "rb") as fh:
+                    return fh.read()
+    except Exception:
+        pass
+    return None
+
+
+# ---------------------------------------------------------------------------
 # Janela principal
 # ---------------------------------------------------------------------------
 class App(QMainWindow):
@@ -168,24 +726,27 @@ class App(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("IPMadalena — Cultos para o Drive")
-        self.setFixedSize(660, 700)
+        self.setFixedSize(900, 680)
 
         _icon = os.path.join(
             getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__))),
             "icon.ico",
         )
-        if os.path.exists(_icon):
-            self.setWindowIcon(QIcon(_icon))
+        self._icon_path = _icon if os.path.exists(_icon) else None
+        if self._icon_path:
+            self.setWindowIcon(QIcon(self._icon_path))
 
         # Estado interno
-        self._queue            = queue.Queue()
-        self._running          = False
-        self._converting       = False
-        self._cancel_event     = threading.Event()
-        self._dot_pulsing      = False
-        self._dot_pulse_bright = True
-        self._conv_value       = 0.0
+        self._queue             = queue.Queue()
+        self._running           = False
+        self._converting        = False
+        self._cancel_event      = threading.Event()
+        self._dot_pulsing       = False
+        self._dot_pulse_bright  = True
+        self._conv_value        = 0.0
         self._status_text_color = "gray"   # exposto para testes
+        self._cfg_auth_running  = False
+        self._dark_mode         = True     # tema inicial
 
         from composition_root import build_notifier
         self._notifier = build_notifier()
@@ -209,61 +770,202 @@ class App(QMainWindow):
             self._check_auth_visibility()
 
     # -----------------------------------------------------------------------
-    # Layout
+    # Layout raiz — sidebar + stack
     # -----------------------------------------------------------------------
     def _build_ui(self):
-        PAD = 28
-
         central = QWidget()
         self.setCentralWidget(central)
-        root = QVBoxLayout(central)
-        root.setContentsMargins(PAD, 24, PAD, 24)
+        root = QHBoxLayout(central)
+        root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
+        root.addWidget(self._build_sidebar())
+
+        self._stack = QStackedWidget()
+        root.addWidget(self._stack, stretch=1)
+
+        self._stack.addWidget(self._build_processar_page())   # 0
+        self._stack.addWidget(self._build_historico_page())   # 1
+        self._stack.addWidget(self._build_config_page())      # 2
+
+        self._switch_page(0)
+
+    # -----------------------------------------------------------------------
+    # Sidebar
+    # -----------------------------------------------------------------------
+    def _build_sidebar(self) -> QWidget:
+        sidebar = QWidget()
+        sidebar.setObjectName("sidebar")
+        sidebar.setFixedWidth(170)
+
+        layout = QVBoxLayout(sidebar)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        # ── Logo ────────────────────────────────────────────────────────────
+        logo_box = QWidget()
+        logo_box.setFixedHeight(90)
+        ll = QHBoxLayout(logo_box)
+        ll.setContentsMargins(16, 0, 12, 0)
+        ll.setSpacing(10)
+        ll.setAlignment(Qt.AlignmentFlag.AlignVCenter)
+
+        logo_lbl = QLabel()
+        logo_lbl.setFixedSize(36, 36)
+        logo_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        if self._icon_path:
+            pix = QIcon(self._icon_path).pixmap(36, 36)
+            logo_lbl.setPixmap(pix)
+        else:
+            logo_lbl.setText("IPM")
+            logo_lbl.setStyleSheet(
+                f"font-size: 15px; font-weight: bold; color: {P.GREEN};"
+            )
+        ll.addWidget(logo_lbl)
+
+        self._brand_label = QLabel("IP Madalena")
+        self._brand_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        self._brand_label.setStyleSheet(
+            f"color: {P.D_TEXT_BRAND}; font-size: 12px; font-weight: bold; letter-spacing: 0.5px;"
+        )
+        ll.addWidget(self._brand_label, stretch=1)
+        layout.addWidget(logo_box)
+
+        # Separador
+        sep = QFrame()
+        sep.setObjectName("section_sep")
+        sep.setFrameShape(QFrame.Shape.HLine)
+        sep.setFixedHeight(1)
+        layout.addWidget(sep)
+        layout.addSpacing(6)
+
+        # ── Navegação ───────────────────────────────────────────────────────
+        self._nav_buttons = []
+        nav_items = [
+            ("▶", "Processar"),
+            ("⏱", "Histórico"),
+            ("⚙", "Configurações"),
+        ]
+        for idx, (icon, label) in enumerate(nav_items):
+            btn = QPushButton(f"  {icon}   {label}")
+            btn.setObjectName("nav_btn")
+            btn.setFixedHeight(44)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.clicked.connect(
+                lambda checked=False, i=idx: self._switch_page(i)
+            )
+            layout.addWidget(btn)
+            self._nav_buttons.append(btn)
+
+        layout.addStretch()
+
+        # ── Alternador de tema ───────────────────────────────────────────────
+        theme_row = QHBoxLayout()
+        theme_row.setContentsMargins(16, 0, 16, 0)
+
+        self._theme_btn = QPushButton("☀")
+        self._theme_btn.setObjectName("theme_btn")
+        self._theme_btn.setToolTip("Alternar modo claro / escuro")
+        self._theme_btn.setFixedHeight(32)
+        self._theme_btn.setFixedWidth(36)
+        self._theme_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._theme_btn.clicked.connect(self._toggle_theme)
+        theme_row.addWidget(self._theme_btn)
+        theme_row.addStretch()
+        layout.addLayout(theme_row)
+
+        # Versão
+        ver = QLabel("v2.1.0")
+        ver.setContentsMargins(16, 2, 0, 10)
+        ver.setAlignment(Qt.AlignmentFlag.AlignLeft)
+        ver.setStyleSheet(
+            f"color: {P.D_TEXT_VER}; font-size: 10px;"
+        )
+        layout.addWidget(ver)
+
+        return sidebar
+
+    def _switch_page(self, idx: int):
+        self._stack.setCurrentIndex(idx)
+        active = _NAV_ACTIVE[self._dark_mode]
+        idle   = _NAV_IDLE[self._dark_mode]
+        for i, btn in enumerate(self._nav_buttons):
+            btn.setStyleSheet(active if i == idx else idle)
+        self._current_page = idx
+
+        if idx == 1:
+            self._refresh_history()
+        elif idx == 2:
+            self._refresh_config_auth()
+
+    def _toggle_theme(self):
+        """Alterna entre modo escuro e modo claro."""
+        self._dark_mode = not self._dark_mode
+        qss = _QSS_DARK if self._dark_mode else _QSS_LIGHT
+        QApplication.instance().setStyleSheet(qss)
+
+        # Atualiza ícone do botão
+        self._theme_btn.setText("☀" if self._dark_mode else "🌙")
+
+        # Atualiza cor do brand label (inline, fora do QSS)
+        brand_color = P.D_TEXT_BRAND if self._dark_mode else P.L_TEXT_BRAND
+        self._brand_label.setStyleSheet(
+            f"color: {brand_color}; font-size: 12px; font-weight: bold; letter-spacing: 0.5px;"
+        )
+
+        # Reaplica estilos inline do nav
+        page = getattr(self, "_current_page", 0)
+        self._switch_page(page)
+
+    # -----------------------------------------------------------------------
+    # Página 0 — Processar
+    # -----------------------------------------------------------------------
+    def _build_processar_page(self) -> QWidget:
+        PAD = 26
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(PAD, 22, PAD, 22)
+        layout.setSpacing(0)
+
         # ── Cabeçalho ──────────────────────────────────────────────────────
-        hdr = QHBoxLayout()
-        title = QLabel("IPMadalena — Cultos para o Drive")
-        title.setStyleSheet("font-size: 20px; font-weight: bold;")
-        gear = QPushButton("⚙")
-        gear.setObjectName("icon_btn")
-        gear.setFixedSize(34, 34)
-        gear.clicked.connect(self._open_settings)
-        hdr.addWidget(title)
-        hdr.addStretch()
-        hdr.addWidget(gear)
-        root.addLayout(hdr)
-        root.addSpacing(4)
+        title = QLabel("Processar culto")
+        title.setStyleSheet("font-size: 19px; font-weight: bold;")
+        layout.addWidget(title)
+        layout.addSpacing(2)
 
-        sub = QLabel("Baixa o áudio dos cultos do YouTube e envia para o Google Drive")
-        sub.setStyleSheet("color: #888; font-size: 12px;")
-        root.addWidget(sub)
-        root.addSpacing(12)
+        sub = QLabel(
+            "Selecione a data e clique em Processar para buscar os cultos publicados"
+        )
+        sub.setStyleSheet(f"color: {P.HINT}; font-size: 12px;")
+        layout.addWidget(sub)
+        layout.addSpacing(14)
 
-        # ── Banner de autorização (inicialmente oculto) ─────────────────────
+        # ── Banner de autorização (oculto quando autorizado) ────────────────
         self._auth_banner = QFrame()
         self._auth_banner.setObjectName("auth_banner")
         ab = QHBoxLayout(self._auth_banner)
-        ab.setContentsMargins(14, 6, 14, 6)
+        ab.setContentsMargins(14, 8, 14, 8)
         ab_lbl = QLabel("⚠  Google Drive não autorizado")
-        ab_lbl.setStyleSheet("font-weight: bold; color: #f0a830;")
+        ab_lbl.setStyleSheet(f"font-weight: bold; color: {P.WARN_LABEL};")
         self._auth_btn = QPushButton("Autorizar")
         self._auth_btn.setStyleSheet(
-            "background: #d4820a; padding: 4px 14px; border-radius: 4px;"
+            f"background: {P.WARN_BTN_BG}; padding: 4px 14px; border-radius: 4px;"
         )
         self._auth_btn.clicked.connect(self._start_auth)
         ab.addWidget(ab_lbl)
         ab.addStretch()
         ab.addWidget(self._auth_btn)
         self._auth_banner.hide()
-        root.addWidget(self._auth_banner)
+        layout.addWidget(self._auth_banner)
 
-        # ── Seleção de data ────────────────────────────────────────────────
+        # ── Card de data ───────────────────────────────────────────────────
         date_frame = QFrame()
         date_frame.setObjectName("date_frame")
         dr = QHBoxLayout(date_frame)
-        dr.setContentsMargins(16, 8, 16, 8)
+        dr.setContentsMargins(16, 10, 16, 10)
         dr.setSpacing(8)
-        dr.addWidget(QLabel("Data do culto:"))
+
+        dr.addWidget(QLabel("📅  Data do culto:"))
 
         self.date_entry = QLineEdit()
         self.date_entry.setPlaceholderText("DD/MM/AAAA")
@@ -272,7 +974,7 @@ class App(QMainWindow):
 
         cal_btn = QPushButton("📅")
         cal_btn.setObjectName("icon_btn")
-        cal_btn.setFixedWidth(40)
+        cal_btn.setFixedWidth(38)
         cal_btn.clicked.connect(self._open_calendar)
         dr.addWidget(cal_btn)
 
@@ -285,22 +987,22 @@ class App(QMainWindow):
         self.cancel_btn.hide()
         dr.addWidget(self.cancel_btn)
 
-        self.run_btn = QPushButton("Processar")
-        self.run_btn.setStyleSheet("font-weight: bold; padding: 6px 18px;")
-        self.run_btn.setFixedWidth(120)
+        self.run_btn = QPushButton("▶  Processar")
+        self.run_btn.setStyleSheet("font-weight: bold; padding: 7px 18px;")
+        self.run_btn.setFixedWidth(130)
         self.run_btn.clicked.connect(self._start)
         dr.addWidget(self.run_btn)
 
-        root.addWidget(date_frame)
-        root.addSpacing(16)
+        layout.addWidget(date_frame)
+        layout.addSpacing(14)
 
         # ── Separador ──────────────────────────────────────────────────────
         sep = QFrame()
-        sep.setObjectName("sep")
+        sep.setObjectName("section_sep")
         sep.setFrameShape(QFrame.Shape.HLine)
         sep.setFixedHeight(1)
-        root.addWidget(sep)
-        root.addSpacing(12)
+        layout.addWidget(sep)
+        layout.addSpacing(10)
 
         # ── Status ─────────────────────────────────────────────────────────
         sr = QHBoxLayout()
@@ -311,8 +1013,8 @@ class App(QMainWindow):
         self.status_label.setStyleSheet("color: gray;")
         sr.addWidget(self._status_dot)
         sr.addWidget(self.status_label, stretch=1)
-        root.addLayout(sr)
-        root.addSpacing(8)
+        layout.addLayout(sr)
+        layout.addSpacing(8)
 
         # ── Progresso (oculto no idle) ──────────────────────────────────────
         self._progress_frame = QWidget()
@@ -326,12 +1028,12 @@ class App(QMainWindow):
             row = QHBoxLayout()
             lbl = QLabel(text)
             lbl.setFixedWidth(LABEL_W)
-            lbl.setStyleSheet("color: #666; font-size: 11px;")
+            lbl.setStyleSheet(f"color: {P.HINT}; font-size: 11px;")
             bar = _ProgressBar()
             stats = QLabel("")
             stats.setFixedWidth(190)
             stats.setStyleSheet(
-                "color: gray; font-family: Consolas; font-size: 11px;"
+                f"color: {P.HINT}; font-family: Consolas; font-size: 11px;"
             )
             row.addWidget(lbl)
             row.addWidget(bar, stretch=1)
@@ -339,52 +1041,350 @@ class App(QMainWindow):
             pfl.addLayout(row)
             return bar, stats
 
-        self.download_bar,  self.download_stats       = _bar_row("Download")
-        self.convert_bar,   self.convert_stats        = _bar_row("Conversão")
-        self.progress_bar,  self.upload_stats_label   = _bar_row("Upload")
+        self.download_bar,  self.download_stats     = _bar_row("Download")
+        self.convert_bar,   self.convert_stats      = _bar_row("Conversão")
+        self.progress_bar,  self.upload_stats_label = _bar_row("Upload")
 
         self._progress_frame.hide()
-        root.addWidget(self._progress_frame)
+        layout.addWidget(self._progress_frame)
 
         # ── Log ────────────────────────────────────────────────────────────
-        log_hdr = QLabel("Log de execução:")
-        log_hdr.setStyleSheet("color: #888; font-size: 12px;")
-        root.addWidget(log_hdr)
-        root.addSpacing(4)
+        log_hdr = QLabel("Log de execução")
+        log_hdr.setStyleSheet(f"color: {P.HINT}; font-size: 11px;")
+        layout.addWidget(log_hdr)
+        layout.addSpacing(4)
 
         self.log_box = QPlainTextEdit()
         self.log_box.setReadOnly(True)
-        root.addWidget(self.log_box, stretch=1)
+        layout.addWidget(self.log_box, stretch=1)
+
+        return page
+
+    # -----------------------------------------------------------------------
+    # Página 1 — Histórico
+    # -----------------------------------------------------------------------
+    def _build_historico_page(self) -> QWidget:
+        PAD = 26
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(PAD, 22, PAD, 22)
+        layout.setSpacing(10)
+
+        hdr = QHBoxLayout()
+        title = QLabel("Histórico de processamentos")
+        title.setStyleSheet("font-size: 19px; font-weight: bold;")
+        refresh_btn = QPushButton("↻  Atualizar")
+        refresh_btn.setObjectName("gray_btn")
+        refresh_btn.setFixedWidth(120)
+        refresh_btn.clicked.connect(self._refresh_history)
+        hdr.addWidget(title)
+        hdr.addStretch()
+        hdr.addWidget(refresh_btn)
+        layout.addLayout(hdr)
+
+        sub = QLabel("Datas já processadas e enviadas ao Google Drive")
+        sub.setStyleSheet(f"color: {P.HINT}; font-size: 12px;")
+        layout.addWidget(sub)
+
+        sep = QFrame()
+        sep.setObjectName("section_sep")
+        sep.setFrameShape(QFrame.Shape.HLine)
+        sep.setFixedHeight(1)
+        layout.addWidget(sep)
+
+        self._history_scroll = QScrollArea()
+        self._history_scroll.setWidgetResizable(True)
+        self._history_container = QWidget()
+        self._history_container.setObjectName("scroll_contents")
+        self._history_layout = QVBoxLayout(self._history_container)
+        self._history_layout.setSpacing(8)
+        self._history_layout.setContentsMargins(0, 4, 0, 4)
+        self._history_layout.addStretch()
+        self._history_scroll.setWidget(self._history_container)
+        layout.addWidget(self._history_scroll, stretch=1)
+
+        return page
+
+    def _refresh_history(self):
+        while self._history_layout.count():
+            item = self._history_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+        history = baixar_audio.load_history()
+        if not history:
+            empty = QLabel("Nenhum processamento registrado ainda.")
+            empty.setStyleSheet(f"color: {P.HINT}; font-size: 13px; padding: 20px;")
+            empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            self._history_layout.addWidget(empty)
+            self._history_layout.addStretch()
+            return
+
+        entries = sorted(history.items(), key=lambda x: x[0], reverse=True)
+        for date_str, entry in entries:
+            self._history_layout.addWidget(
+                self._build_history_card(date_str, entry)
+            )
+        self._history_layout.addStretch()
+
+    def _build_history_card(self, date_str: str, entry: dict) -> QFrame:
+        card = QFrame()
+        card.setObjectName("card")
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(16, 12, 16, 12)
+        layout.setSpacing(5)
+
+        hdr = QHBoxLayout()
+        date_lbl = QLabel(f"📅  {date_str}")
+        date_lbl.setStyleSheet("font-weight: bold; font-size: 13px;")
+        hdr.addWidget(date_lbl)
+
+        processado_em = entry.get("processado_em", "")
+        if processado_em:
+            try:
+                dt = datetime.fromisoformat(processado_em)
+                processado_em = dt.strftime("Processado em %d/%m/%Y às %H:%M")
+            except Exception:
+                pass
+            time_lbl = QLabel(processado_em)
+            time_lbl.setStyleSheet(f"color: {P.HINT}; font-size: 11px;")
+            hdr.addStretch()
+            hdr.addWidget(time_lbl)
+        layout.addLayout(hdr)
+
+        for v in entry.get("videos", []):
+            v_lbl = QLabel(f"  ▸  {v}")
+            v_lbl.setStyleSheet(f"color: {P.HINT}; font-size: 12px;")
+            layout.addWidget(v_lbl)
+
+        return card
+
+    # -----------------------------------------------------------------------
+    # Página 2 — Configurações (inline, card-based)
+    # -----------------------------------------------------------------------
+    def _build_config_page(self) -> QWidget:
+        PAD = 26
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(PAD, 22, PAD, 22)
+        layout.setSpacing(10)
+
+        title = QLabel("Configurações")
+        title.setStyleSheet("font-size: 19px; font-weight: bold;")
+        layout.addWidget(title)
+
+        sub = QLabel("Ajuste o canal, a pasta do Drive e a autorização Google")
+        sub.setStyleSheet(f"color: {P.HINT}; font-size: 12px;")
+        layout.addWidget(sub)
+
+        sep = QFrame()
+        sep.setObjectName("section_sep")
+        sep.setFrameShape(QFrame.Shape.HLine)
+        sep.setFixedHeight(1)
+        layout.addWidget(sep)
+        layout.addSpacing(4)
+
+        # ── Card: Autorização Google Drive ──────────────────────────────────
+        auth_card = QFrame()
+        auth_card.setObjectName("cfg_card")
+        ac = QVBoxLayout(auth_card)
+        ac.setContentsMargins(20, 16, 20, 16)
+        ac.setSpacing(8)
+
+        tr = QHBoxLayout()
+        tr.addWidget(self._icon_label("🔑", 22))
+        lbl = QLabel("Autorização Google Drive")
+        lbl.setStyleSheet("font-size: 14px; font-weight: bold;")
+        tr.addWidget(lbl)
+        tr.addStretch()
+        ac.addLayout(tr)
+
+        hint = QLabel(
+            "Permite que o app envie arquivos para o seu Google Drive."
+        )
+        hint.setStyleSheet(f"color: {P.HINT}; font-size: 11px;")
+        hint.setWordWrap(True)
+        ac.addWidget(hint)
+
+        sr = QHBoxLayout()
+        self._cfg_auth_status_label = QLabel("")
+        self._cfg_auth_action_btn = QPushButton("")
+        self._cfg_auth_action_btn.setFixedWidth(110)
+        self._cfg_auth_action_btn.clicked.connect(self._cfg_toggle_auth)
+        sr.addWidget(self._cfg_auth_status_label, stretch=1)
+        sr.addWidget(self._cfg_auth_action_btn)
+        ac.addLayout(sr)
+        layout.addWidget(auth_card)
+
+        # ── Card: Canal do YouTube ──────────────────────────────────────────
+        yt_card = QFrame()
+        yt_card.setObjectName("cfg_card")
+        yc = QVBoxLayout(yt_card)
+        yc.setContentsMargins(20, 16, 20, 16)
+        yc.setSpacing(8)
+
+        tr2 = QHBoxLayout()
+        tr2.addWidget(self._icon_label("📺", 22))
+        lbl2 = QLabel("Canal do YouTube")
+        lbl2.setStyleSheet("font-size: 14px; font-weight: bold;")
+        tr2.addWidget(lbl2)
+        tr2.addStretch()
+        yc.addLayout(tr2)
+
+        cfg = baixar_audio.load_config()
+        self._cfg_channel_entry = QLineEdit(cfg["channel_url"])
+        yc.addWidget(self._cfg_channel_entry)
+
+        yt_hint = QLabel("Ex: https://www.youtube.com/@SeuCanal/streams")
+        yt_hint.setStyleSheet(f"color: {P.HINT}; font-size: 11px;")
+        yc.addWidget(yt_hint)
+        layout.addWidget(yt_card)
+
+        # ── Card: Pasta do Google Drive ─────────────────────────────────────
+        dr_card = QFrame()
+        dr_card.setObjectName("cfg_card")
+        dc = QVBoxLayout(dr_card)
+        dc.setContentsMargins(20, 16, 20, 16)
+        dc.setSpacing(8)
+
+        tr3 = QHBoxLayout()
+        tr3.addWidget(self._icon_label("📁", 22))
+        lbl3 = QLabel("Pasta do Google Drive")
+        lbl3.setStyleSheet("font-size: 14px; font-weight: bold;")
+        tr3.addWidget(lbl3)
+        tr3.addStretch()
+        dc.addLayout(tr3)
+
+        self._cfg_folder_entry = QLineEdit(cfg["drive_folder_id"])
+        dc.addWidget(self._cfg_folder_entry)
+
+        dr_hint = QLabel(
+            "ID da pasta raiz no Drive (encontrado no final da URL da pasta)"
+        )
+        dr_hint.setStyleSheet(f"color: {P.HINT}; font-size: 11px;")
+        dc.addWidget(dr_hint)
+        layout.addWidget(dr_card)
+
+        layout.addStretch()
+
+        # ── Salvar ──────────────────────────────────────────────────────────
+        btn_row = QHBoxLayout()
+        btn_save = QPushButton("💾  Salvar configurações")
+        btn_save.setStyleSheet("font-weight: bold; padding: 8px 24px;")
+        btn_save.clicked.connect(self._cfg_save)
+        btn_row.addStretch()
+        btn_row.addWidget(btn_save)
+        layout.addLayout(btn_row)
+
+        self._cfg_feedback_label = QLabel("")
+        self._cfg_feedback_label.setStyleSheet(
+            f"color: {P.GREEN}; font-size: 11px;"
+        )
+        self._cfg_feedback_label.setAlignment(Qt.AlignmentFlag.AlignRight)
+        layout.addWidget(self._cfg_feedback_label)
+
+        return page
+
+    @staticmethod
+    def _icon_label(icon: str, size: int = 20) -> QLabel:
+        lbl = QLabel(icon)
+        lbl.setStyleSheet(f"font-size: {size}px;")
+        lbl.setFixedWidth(size + 10)
+        return lbl
+
+    def _refresh_config_auth(self):
+        if baixar_audio.check_auth_status():
+            self._cfg_auth_status_label.setText("✓  Autorizado")
+            self._cfg_auth_status_label.setStyleSheet(
+                f"color: {P.GREEN}; font-weight: bold;"
+            )
+            self._cfg_auth_action_btn.setText("Logout")
+            self._cfg_auth_action_btn.setStyleSheet(
+                f"background: {P.RED}; border-radius: 4px;"
+            )
+        else:
+            self._cfg_auth_status_label.setText("✗  Não autorizado")
+            self._cfg_auth_status_label.setStyleSheet(
+                f"color: {P.ERROR}; font-weight: bold;"
+            )
+            self._cfg_auth_action_btn.setText("Autorizar")
+            self._cfg_auth_action_btn.setStyleSheet(
+                f"background: {P.GREEN}; border-radius: 4px;"
+            )
+
+    def _cfg_toggle_auth(self):
+        if baixar_audio.check_auth_status():
+            baixar_audio.logout_drive()
+            self._refresh_config_auth()
+            self._cfg_feedback_label.setText(
+                "Logout realizado. Autorize novamente antes de processar."
+            )
+            self._cfg_feedback_label.setStyleSheet(
+                f"color: {P.WARN}; font-size: 11px;"
+            )
+            self._check_auth_visibility()
+        else:
+            self._cfg_do_authorize()
+
+    def _cfg_do_authorize(self):
+        if self._cfg_auth_running:
+            return
+        self._cfg_auth_running = True
+        self._cfg_auth_action_btn.setEnabled(False)
+        self._cfg_auth_action_btn.setText("Autorizando...")
+        threading.Thread(target=self._cfg_auth_worker, daemon=True).start()
+
+    def _cfg_auth_worker(self):
+        try:
+            baixar_audio.run_auth()
+            QTimer.singleShot(0, self._cfg_on_auth_done)
+        except Exception as e:
+            QTimer.singleShot(0, lambda: self._cfg_on_auth_error(str(e)))
+
+    def _cfg_on_auth_done(self):
+        self._cfg_auth_running = False
+        self._cfg_auth_action_btn.setEnabled(True)
+        self._refresh_config_auth()
+        self._cfg_feedback_label.setText("Google Drive autorizado com sucesso!")
+        self._cfg_feedback_label.setStyleSheet(f"color: {P.GREEN}; font-size: 11px;")
+        self._check_auth_visibility()
+
+    def _cfg_on_auth_error(self, msg: str):
+        self._cfg_auth_running = False
+        self._cfg_auth_action_btn.setEnabled(True)
+        self._refresh_config_auth()
+        self._cfg_feedback_label.setText(f"Erro na autorização: {msg}")
+        self._cfg_feedback_label.setStyleSheet(f"color: {P.ERROR}; font-size: 11px;")
+
+    def _cfg_save(self):
+        channel = self._cfg_channel_entry.text().strip()
+        folder  = self._cfg_folder_entry.text().strip()
+        if not channel:
+            self._cfg_feedback_label.setText("URL do canal não pode estar vazia.")
+            self._cfg_feedback_label.setStyleSheet(f"color: {P.ERROR}; font-size: 11px;")
+            return
+        if not folder:
+            self._cfg_feedback_label.setText("ID da pasta não pode estar vazio.")
+            self._cfg_feedback_label.setStyleSheet(f"color: {P.ERROR}; font-size: 11px;")
+            return
+        baixar_audio.save_config(channel_url=channel, drive_folder_id=folder)
+        self._cfg_feedback_label.setText("Configurações salvas com sucesso!")
+        self._cfg_feedback_label.setStyleSheet(f"color: {P.GREEN}; font-size: 11px;")
 
     # -----------------------------------------------------------------------
     # Calendário popup
     # -----------------------------------------------------------------------
     def _open_calendar(self):
-        dlg = QDialog(self)
-        dlg.setWindowTitle("Selecionar data")
-        dlg.setFixedSize(310, 340)
-        layout = QVBoxLayout(dlg)
-
-        cal = QCalendarWidget()
-        cal.setGridVisible(True)
         initial = QDate.currentDate()
         try:
             d = datetime.strptime(self.date_entry.text().strip(), "%d/%m/%Y")
             initial = QDate(d.year, d.month, d.day)
         except ValueError:
             pass
-        cal.setSelectedDate(initial)
-        layout.addWidget(cal)
 
-        btn = QPushButton("Confirmar")
-        btn.clicked.connect(lambda: (
-            self.date_entry.setText(
-                cal.selectedDate().toString("dd/MM/yyyy")
-            ),
-            dlg.accept(),
-        ))
-        layout.addWidget(btn)
-        dlg.exec()
+        dlg = _CalendarDialog(self, initial_date=initial, dark_mode=self._dark_mode)
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            self.date_entry.setText(dlg.selected_date().toString("dd/MM/yyyy"))
 
     # -----------------------------------------------------------------------
     # Fila de mensagens (workers → GUI)
@@ -435,6 +1435,28 @@ class App(QMainWindow):
                             f"{mb_done:.1f} / {mb_total:.1f} MB"
                         )
 
+                elif kind == "thumbnail":
+                    _lbl, _data = value
+                    try:
+                        _pix = QPixmap()
+                        _pix.loadFromData(_data)
+                        if not _pix.isNull():
+                            _pix = _pix.scaled(
+                                120, 68,
+                                Qt.AspectRatioMode.KeepAspectRatio,
+                                Qt.TransformationMode.SmoothTransformation,
+                            )
+                            _lbl.setPixmap(_pix)
+                            _lbl.setText("")
+                            _bg = P.D_THUMB if self._dark_mode else P.L_THUMB
+                            _lbl.setStyleSheet(
+                                f"background: {_bg}; border-radius: 5px;"
+                            )
+                    except RuntimeError:
+                        pass   # widget destruído (dialog fechou antes da thumbnail)
+                    except Exception:
+                        pass
+
                 elif kind == "select_videos":
                     self._show_video_selection(*value)
 
@@ -478,13 +1500,15 @@ class App(QMainWindow):
     # Status dot
     # -----------------------------------------------------------------------
     def _set_status(self, text: str, state: str = "running"):
+        # Cor do texto "running" adapta ao tema para ser legível em fundo claro
+        _txt_running = P.D_TEXT if self._dark_mode else P.L_TEXT
         _colors = {
-            "idle":    ("gray",    "gray"),
-            "running": ("white",   "#4a9edd"),
-            "done":    ("#2fa84f", "#2fa84f"),
-            "error":   ("#e05252", "#e05252"),
+            "idle":    ("gray",        "gray"),
+            "running": (_txt_running,  P.GREEN),
+            "done":    (P.GREEN,       P.GREEN),
+            "error":   (P.ERROR,       P.ERROR),
         }
-        tc, dc = _colors.get(state, ("white", "#4a9edd"))
+        tc, dc = _colors.get(state, (_txt_running, P.GREEN))
         self._status_text_color = tc
         self.status_label.setText(text)
         self.status_label.setStyleSheet(f"color: {tc};")
@@ -507,7 +1531,7 @@ class App(QMainWindow):
     def _animate_dot_pulse(self):
         if not self._dot_pulsing:
             return
-        color = "#4a9edd" if self._dot_pulse_bright else "#1a5a8c"
+        color = P.GREEN if self._dot_pulse_bright else P.GREEN_DIM
         self._dot_pulse_bright = not self._dot_pulse_bright
         self._status_dot.setStyleSheet(f"color: {color}; font-size: 11px;")
         QTimer.singleShot(500, self._animate_dot_pulse)
@@ -561,7 +1585,7 @@ class App(QMainWindow):
         if not baixar_audio.check_auth_status():
             self._show_error(
                 "Google Drive não autorizado.\n\n"
-                "Clique em 'Autorizar' no banner acima ou acesse ⚙ Configurações."
+                "Clique em 'Autorizar' no banner acima ou acesse Configurações."
             )
             return
 
@@ -595,7 +1619,7 @@ class App(QMainWindow):
         else:
             self.cancel_btn.hide()
             self.run_btn.setEnabled(True)
-            self.run_btn.setText("Processar")
+            self.run_btn.setText("▶  Processar")
             self.cancel_btn.setEnabled(True)
 
     # -----------------------------------------------------------------------
@@ -702,12 +1726,11 @@ class App(QMainWindow):
             self._queue.put(("error", str(e)))
 
     # -----------------------------------------------------------------------
-    # Configurações e autorização
+    # Configurações e autorização (banner + gear/nav)
     # -----------------------------------------------------------------------
     def _open_settings(self):
-        dlg = SettingsDialog(self)
-        dlg.finished.connect(lambda _: self._check_auth_visibility())
-        dlg.exec()
+        self._switch_page(2)
+        self._refresh_config_auth()
 
     def _check_auth_visibility(self):
         if baixar_audio.check_auth_status():
@@ -732,6 +1755,26 @@ class App(QMainWindow):
             self._queue.put(("auth_error", str(e)))
 
     # -----------------------------------------------------------------------
+    # Thumbnail YouTube — carregamento assíncrono
+    # -----------------------------------------------------------------------
+    def _fetch_thumbnail(self, video_id: str, label: QLabel):
+        """Busca thumbnail em background e despacha via fila para o main thread.
+
+        Usa ``self._queue`` em vez de ``QTimer.singleShot`` porque PyQt6 não
+        oferece a sobrecarga com QObject de contexto — e a fila já é polling
+        pelo ``_queue_timer``, que continua rodando dentro de ``dlg.exec()``.
+        """
+
+        def _worker():
+            data = _try_cdn_thumbnail(video_id)
+            if data is None:
+                data = _try_ytdlp_thumbnail(video_id)
+            if data is not None:
+                self._queue.put(("thumbnail", (label, data)))
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    # -----------------------------------------------------------------------
     # Popups (modais — executados no thread principal via queue)
     # -----------------------------------------------------------------------
     def _show_history_warning(self, date_str: str, videos: list, processado_em: str):
@@ -742,7 +1785,7 @@ class App(QMainWindow):
         layout.setSpacing(10)
 
         lbl = QLabel("⚠  Data já processada")
-        lbl.setStyleSheet("font-size: 14px; font-weight: bold; color: #e0a020;")
+        lbl.setStyleSheet(f"font-size: 14px; font-weight: bold; color: {P.WARN};")
         layout.addWidget(lbl)
         layout.addWidget(QLabel(
             f"A data {date_str} já foi processada em {processado_em}."
@@ -752,7 +1795,9 @@ class App(QMainWindow):
             if len(videos) > 5:
                 nomes += f"\n  … e mais {len(videos) - 5} vídeo(s)"
             v_lbl = QLabel(nomes)
-            v_lbl.setStyleSheet("color: gray; font-family: Consolas; font-size: 11px;")
+            v_lbl.setStyleSheet(
+                "color: gray; font-family: Consolas; font-size: 11px;"
+            )
             layout.addWidget(v_lbl)
         layout.addWidget(QLabel("Deseja processar novamente?"))
 
@@ -787,50 +1832,136 @@ class App(QMainWindow):
 
     def _show_video_selection(self, date_str: str, videos: list):
         dlg = QDialog(self)
-        dlg.setWindowTitle("Vídeos encontrados")
-        dlg.setFixedSize(560, 420)
+        dlg.setWindowTitle("Selecionar vídeo")
+        dlg.setFixedSize(620, 520)
         layout = QVBoxLayout(dlg)
-        layout.setSpacing(8)
+        layout.setContentsMargins(20, 18, 20, 18)
+        layout.setSpacing(10)
 
-        t_lbl = QLabel(f"Vídeos encontrados para {date_str}")
-        t_lbl.setStyleSheet("font-size: 14px; font-weight: bold;")
+        # Cabeçalho
+        t_lbl = QLabel(f"📅  Vídeos publicados em {date_str}")
+        t_lbl.setStyleSheet("font-size: 15px; font-weight: bold;")
         layout.addWidget(t_lbl)
-        s_lbl = QLabel("Selecione os vídeos que deseja baixar e enviar para o Drive:")
-        s_lbl.setStyleSheet("color: gray; font-size: 12px;")
+
+        s_lbl = QLabel(
+            "Selecione os vídeos que deseja baixar e enviar para o Drive:"
+        )
+        s_lbl.setStyleSheet(f"color: {P.HINT}; font-size: 12px;")
         layout.addWidget(s_lbl)
 
+        sep = QFrame()
+        sep.setObjectName("section_sep")
+        sep.setFrameShape(QFrame.Shape.HLine)
+        sep.setFixedHeight(1)
+        layout.addWidget(sep)
+
+        # Lista de vídeos com thumbnails
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         container = QWidget()
+        container.setObjectName("scroll_contents")
         cl = QVBoxLayout(container)
-        cl.setSpacing(4)
+        cl.setSpacing(8)
+        cl.setContentsMargins(2, 4, 8, 4)
+
+        # Fila LOCAL para thumbnails desta dialog.
+        # Não usamos self._queue porque _show_video_selection é chamado de dentro
+        # de _process_queue: enquanto dlg.exec() bloqueia esse frame de execução,
+        # o self._queue_timer tenta chamar _process_queue de forma re-entrante,
+        # mas o PyQt6 pode descartar essa chamada sem garantias. Um timer filho
+        # do próprio dialog opera no event loop criado por dlg.exec() sem nenhuma
+        # ambiguidade de re-entrância.
+        _thumb_q: queue.Queue = queue.Queue()
+
+        def _apply_pending_thumbs():
+            """Drena _thumb_q e aplica pixmaps nos QLabels — roda no main thread."""
+            try:
+                while True:
+                    _lbl, _data = _thumb_q.get_nowait()
+                    try:
+                        _pix = QPixmap()
+                        _pix.loadFromData(_data)
+                        if not _pix.isNull():
+                            _pix = _pix.scaled(
+                                120, 68,
+                                Qt.AspectRatioMode.KeepAspectRatio,
+                                Qt.TransformationMode.SmoothTransformation,
+                            )
+                            _lbl.setPixmap(_pix)
+                            _lbl.setText("")
+                            _bg = P.D_THUMB if self._dark_mode else P.L_THUMB
+                            _lbl.setStyleSheet(f"background: {_bg}; border-radius: 5px;")
+                    except RuntimeError:
+                        pass   # widget destruído (dialog fechou antes da thumbnail)
+                    except Exception:
+                        pass
+            except queue.Empty:
+                pass
+
+        # Timer filho do dialog — dispara dentro do event loop de dlg.exec()
+        _thumb_timer = QTimer(dlg)
+        _thumb_timer.timeout.connect(_apply_pending_thumbs)
+        _thumb_timer.start(100)
 
         check_boxes = []
         for video in videos:
             card = QFrame()
             card.setObjectName("card")
             ch = QHBoxLayout(card)
-            ch.setContentsMargins(10, 8, 10, 8)
-            chk = QCheckBox()
-            chk.setChecked(True)
-            check_boxes.append(chk)
-            ch.addWidget(chk)
+            ch.setContentsMargins(12, 10, 12, 10)
+            ch.setSpacing(14)
+
+            # Thumbnail
+            thumb = QLabel()
+            thumb.setFixedSize(120, 68)
+            thumb.setObjectName("thumb")
+            thumb.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            thumb.setText("⏳")
+            ch.addWidget(thumb)
+
+            # Carrega thumbnail em background; resultado vai para _thumb_q local
+            _vid_id = video["id"]
+            _thumb_lbl = thumb
+            def _start_fetch(vid_id=_vid_id, lbl=_thumb_lbl):
+                def _w():
+                    data = _try_cdn_thumbnail(vid_id)
+                    if data is None:
+                        data = _try_ytdlp_thumbnail(vid_id)
+                    if data is not None:
+                        _thumb_q.put((lbl, data))
+                threading.Thread(target=_w, daemon=True).start()
+            _start_fetch()
+
+            # Informações do vídeo
             info = QVBoxLayout()
+            info.setSpacing(3)
+
             vt = QLabel(video["title"])
-            vt.setStyleSheet("font-weight: bold; font-size: 12px;")
+            vt.setStyleSheet("font-weight: bold; font-size: 13px;")
             vt.setWordWrap(True)
             info.addWidget(vt)
+
             try:
                 d = datetime.strptime(video["upload_date"], "%Y%m%d")
-                date_fmt = f"Publicado em {d.strftime('%d/%m/%Y')}"
+                date_fmt = d.strftime("Publicado em %d/%m/%Y")
             except Exception:
                 date_fmt = video["upload_date"]
             dl = QLabel(date_fmt)
-            dl.setStyleSheet("color: gray; font-size: 11px;")
+            dl.setStyleSheet(f"color: {P.HINT}; font-size: 11px;")
             info.addWidget(dl)
-            ch.addLayout(info, stretch=1)
+            info.addStretch()
+
+            # Toggle de seleção
+            chk = _CheckCell()
+            check_boxes.append(chk)
+
+            row = QHBoxLayout()
+            row.addLayout(info, stretch=1)
+            row.addWidget(chk, alignment=Qt.AlignmentFlag.AlignVCenter)
+            ch.addLayout(row, stretch=1)
             cl.addWidget(card)
 
+        cl.addStretch()
         scroll.setWidget(container)
         layout.addWidget(scroll, stretch=1)
 
@@ -844,15 +1975,15 @@ class App(QMainWindow):
             _result["selected"] = selected
             dlg.accept()
 
-        def _cancelar():
-            _result["action"] = "cancel"
-            dlg.reject()
+        # NÃO chamar dlg.reject() aqui: o sinal rejected é emitido pelo Qt
+        # antes deste slot ser invocado (X ou escape). Chamar reject() de dentro
+        # do handler de rejected causa recursão infinita → RecursionError.
+        dlg.rejected.connect(lambda: _result.update({"action": "cancel"}))
 
-        btn_proc = QPushButton("Prosseguir")
-        btn_proc.setStyleSheet("font-weight: bold;")
+        btn_proc = QPushButton("▶  Prosseguir")
+        btn_proc.setStyleSheet("font-weight: bold; font-size: 13px; padding: 8px 0;")
         btn_proc.clicked.connect(_prosseguir)
         layout.addWidget(btn_proc)
-        dlg.rejected.connect(_cancelar)
         dlg.exec()
 
         if _result["action"] == "proceed":
@@ -891,7 +2022,7 @@ class App(QMainWindow):
     def _on_done(self, date_str=None, video_titles=None):
         self._running = False
         self._converting = False
-        self._stop_dot_pulse("#2fa84f")
+        self._stop_dot_pulse(P.GREEN)
         self._set_buttons_running(False)
         self.download_bar.set(1)
         self.convert_bar.set(1)
@@ -931,7 +2062,7 @@ class App(QMainWindow):
 
 
 # ---------------------------------------------------------------------------
-# Configurações (dialog modal)
+# Configurações (dialog modal) — mantido para compatibilidade
 # ---------------------------------------------------------------------------
 class SettingsDialog(QDialog):
 
@@ -951,7 +2082,6 @@ class SettingsDialog(QDialog):
         title.setStyleSheet("font-size: 18px; font-weight: bold;")
         layout.addWidget(title)
 
-        # ── Google Drive ────────────────────────────────────────────────────
         layout.addWidget(self._section_label("Google Drive"))
 
         auth_card = QFrame()
@@ -965,10 +2095,8 @@ class SettingsDialog(QDialog):
         ac.addWidget(self._auth_status_label, stretch=1)
         ac.addWidget(self._auth_action_btn)
         layout.addWidget(auth_card)
-
         self._refresh_auth_status()
 
-        # ── Canal do YouTube ────────────────────────────────────────────────
         layout.addWidget(self._section_label("Canal do YouTube"))
         cfg = baixar_audio.load_config()
         self._channel_entry = QLineEdit(cfg["channel_url"])
@@ -977,7 +2105,6 @@ class SettingsDialog(QDialog):
         yt_hint.setStyleSheet("color: gray; font-size: 11px;")
         layout.addWidget(yt_hint)
 
-        # ── Pasta do Google Drive ───────────────────────────────────────────
         layout.addWidget(self._section_label("Pasta do Google Drive"))
         self._folder_entry = QLineEdit(cfg["drive_folder_id"])
         layout.addWidget(self._folder_entry)
@@ -989,7 +2116,6 @@ class SettingsDialog(QDialog):
 
         layout.addStretch()
 
-        # ── Botões ──────────────────────────────────────────────────────────
         btn_row = QHBoxLayout()
         btn_save = QPushButton("Salvar")
         btn_save.setStyleSheet("font-weight: bold;")
@@ -1003,7 +2129,7 @@ class SettingsDialog(QDialog):
         layout.addLayout(btn_row)
 
         self._feedback_label = QLabel("")
-        self._feedback_label.setStyleSheet("color: #2fa84f; font-size: 11px;")
+        self._feedback_label.setStyleSheet(f"color: {P.GREEN}; font-size: 11px;")
         layout.addWidget(self._feedback_label)
 
     def _section_label(self, text: str) -> QLabel:
@@ -1014,17 +2140,17 @@ class SettingsDialog(QDialog):
     def _refresh_auth_status(self):
         if baixar_audio.check_auth_status():
             self._auth_status_label.setText("✓  Autorizado")
-            self._auth_status_label.setStyleSheet("color: #2fa84f;")
+            self._auth_status_label.setStyleSheet(f"color: {P.GREEN};")
             self._auth_action_btn.setText("Logout")
             self._auth_action_btn.setStyleSheet(
-                "background: #c0392b; border-radius: 4px;"
+                f"background: {P.RED}; border-radius: 4px;"
             )
         else:
             self._auth_status_label.setText("✗  Não autorizado")
-            self._auth_status_label.setStyleSheet("color: #e05252;")
+            self._auth_status_label.setStyleSheet(f"color: {P.ERROR};")
             self._auth_action_btn.setText("Autorizar")
             self._auth_action_btn.setStyleSheet(
-                "background: #1f6aa5; border-radius: 4px;"
+                f"background: {P.GREEN}; border-radius: 4px;"
             )
 
     def _toggle_auth(self):
@@ -1039,7 +2165,7 @@ class SettingsDialog(QDialog):
         self._feedback_label.setText(
             "Logout realizado. Autorize novamente antes de processar."
         )
-        self._feedback_label.setStyleSheet("color: #e0a020; font-size: 11px;")
+        self._feedback_label.setStyleSheet(f"color: {P.WARN}; font-size: 11px;")
 
     def _do_authorize(self):
         if self._auth_running:
@@ -1061,29 +2187,29 @@ class SettingsDialog(QDialog):
         self._auth_action_btn.setEnabled(True)
         self._refresh_auth_status()
         self._feedback_label.setText("Google Drive autorizado com sucesso!")
-        self._feedback_label.setStyleSheet("color: #2fa84f; font-size: 11px;")
+        self._feedback_label.setStyleSheet(f"color: {P.GREEN}; font-size: 11px;")
 
     def _on_auth_error(self, msg: str):
         self._auth_running = False
         self._auth_action_btn.setEnabled(True)
         self._refresh_auth_status()
         self._feedback_label.setText(f"Erro na autorização: {msg}")
-        self._feedback_label.setStyleSheet("color: #e05252; font-size: 11px;")
+        self._feedback_label.setStyleSheet(f"color: {P.ERROR}; font-size: 11px;")
 
     def _save(self):
         channel = self._channel_entry.text().strip()
         folder  = self._folder_entry.text().strip()
         if not channel:
             self._feedback_label.setText("URL do canal não pode estar vazia.")
-            self._feedback_label.setStyleSheet("color: #e05252; font-size: 11px;")
+            self._feedback_label.setStyleSheet(f"color: {P.ERROR}; font-size: 11px;")
             return
         if not folder:
             self._feedback_label.setText("ID da pasta não pode estar vazio.")
-            self._feedback_label.setStyleSheet("color: #e05252; font-size: 11px;")
+            self._feedback_label.setStyleSheet(f"color: {P.ERROR}; font-size: 11px;")
             return
         baixar_audio.save_config(channel_url=channel, drive_folder_id=folder)
         self._feedback_label.setText("Configurações salvas com sucesso!")
-        self._feedback_label.setStyleSheet("color: #2fa84f; font-size: 11px;")
+        self._feedback_label.setStyleSheet(f"color: {P.GREEN}; font-size: 11px;")
 
 
 # ---------------------------------------------------------------------------
@@ -1103,7 +2229,7 @@ if __name__ == "__main__":
         _setup_file_logging()
         _q = QApplication(sys.argv)
         _q.setStyle("Fusion")
-        _q.setStyleSheet(_QSS)
+        _q.setStyleSheet(_QSS_DARK)
         win = App()
         win.show()
         sys.exit(_q.exec())
