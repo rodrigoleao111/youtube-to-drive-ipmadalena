@@ -1,17 +1,21 @@
 """
-Assistente de configuração inicial — IPMadalena Cultos para o Drive.
+Assistente de configuração inicial — IPMadalena Cultos para o Drive (PyQt6).
 Executado automaticamente na primeira execução (antes da autorização Google).
 """
 
 import threading
 
-import customtkinter as ctk
+from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtWidgets import (
+    QDialog, QHBoxLayout, QLabel, QLineEdit,
+    QPushButton, QVBoxLayout, QWidget,
+)
 
 import baixar_audio
 
 
-class SetupWizard(ctk.CTkToplevel):
-    """Wizard modal de configuração inicial em 5 passos."""
+class SetupWizard(QDialog):
+    """Wizard de configuração inicial em 5 passos (QDialog não-bloqueante)."""
 
     _STEPS = [
         "Boas-vindas",
@@ -21,121 +25,161 @@ class SetupWizard(ctk.CTkToplevel):
         "Concluído",
     ]
 
-    def __init__(self, master, on_complete=None):
-        super().__init__(master)
-        self.title("IPMadalena — Configuração Inicial")
-        self.geometry("600x530")
-        self.resizable(False, False)
-        self.grab_set()
-        self.protocol("WM_DELETE_WINDOW", self._on_close)
+    # Sinais para comunicação thread-safe com o worker de autenticação
+    _auth_done_sig  = pyqtSignal(bool, str)   # (success, error_msg)
+
+    def __init__(self, parent=None, on_complete=None):
+        super().__init__(parent)
+        self.setWindowTitle("IPMadalena — Configuração Inicial")
+        self.setFixedSize(600, 530)
+        # Janela própria; não bloqueia o mainloop
+        self.setWindowFlags(
+            Qt.WindowType.Window |
+            Qt.WindowType.WindowTitleHint |
+            Qt.WindowType.WindowCloseButtonHint,
+        )
 
         self._on_complete = on_complete
         self._step        = 0
         self._authorized  = baixar_audio.check_auth_status()
-        self._fb          = None          # referência ao feedback label do passo atual
+        self._finished    = False
+
+        # Referências de widgets do passo atual (populadas em _show_step)
+        self._channel_entry : QLineEdit | None = None
+        self._folder_entry  : QLineEdit | None = None
+        self._auth_btn      : QPushButton | None = None
+        self._auth_lbl      : QLabel | None = None
+        self._fb_label      : QLabel | None = None
+
+        self._auth_done_sig.connect(self._on_auth_result)
 
         self._build_shell()
         self._show_step(0)
 
     # -----------------------------------------------------------------------
-    # Shell (indicador + conteúdo + navegação)
+    # Shell fixo (indicador + área de conteúdo + navegação)
     # -----------------------------------------------------------------------
-
     def _build_shell(self):
-        # ── Indicador de passos ──
-        ind = ctk.CTkFrame(self, fg_color="transparent", height=52)
-        ind.pack(fill="x", padx=28, pady=(20, 0))
-        ind.pack_propagate(False)
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
 
-        self._step_dots = []
-        self._step_lbls = []
+        # ── Indicador de passos ──
+        ind = QWidget()
+        ind.setFixedHeight(64)
+        ind.setStyleSheet("background: #2b2b2b;")
+        il = QHBoxLayout(ind)
+        il.setContentsMargins(28, 8, 28, 8)
+
+        self._step_dots: list[QLabel] = []
+        self._step_lbls: list[QLabel] = []
         for name in self._STEPS:
-            col = ctk.CTkFrame(ind, fg_color="transparent")
-            col.pack(side="left", expand=True, fill="x")
-            dot = ctk.CTkLabel(col, text="●", font=ctk.CTkFont(size=11))
-            dot.pack()
-            lbl = ctk.CTkLabel(col, text=name, font=ctk.CTkFont(size=9))
-            lbl.pack()
+            col = QWidget()
+            cl  = QVBoxLayout(col)
+            cl.setContentsMargins(0, 0, 0, 0)
+            cl.setSpacing(2)
+            dot = QLabel("●")
+            dot.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            lbl = QLabel(name)
+            lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            cl.addWidget(dot)
+            cl.addWidget(lbl)
+            il.addWidget(col, stretch=1)
             self._step_dots.append(dot)
             self._step_lbls.append(lbl)
 
-        ctk.CTkFrame(self, height=1, fg_color=("gray78", "gray28")).pack(
-            fill="x", pady=(10, 0)
-        )
+        root.addWidget(ind)
 
-        # ── Área de conteúdo ──
-        self._content = ctk.CTkFrame(self, fg_color="transparent")
-        self._content.pack(fill="both", expand=True, padx=36, pady=(22, 0))
+        sep = QWidget()
+        sep.setFixedHeight(1)
+        sep.setStyleSheet("background: #444;")
+        root.addWidget(sep)
 
-        # ── Botões de navegação ──
-        nav = ctk.CTkFrame(self, fg_color="transparent")
-        nav.pack(fill="x", padx=36, pady=(6, 22))
+        # ── Área de conteúdo substituível ──
+        self._content_area = QWidget()
+        self._content_layout = QVBoxLayout(self._content_area)
+        self._content_layout.setContentsMargins(36, 22, 36, 10)
+        self._content_layout.setSpacing(8)
+        root.addWidget(self._content_area, stretch=1)
 
-        self._back_btn = ctk.CTkButton(
-            nav, text="← Voltar", width=110,
-            fg_color=("gray75", "gray30"), hover_color=("gray65", "gray25"),
-            command=self._go_back,
-        )
-        self._back_btn.pack(side="left")
+        # ── Navegação ──
+        nav = QWidget()
+        nav.setStyleSheet("background: #2b2b2b;")
+        nl = QHBoxLayout(nav)
+        nl.setContentsMargins(28, 10, 28, 18)
 
-        self._next_btn = ctk.CTkButton(
-            nav, text="Próximo →", width=150,
-            font=ctk.CTkFont(weight="bold"),
-            command=self._go_next,
-        )
-        self._next_btn.pack(side="right")
+        self._back_btn = QPushButton("← Voltar")
+        self._back_btn.setFixedWidth(110)
+        self._back_btn.setObjectName("gray_btn")
+        self._back_btn.clicked.connect(self._go_back)
+
+        self._next_btn = QPushButton("Próximo →")
+        self._next_btn.setFixedWidth(160)
+        self._next_btn.setStyleSheet("font-weight: bold; padding: 6px 18px;")
+        self._next_btn.clicked.connect(self._go_next)
+
+        nl.addWidget(self._back_btn)
+        nl.addStretch()
+        nl.addWidget(self._next_btn)
+        root.addWidget(nav)
 
     # -----------------------------------------------------------------------
-    # Navegação
+    # Navegar entre passos
     # -----------------------------------------------------------------------
+    def _show_step(self, step: int):
+        self._step       = step
+        self._fb_label   = None
+        self._channel_entry = None
+        self._folder_entry  = None
+        self._auth_btn   = None
+        self._auth_lbl   = None
 
-    def _show_step(self, step):
-        self._step = step
-        self._fb   = None
-
-        # Atualiza indicador
         last = len(self._STEPS) - 1
+
+        # Atualiza indicador de passos
         for i, (dot, lbl) in enumerate(zip(self._step_dots, self._step_lbls)):
             if i < step:
-                dot.configure(text_color="#2fa84f")
-                lbl.configure(text_color="#2fa84f")
+                dot.setStyleSheet("color: #2fa84f; font-size: 11px;")
+                lbl.setStyleSheet("color: #2fa84f; font-size: 9px;")
             elif i == step:
-                dot.configure(text_color="#4a9edd")
-                lbl.configure(text_color="white")
+                dot.setStyleSheet("color: #4a9edd; font-size: 11px;")
+                lbl.setStyleSheet("color: white; font-size: 9px;")
             else:
-                dot.configure(text_color="gray")
-                lbl.configure(text_color="gray")
-
-        # Limpa conteúdo anterior
-        for w in self._content.winfo_children():
-            w.destroy()
+                dot.setStyleSheet("color: gray; font-size: 11px;")
+                lbl.setStyleSheet("color: gray; font-size: 9px;")
 
         # Botões
-        self._back_btn.configure(state="normal" if 0 < step < last else "disabled")
-        self._next_btn.configure(
-            text="Começar a usar" if step == last else "Próximo →",
-            state="normal",
-        )
+        self._back_btn.setEnabled(0 < step < last)
+        self._next_btn.setText("Começar a usar" if step == last else "Próximo →")
+        self._next_btn.setEnabled(True)
+
+        # Substitui conteúdo limpando e reconstruindo
+        while self._content_layout.count():
+            item = self._content_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
 
         [self._s0, self._s1, self._s2, self._s3, self._s4][step]()
+        self._content_layout.addStretch()
 
     def _go_next(self):
-        # Validação e persistência de cada passo
-        if self._step == 1:   # canal
-            channel = self._channel_entry.get().strip()
-            if not channel:
-                self._set_fb("Informe a URL do canal.", error=True)
-                return
-            baixar_audio.save_config(channel_url=channel)
+        if self._step == 1:
+            if self._channel_entry:
+                channel = self._channel_entry.text().strip()
+                if not channel:
+                    self._set_fb("Informe a URL do canal.", error=True)
+                    return
+                baixar_audio.save_config(channel_url=channel)
 
-        elif self._step == 2:  # pasta
-            folder = self._folder_entry.get().strip()
-            if not folder:
-                self._set_fb("Informe o ID da pasta.", error=True)
-                return
-            baixar_audio.save_config(drive_folder_id=folder)
+        elif self._step == 2:
+            if self._folder_entry:
+                folder = self._folder_entry.text().strip()
+                if not folder:
+                    self._set_fb("Informe o ID da pasta.", error=True)
+                    return
+                baixar_audio.save_config(drive_folder_id=folder)
 
-        elif self._step == 3:  # auth
+        elif self._step == 3:
             if not self._authorized:
                 self._set_fb("Autorize o acesso ao Google Drive antes de continuar.", error=True)
                 return
@@ -152,181 +196,192 @@ class SetupWizard(ctk.CTkToplevel):
     # -----------------------------------------------------------------------
     # Helpers de layout
     # -----------------------------------------------------------------------
-
-    def _section(self, title, subtitle=""):
-        ctk.CTkLabel(self._content, text=title,
-                     font=ctk.CTkFont(size=18, weight="bold")).pack(anchor="w")
+    def _section(self, title: str, subtitle: str = ""):
+        t = QLabel(title)
+        t.setStyleSheet("font-size: 18px; font-weight: bold;")
+        self._content_layout.addWidget(t)
         if subtitle:
-            ctk.CTkLabel(self._content, text=subtitle,
-                         font=ctk.CTkFont(size=12), text_color="gray").pack(anchor="w", pady=(2, 14))
+            s = QLabel(subtitle)
+            s.setStyleSheet("color: gray; font-size: 12px;")
+            self._content_layout.addWidget(s)
 
     def _add_fb(self):
-        self._fb = ctk.CTkLabel(self._content, text="",
-                                font=ctk.CTkFont(size=11), anchor="w")
-        self._fb.pack(anchor="w", pady=(10, 0))
+        self._fb_label = QLabel("")
+        self._fb_label.setStyleSheet("font-size: 11px;")
+        self._content_layout.addWidget(self._fb_label)
 
-    def _set_fb(self, msg, error=False):
-        if self._fb:
-            self._fb.configure(text=msg,
-                               text_color="#e05252" if error else "#2fa84f")
+    def _set_fb(self, msg: str, error: bool = False):
+        if self._fb_label:
+            color = "#e05252" if error else "#2fa84f"
+            self._fb_label.setStyleSheet(f"font-size: 11px; color: {color};")
+            self._fb_label.setText(msg)
 
     # -----------------------------------------------------------------------
-    # Passos
+    # Conteúdo de cada passo
     # -----------------------------------------------------------------------
-
     def _s0(self):
-        """Boas-vindas."""
-        ctk.CTkLabel(self._content, text="Bem-vindo!",
-                     font=ctk.CTkFont(size=22, weight="bold")).pack(anchor="w")
-        ctk.CTkLabel(self._content, text="IPMadalena — Cultos para o Drive",
-                     font=ctk.CTkFont(size=13), text_color="gray").pack(anchor="w", pady=(2, 20))
-        ctk.CTkLabel(
-            self._content,
-            wraplength=520, justify="left", font=ctk.CTkFont(size=12),
-            text=(
-                "Este assistente irá guiá-lo pela configuração inicial do aplicativo.\n"
-                "O processo leva cerca de 2 minutos e inclui:\n\n"
-                "  • Definição do canal do YouTube a ser monitorado\n"
-                "  • Configuração da pasta de destino no Google Drive\n"
-                "  • Autorização de acesso ao Google Drive"
-            ),
-        ).pack(anchor="w")
+        lbl = QLabel("Bem-vindo!")
+        lbl.setStyleSheet("font-size: 22px; font-weight: bold;")
+        self._content_layout.addWidget(lbl)
+
+        sub = QLabel("IPMadalena — Cultos para o Drive")
+        sub.setStyleSheet("color: gray; font-size: 13px;")
+        self._content_layout.addWidget(sub)
+        self._content_layout.addSpacing(16)
+
+        body = QLabel(
+            "Este assistente irá guiá-lo pela configuração inicial do aplicativo.\n"
+            "O processo leva cerca de 2 minutos e inclui:\n\n"
+            "  • Definição do canal do YouTube a ser monitorado\n"
+            "  • Configuração da pasta de destino no Google Drive\n"
+            "  • Autorização de acesso ao Google Drive"
+        )
+        body.setStyleSheet("font-size: 12px;")
+        body.setWordWrap(True)
+        self._content_layout.addWidget(body)
 
     def _s1(self):
-        """Canal do YouTube."""
         self._section("Canal do YouTube", "URL do canal a ser monitorado")
         cfg = baixar_audio.load_config()
 
-        ctk.CTkLabel(self._content,
-                     text="Informe a URL do canal cujos vídeos serão baixados:",
-                     font=ctk.CTkFont(size=12)).pack(anchor="w", pady=(0, 8))
+        hint = QLabel("Informe a URL do canal cujos vídeos serão baixados:")
+        hint.setStyleSheet("font-size: 12px;")
+        self._content_layout.addWidget(hint)
 
-        self._channel_entry = ctk.CTkEntry(
-            self._content, height=36, font=ctk.CTkFont(size=12))
-        self._channel_entry.insert(0, cfg["channel_url"])
-        self._channel_entry.pack(fill="x", pady=(0, 6))
+        self._channel_entry = QLineEdit(cfg["channel_url"])
+        self._channel_entry.setFixedHeight(36)
+        self._content_layout.addWidget(self._channel_entry)
 
-        ctk.CTkLabel(self._content,
-                     text="Ex: https://www.youtube.com/@SeuCanal/streams",
-                     font=ctk.CTkFont(size=11), text_color="gray").pack(anchor="w")
+        ex = QLabel("Ex: https://www.youtube.com/@SeuCanal/streams")
+        ex.setStyleSheet("color: gray; font-size: 11px;")
+        self._content_layout.addWidget(ex)
+
         self._add_fb()
 
     def _s2(self):
-        """Pasta do Google Drive."""
         self._section("Pasta do Google Drive", "ID da pasta raiz de destino")
         cfg = baixar_audio.load_config()
 
-        ctk.CTkLabel(
-            self._content,
-            wraplength=520, justify="left", font=ctk.CTkFont(size=12),
-            text=(
-                "Como encontrar o ID da pasta:\n"
-                "  1. Abra o Google Drive no navegador\n"
-                "  2. Navegue até a pasta desejada\n"
-                "  3. Copie o código que aparece no final da URL"
-            ),
-        ).pack(anchor="w", pady=(0, 14))
+        body = QLabel(
+            "Como encontrar o ID da pasta:\n"
+            "  1. Abra o Google Drive no navegador\n"
+            "  2. Navegue até a pasta desejada\n"
+            "  3. Copie o código que aparece no final da URL"
+        )
+        body.setStyleSheet("font-size: 12px;")
+        body.setWordWrap(True)
+        self._content_layout.addWidget(body)
+        self._content_layout.addSpacing(10)
 
-        ctk.CTkLabel(self._content, text="ID da pasta:",
-                     font=ctk.CTkFont(size=12)).pack(anchor="w", pady=(0, 6))
+        lbl = QLabel("ID da pasta:")
+        lbl.setStyleSheet("font-size: 12px;")
+        self._content_layout.addWidget(lbl)
 
-        self._folder_entry = ctk.CTkEntry(
-            self._content, height=36, font=ctk.CTkFont(size=12))
-        self._folder_entry.insert(0, cfg["drive_folder_id"])
-        self._folder_entry.pack(fill="x")
+        self._folder_entry = QLineEdit(cfg["drive_folder_id"])
+        self._folder_entry.setFixedHeight(36)
+        self._content_layout.addWidget(self._folder_entry)
+
         self._add_fb()
 
     def _s3(self):
-        """Autorização Google Drive."""
         self._section("Autorização do Google Drive", "Permitir acesso à sua conta Google")
-        ctk.CTkLabel(
-            self._content,
-            wraplength=520, justify="left", font=ctk.CTkFont(size=12),
-            text=(
-                "Para enviar arquivos ao Google Drive, o aplicativo precisa da sua "
-                "autorização.\n\n"
-                "Clique em 'Autorizar com Google' — seu navegador será aberto para que "
-                "você faça login e aprove o acesso."
-            ),
-        ).pack(anchor="w", pady=(0, 18))
+
+        body = QLabel(
+            "Para enviar arquivos ao Google Drive, o aplicativo precisa da sua "
+            "autorização.\n\n"
+            "Clique em 'Autorizar com Google' — seu navegador será aberto para que "
+            "você faça login e aprove o acesso."
+        )
+        body.setStyleSheet("font-size: 12px;")
+        body.setWordWrap(True)
+        self._content_layout.addWidget(body)
+        self._content_layout.addSpacing(14)
 
         if self._authorized:
-            ctk.CTkLabel(self._content,
-                         text="✓  Google Drive autorizado com sucesso!",
-                         font=ctk.CTkFont(size=13, weight="bold"),
-                         text_color="#2fa84f").pack(anchor="w")
+            ok = QLabel("✓  Google Drive autorizado com sucesso!")
+            ok.setStyleSheet("font-size: 13px; font-weight: bold; color: #2fa84f;")
+            self._content_layout.addWidget(ok)
         else:
-            self._next_btn.configure(state="disabled")
-            self._auth_btn = ctk.CTkButton(
-                self._content, text="Autorizar com Google", width=210,
-                command=self._do_auth,
-            )
-            self._auth_btn.pack(anchor="w")
-            self._auth_lbl = ctk.CTkLabel(
-                self._content, text="Clique no botão para abrir o navegador.",
-                font=ctk.CTkFont(size=12), text_color="gray",
-            )
-            self._auth_lbl.pack(anchor="w", pady=(12, 0))
+            self._next_btn.setEnabled(False)
+            self._auth_btn = QPushButton("Autorizar com Google")
+            self._auth_btn.setFixedWidth(210)
+            self._auth_btn.clicked.connect(self._do_auth)
+            self._content_layout.addWidget(self._auth_btn)
+
+            self._auth_lbl = QLabel("Clique no botão para abrir o navegador.")
+            self._auth_lbl.setStyleSheet("color: gray; font-size: 12px;")
+            self._content_layout.addWidget(self._auth_lbl)
 
         self._add_fb()
 
     def _s4(self):
-        """Concluído."""
-        self._back_btn.configure(state="disabled")
-        ctk.CTkLabel(self._content, text="✓  Configuração concluída!",
-                     font=ctk.CTkFont(size=20, weight="bold"),
-                     text_color="#2fa84f").pack(anchor="w")
-        ctk.CTkLabel(self._content, text="O aplicativo está pronto para uso.",
-                     font=ctk.CTkFont(size=13), text_color="gray").pack(anchor="w", pady=(4, 22))
-        ctk.CTkLabel(
-            self._content,
-            wraplength=520, justify="left", font=ctk.CTkFont(size=13),
-            text=(
-                "Para baixar os áudios dos cultos:\n\n"
-                "  1. Informe a data do culto\n"
-                "  2. Clique em 'Processar'\n"
-                "  3. Selecione os vídeos desejados\n"
-                "  4. Aguarde o download e o envio ao Google Drive"
-            ),
-        ).pack(anchor="w")
+        self._back_btn.setEnabled(False)
 
-    # -----------------------------------------------------------------------
-    # Autorização OAuth
-    # -----------------------------------------------------------------------
+        ok = QLabel("✓  Configuração concluída!")
+        ok.setStyleSheet("font-size: 20px; font-weight: bold; color: #2fa84f;")
+        self._content_layout.addWidget(ok)
 
-    def _do_auth(self):
-        self._auth_btn.configure(state="disabled", text="Aguardando navegador...")
-        self._auth_lbl.configure(
-            text="Navegador aberto — complete a autorização e retorne aqui.",
-            text_color="white",
+        sub = QLabel("O aplicativo está pronto para uso.")
+        sub.setStyleSheet("color: gray; font-size: 13px;")
+        self._content_layout.addWidget(sub)
+        self._content_layout.addSpacing(18)
+
+        body = QLabel(
+            "Para baixar os áudios dos cultos:\n\n"
+            "  1. Informe a data do culto\n"
+            "  2. Clique em 'Processar'\n"
+            "  3. Selecione os vídeos desejados\n"
+            "  4. Aguarde o download e o envio ao Google Drive"
         )
+        body.setStyleSheet("font-size: 13px;")
+        body.setWordWrap(True)
+        self._content_layout.addWidget(body)
+
+    # -----------------------------------------------------------------------
+    # Autorização OAuth (thread-safe via sinal)
+    # -----------------------------------------------------------------------
+    def _do_auth(self):
+        if self._auth_btn:
+            self._auth_btn.setEnabled(False)
+            self._auth_btn.setText("Aguardando navegador...")
+        if self._auth_lbl:
+            self._auth_lbl.setText(
+                "Navegador aberto — complete a autorização e retorne aqui."
+            )
+            self._auth_lbl.setStyleSheet("color: white; font-size: 12px;")
         threading.Thread(target=self._auth_worker, daemon=True).start()
 
     def _auth_worker(self):
         try:
             baixar_audio.run_auth()
-            self._authorized = True
-            self.after(0, lambda: self._show_step(self._step))
+            self._auth_done_sig.emit(True, "")
         except Exception as e:
-            self.after(0, lambda: self._on_auth_error(str(e)))
+            self._auth_done_sig.emit(False, str(e))
 
-    def _on_auth_error(self, msg):
-        self._auth_btn.configure(state="normal", text="Tentar novamente")
-        self._auth_lbl.configure(text=f"Erro: {msg}", text_color="#e05252")
+    def _on_auth_result(self, success: bool, error_msg: str):
+        if success:
+            self._authorized = True
+            self._show_step(self._step)
+        else:
+            if self._auth_btn:
+                self._auth_btn.setEnabled(True)
+                self._auth_btn.setText("Tentar novamente")
+            if self._auth_lbl:
+                self._auth_lbl.setText(f"Erro: {error_msg}")
+                self._auth_lbl.setStyleSheet("color: #e05252; font-size: 12px;")
 
     # -----------------------------------------------------------------------
-    # Conclusão
+    # Conclusão e fechamento
     # -----------------------------------------------------------------------
-
     def _finish(self):
-        self.grab_release()
-        self.destroy()
+        self._finished = True
+        self.accept()
         if callable(self._on_complete):
             self._on_complete()
 
-    def _on_close(self):
-        # Se o wizard não foi concluído, encerra o app inteiro
-        if self._step < len(self._STEPS) - 1:
-            self.master.destroy()
-        else:
-            self._finish()
+    def closeEvent(self, event):
+        # Se fechado antes de concluir o wizard → encerra a janela pai (App)
+        if not self._finished and self._step < len(self._STEPS) - 1:
+            if self.parent() is not None:
+                self.parent().close()
+        event.accept()

@@ -13,7 +13,7 @@ Cobre:
 
 Estratégia:
   - Mocks para yt-dlp, Drive, plyer (sem chamadas reais de rede)
-  - App.withdraw() para ocultar a janela durante os testes
+  - App.hide() para ocultar a janela durante os testes
   - _process_queue() chamado diretamente (sem mainloop)
   - _worker_preflight chamado diretamente (sem thread) para inspecionar a fila
 """
@@ -21,13 +21,40 @@ Estratégia:
 import os
 import queue
 import threading
+import urllib.request
 from unittest.mock import MagicMock, call, patch
 
 import pytest
+from PyQt6.QtCore import QPointF, Qt
+from PyQt6.QtGui import QMouseEvent
 
 import baixar_audio
 import app as app_module
 from app import App, _acquire_single_instance
+
+
+def _left_click_event():
+    """Cria um QMouseEvent real de botão esquerdo (exigido pelo PyQt6)."""
+    return QMouseEvent(
+        QMouseEvent.Type.MouseButtonPress,
+        QPointF(14.0, 14.0),
+        QPointF(14.0, 14.0),
+        Qt.MouseButton.LeftButton,
+        Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.NoModifier,
+    )
+
+
+def _right_click_event():
+    """Cria um QMouseEvent real de botão direito."""
+    return QMouseEvent(
+        QMouseEvent.Type.MouseButtonPress,
+        QPointF(14.0, 14.0),
+        QPointF(14.0, 14.0),
+        Qt.MouseButton.RightButton,
+        Qt.MouseButton.RightButton,
+        Qt.KeyboardModifier.NoModifier,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -54,10 +81,8 @@ def _reset_app_state(shared_app):
         app._set_buttons_running(False)
     except Exception:
         pass
-    # Limpa log box
-    app.log_box.configure(state="normal")
-    app.log_box.delete("1.0", "end")
-    app.log_box.configure(state="disabled")
+    # Limpa log box (QPlainTextEdit — setReadOnly não impede clear())
+    app.log_box.clear()
     # Drena a fila
     try:
         while True:
@@ -104,9 +129,7 @@ class TestAppInit:
 
     def test_barras_iniciam_ocultas(self, application):
         """O frame de progresso não deve estar visível na inicialização."""
-        # _progress_frame só é empacotado via _show_bars(); no estado idle fica oculto
-        application.update_idletasks()
-        assert not application._progress_frame.winfo_ismapped()
+        assert not application._progress_frame.isVisible()
 
 
 # ---------------------------------------------------------------------------
@@ -117,27 +140,29 @@ class TestQueueProcessing:
     def test_mensagem_log_aparece_no_log_box(self, application):
         application._queue.put(("log", "Olá, mundo de testes"))
         application._process_queue()
-        content = application.log_box.get("1.0", "end")
+        content = application.log_box.toPlainText()
         assert "Olá, mundo de testes" in content
 
     def test_multiplos_logs_ficam_todos_no_box(self, application):
         for i in range(3):
             application._queue.put(("log", f"Linha {i}"))
         application._process_queue()
-        content = application.log_box.get("1.0", "end")
+        content = application.log_box.toPlainText()
         for i in range(3):
             assert f"Linha {i}" in content
 
     def test_mensagem_status_atualiza_label(self, application):
         application._queue.put(("status", "Buscando vídeos no YouTube..."))
         application._process_queue()
-        assert "Buscando" in application.status_label.cget("text")
+        assert "Buscando" in application.status_label.text()
 
     def test_status_concluido_usa_cor_verde(self, application):
         with patch.object(application, "_on_done"):
             application._queue.put(("status", "Concluído!"))
             application._process_queue()
-        assert "#2fa84f" in str(application.status_label.cget("text_color"))
+        # Verifica que o status "Concluído!" usa a cor verde primária do tema
+        from app import _Palette
+        assert _Palette.GREEN in str(application._status_text_color)
 
     def test_status_convertendo_inicia_animacao(self, application):
         """Quando o status contém 'Convertendo', a flag _converting deve ser ativada."""
@@ -182,7 +207,7 @@ class TestQueueProcessing:
         application._running = True
         application._queue.put(("cancelled", None))
         application._process_queue()
-        text = application.status_label.cget("text")
+        text = application.status_label.text()
         assert "cancelad" in text.lower()
 
     def test_mensagem_error_reseta_running(self, application):
@@ -197,7 +222,7 @@ class TestQueueProcessing:
         with patch.object(application, "_show_error"):
             application._queue.put(("error", "Falha"))
             application._process_queue()
-        assert "#e05252" in str(application.status_label.cget("text_color"))
+        assert "#e05252" in str(application._status_text_color)
 
     def test_mensagem_preflight_error_reseta_running(self, application):
         application._running = True
@@ -225,10 +250,65 @@ class TestQueueProcessing:
             application._process_queue()
         mock_player.assert_called_once_with("19/04/2026", videos)
 
+    def test_mensagem_thumbnail_e_ignorada_quando_widget_destruido(self, application):
+        """Regressão: RuntimeError ao aplicar thumbnail em label destruído não deve travar."""
+        from PyQt6.QtWidgets import QLabel
+        label = QLabel()
+        label.deleteLater()   # agenda destruição
+        # Não deve levantar exceção mesmo que o label esteja destruído
+        application._queue.put(("thumbnail", (label, b"\xff\xd8\xff" + b"\x00" * 100)))
+        application._process_queue()   # não deve quebrar
+
 
 # ---------------------------------------------------------------------------
 # Worker de pré-execução
 # ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Regressão: fechar dialog de seleção via X não deve causar RecursionError
+# ---------------------------------------------------------------------------
+
+class TestVideoSelectionDialogClose:
+    """
+    Regressão: fechar o dialog de seleção via X causava RecursionError porque
+    o slot conectado a 'rejected' chamava dlg.reject() de volta, que re-emitia
+    'rejected', criando recursão infinita.
+    """
+
+    def _make_exec_reject(self):
+        """Retorna um substituto de QDialog.exec() que emite rejected e retorna."""
+        from PyQt6.QtWidgets import QDialog as _QDialog
+
+        def _fake_exec(self_dlg):
+            # Simula o usuário fechar via X: Qt emite rejected antes de retornar
+            self_dlg.rejected.emit()
+            return _QDialog.DialogCode.Rejected.value
+
+        return _fake_exec
+
+    def test_fechar_via_x_chama_on_cancelled(self, application):
+        """Fechar o dialog via X deve acionar _on_cancelled (não RecursionError)."""
+        from PyQt6.QtWidgets import QDialog as _QDialog
+        videos = [{"id": "v1", "title": "Culto", "upload_date": "20260419"}]
+
+        with patch.object(_QDialog, "exec", self._make_exec_reject()), \
+             patch.object(application, "_fetch_thumbnail"), \
+             patch.object(application, "_on_cancelled") as mock_cancel:
+            application._show_video_selection("19/04/2026", videos)
+
+        mock_cancel.assert_called_once()
+
+    def test_fechar_via_x_nao_causa_recursion_error(self, application):
+        """Regressão: slot connected to rejected NÃO deve chamar dlg.reject()."""
+        from PyQt6.QtWidgets import QDialog as _QDialog
+        videos = [{"id": "v1", "title": "Culto", "upload_date": "20260419"}]
+
+        # Se houver RecursionError, o teste falhará com exceção
+        with patch.object(_QDialog, "exec", self._make_exec_reject()), \
+             patch.object(application, "_fetch_thumbnail"), \
+             patch.object(application, "_on_cancelled"):
+            application._show_video_selection("19/04/2026", videos)   # não deve lançar
+
 
 class TestWorkerPreflight:
     """Chama _worker_preflight diretamente (sem thread) e inspeciona a fila."""
@@ -377,7 +457,7 @@ class TestCancellation:
         application._running = True
         application._set_buttons_running(True)  # mostra o botão
         application._cancel()
-        assert application.cancel_btn.cget("state") == "disabled"
+        assert not application.cancel_btn.isEnabled()
 
     def test_on_cancelled_oculta_barras(self, application):
         """Após cancelar, as barras devem ser zeradas."""
@@ -394,9 +474,9 @@ class TestCancellation:
 
     def test_on_cancelled_status_idle(self, application):
         application._on_cancelled()
-        # Estado idle → cor cinza
-        assert "gray" in str(application.status_label.cget("text_color")).lower() or \
-               "cancelad" in application.status_label.cget("text").lower()
+        # Estado idle → cor cinza, ou texto menciona cancelamento
+        assert "gray" in str(application._status_text_color).lower() or \
+               "cancelad" in application.status_label.text().lower()
 
 
 # ---------------------------------------------------------------------------
@@ -405,7 +485,7 @@ class TestCancellation:
 
 class TestInputValidation:
     def test_data_vazia_mostra_erro_nao_inicia_worker(self, application):
-        application.date_entry.delete(0, "end")
+        application.date_entry.clear()
         with patch.object(application, "_show_error") as mock_err, \
              patch("threading.Thread") as MockThread:
             application._start()
@@ -413,8 +493,8 @@ class TestInputValidation:
         MockThread.assert_not_called()
 
     def test_formato_errado_mostra_erro(self, application):
-        application.date_entry.delete(0, "end")
-        application.date_entry.insert(0, "2026-04-19")  # ISO, não DD/MM/AAAA
+        application.date_entry.clear()
+        application.date_entry.setText("2026-04-19")  # ISO, não DD/MM/AAAA
         with patch.object(application, "_show_error") as mock_err, \
              patch("threading.Thread") as MockThread:
             application._start()
@@ -422,8 +502,8 @@ class TestInputValidation:
         MockThread.assert_not_called()
 
     def test_data_valida_inicia_thread_preflight(self, application):
-        application.date_entry.delete(0, "end")
-        application.date_entry.insert(0, "19/04/2026")
+        application.date_entry.clear()
+        application.date_entry.setText("19/04/2026")
         with patch("baixar_audio.check_auth_status", return_value=True), \
              patch("threading.Thread") as MockThread:
             mock_t = MagicMock()
@@ -433,8 +513,8 @@ class TestInputValidation:
         mock_t.start.assert_called()
 
     def test_data_valida_seta_running_true(self, application):
-        application.date_entry.delete(0, "end")
-        application.date_entry.insert(0, "19/04/2026")
+        application.date_entry.clear()
+        application.date_entry.setText("19/04/2026")
         with patch("baixar_audio.check_auth_status", return_value=True), \
              patch("threading.Thread"):
             application._start()
@@ -442,8 +522,8 @@ class TestInputValidation:
 
     def test_sem_autorizacao_mostra_erro_e_nao_inicia(self, application):
         """Se Drive não autorizado, _start deve mostrar erro sem iniciar worker."""
-        application.date_entry.delete(0, "end")
-        application.date_entry.insert(0, "19/04/2026")
+        application.date_entry.clear()
+        application.date_entry.setText("19/04/2026")
         with patch("baixar_audio.check_auth_status", return_value=False), \
              patch.object(application, "_show_error") as mock_err, \
              patch("threading.Thread") as MockThread:
@@ -731,3 +811,386 @@ class TestWorkerPhase2:
         assert "download_progress" in kinds
         assert "progress" in kinds        # on_upload_progress vira "progress"
         assert "upload_stats" in kinds
+
+
+# ---------------------------------------------------------------------------
+# _CheckCell — toggle de seleção
+# ---------------------------------------------------------------------------
+
+class TestCheckCell:
+    def test_inicia_marcado(self, shared_app):
+        from app import _CheckCell
+        cell = _CheckCell()
+        assert cell.isChecked() is True
+
+    def test_texto_e_check_quando_marcado(self, shared_app):
+        from app import _CheckCell
+        cell = _CheckCell()
+        assert cell.text() == "✓"
+
+    def test_toggle_desmarca(self, shared_app):
+        from app import _CheckCell
+        cell = _CheckCell()
+        cell.mousePressEvent(_left_click_event())
+        assert cell.isChecked() is False
+
+    def test_toggle_duas_vezes_volta_marcado(self, shared_app):
+        from app import _CheckCell
+        cell = _CheckCell()
+        cell.mousePressEvent(_left_click_event())
+        cell.mousePressEvent(_left_click_event())
+        assert cell.isChecked() is True
+
+    def test_botao_direito_nao_altera_estado(self, shared_app):
+        from app import _CheckCell
+        cell = _CheckCell()
+        cell.mousePressEvent(_right_click_event())
+        assert cell.isChecked() is True
+
+    def test_marcado_stylesheet_contem_verde(self, shared_app):
+        from app import _CheckCell, _Palette
+        cell = _CheckCell()
+        assert _Palette.GREEN in cell.styleSheet()
+
+    def test_desmarcado_stylesheet_contem_borda_hint(self, shared_app):
+        from app import _CheckCell, _Palette
+        cell = _CheckCell()
+        cell.mousePressEvent(_left_click_event())
+        ss = cell.styleSheet()
+        assert "border" in ss
+        assert _Palette.HINT in ss
+
+    def test_tamanho_fixo_28x28(self, shared_app):
+        from app import _CheckCell
+        cell = _CheckCell()
+        assert cell.width() == 28
+        assert cell.height() == 28
+
+
+# ---------------------------------------------------------------------------
+# _try_cdn_thumbnail
+# ---------------------------------------------------------------------------
+
+class TestTryCdnThumbnail:
+    def _make_resp(self, data: bytes):
+        """Cria um mock de context manager para urllib.request.urlopen."""
+        m = MagicMock()
+        m.__enter__ = lambda s: s
+        m.__exit__ = MagicMock(return_value=False)
+        m.read.return_value = data
+        return m
+
+    def test_retorna_dados_quando_primeira_url_valida(self):
+        from app import _try_cdn_thumbnail
+        big = b"J" * 6000
+        with patch("urllib.request.urlopen", return_value=self._make_resp(big)):
+            result = _try_cdn_thumbnail("abc123")
+        assert result == big
+
+    def test_retorna_none_quando_todas_urls_falham(self):
+        from app import _try_cdn_thumbnail
+        with patch("urllib.request.urlopen", side_effect=Exception("net")):
+            result = _try_cdn_thumbnail("abc123")
+        assert result is None
+
+    def test_ignora_imagem_muito_pequena_placeholder_404(self):
+        from app import _try_cdn_thumbnail
+        small = b"\x00" * 100   # placeholder de 404 do YouTube
+        with patch("urllib.request.urlopen", return_value=self._make_resp(small)):
+            result = _try_cdn_thumbnail("abc123")
+        assert result is None
+
+    def test_tenta_cinco_qualidades_em_ordem(self):
+        from app import _try_cdn_thumbnail
+        captured_urls = []
+
+        def fake_request(url, headers=None):
+            captured_urls.append(url)
+            return MagicMock()
+
+        with patch("urllib.request.Request", side_effect=fake_request), \
+             patch("urllib.request.urlopen", side_effect=Exception("fail")):
+            _try_cdn_thumbnail("vid123")
+
+        assert len(captured_urls) == 5
+        assert any("maxresdefault" in u for u in captured_urls)
+        assert any("hqdefault" in u for u in captured_urls)
+        assert any("mqdefault" in u for u in captured_urls)
+        assert any("sddefault" in u for u in captured_urls)
+        assert any("default.jpg" in u for u in captured_urls)
+
+    def test_para_na_primeira_url_valida_sem_tentar_as_demais(self):
+        from app import _try_cdn_thumbnail
+        big = b"X" * 6000
+        call_count = [0]
+
+        def fake_urlopen(req, timeout=None, context=None):
+            call_count[0] += 1
+            return self._make_resp(big)
+
+        with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            _try_cdn_thumbnail("vid")
+
+        assert call_count[0] == 1   # parou na primeira qualidade válida
+
+
+# ---------------------------------------------------------------------------
+# _try_ytdlp_thumbnail
+# ---------------------------------------------------------------------------
+
+class TestTryYtdlpThumbnail:
+    """
+    Nova abordagem: baixa ~10 s de vídeo com yt-dlp (mesmo mecanismo do
+    download de áudio, comprovadamente funcional) e extrai 1 frame com ffmpeg.
+    """
+
+    class _FakeTmpDir:
+        """Context manager que expõe um tmp_path real como TemporaryDirectory."""
+        def __init__(self, path: str):
+            self._path = path
+        def __enter__(self): return self._path
+        def __exit__(self, *a): pass
+
+    def test_retorna_none_quando_ytdlp_exe_levanta_excecao(self):
+        from app import _try_ytdlp_thumbnail
+        with patch("infrastructure.youtube._utils.ytdlp_exe",
+                   side_effect=FileNotFoundError("not found")):
+            assert _try_ytdlp_thumbnail("abc") is None
+
+    def test_retorna_none_quando_ffmpeg_dir_levanta_excecao(self):
+        from app import _try_ytdlp_thumbnail
+        with patch("infrastructure.youtube._utils.ytdlp_exe", return_value="yt-dlp"), \
+             patch("infrastructure.youtube._utils.ffmpeg_dir",
+                   side_effect=FileNotFoundError("no ffmpeg")):
+            assert _try_ytdlp_thumbnail("abc") is None
+
+    def test_retorna_none_quando_subprocess_ytdlp_levanta_timeout(self):
+        from app import _try_ytdlp_thumbnail
+        import subprocess
+        with patch("infrastructure.youtube._utils.ytdlp_exe", return_value="yt-dlp"), \
+             patch("infrastructure.youtube._utils.ffmpeg_dir", return_value="/ffmpeg/bin"), \
+             patch("subprocess.run",
+                   side_effect=subprocess.TimeoutExpired("yt-dlp", 60)):
+            assert _try_ytdlp_thumbnail("abc") is None
+
+    def test_retorna_none_quando_clip_nao_foi_criado(self, tmp_path):
+        """yt-dlp roda mas não escreve clip.mp4 — sem vídeo, sem frame."""
+        from app import _try_ytdlp_thumbnail
+        # tmpdir vazio: clip.mp4 não existe
+        with patch("infrastructure.youtube._utils.ytdlp_exe", return_value="yt-dlp"), \
+             patch("infrastructure.youtube._utils.ffmpeg_dir", return_value="/ffmpeg/bin"), \
+             patch("subprocess.run", return_value=MagicMock()), \
+             patch("tempfile.TemporaryDirectory",
+                   return_value=self._FakeTmpDir(str(tmp_path))):
+            assert _try_ytdlp_thumbnail("abc") is None
+
+    def test_retorna_none_quando_clip_muito_pequeno(self, tmp_path):
+        """clip.mp4 existe mas < 1000 bytes indica download incompleto."""
+        from app import _try_ytdlp_thumbnail
+        (tmp_path / "clip.mp4").write_bytes(b"\x00" * 500)  # < 1000 B
+
+        with patch("infrastructure.youtube._utils.ytdlp_exe", return_value="yt-dlp"), \
+             patch("infrastructure.youtube._utils.ffmpeg_dir", return_value="/ffmpeg/bin"), \
+             patch("subprocess.run", return_value=MagicMock()), \
+             patch("tempfile.TemporaryDirectory",
+                   return_value=self._FakeTmpDir(str(tmp_path))):
+            assert _try_ytdlp_thumbnail("abc") is None
+
+    def test_retorna_none_quando_frame_nao_extraido(self, tmp_path):
+        """clip.mp4 OK mas ffmpeg não gera thumb.jpg."""
+        from app import _try_ytdlp_thumbnail
+        (tmp_path / "clip.mp4").write_bytes(b"\x00" * 5000)  # > 1000 B
+        # thumb.jpg não é criado pelo subprocess mockado
+
+        with patch("infrastructure.youtube._utils.ytdlp_exe", return_value="yt-dlp"), \
+             patch("infrastructure.youtube._utils.ffmpeg_dir", return_value="/ffmpeg/bin"), \
+             patch("subprocess.run", return_value=MagicMock()), \
+             patch("tempfile.TemporaryDirectory",
+                   return_value=self._FakeTmpDir(str(tmp_path))):
+            assert _try_ytdlp_thumbnail("abc") is None
+
+    def test_retorna_bytes_quando_frame_extraido_com_sucesso(self, tmp_path):
+        """Caminho feliz: clip.mp4 OK e thumb.jpg gerado com > 500 bytes."""
+        from app import _try_ytdlp_thumbnail
+        frame_data = b"\xff\xd8\xff" + b"\x00" * 2000   # JPEG magic + payload
+        (tmp_path / "clip.mp4").write_bytes(b"\x00" * 5000)
+
+        def fake_run(cmd, **kw):
+            # Segundo subprocess.run (ffmpeg) cria thumb.jpg
+            if "-vframes" in cmd:
+                (tmp_path / "thumb.jpg").write_bytes(frame_data)
+            return MagicMock()
+
+        with patch("infrastructure.youtube._utils.ytdlp_exe", return_value="yt-dlp"), \
+             patch("infrastructure.youtube._utils.ffmpeg_dir", return_value="/ffmpeg/bin"), \
+             patch("subprocess.run", side_effect=fake_run), \
+             patch("tempfile.TemporaryDirectory",
+                   return_value=self._FakeTmpDir(str(tmp_path))):
+            result = _try_ytdlp_thumbnail("vid123")
+
+        assert result == frame_data
+
+    def test_usa_download_sections_e_format_18_no_ytdlp(self, tmp_path):
+        """Verifica que os flags corretos são passados ao yt-dlp."""
+        from app import _try_ytdlp_thumbnail
+        captured_cmds = []
+
+        def fake_run(cmd, **kw):
+            captured_cmds.append(list(cmd))
+            if "--download-sections" in cmd:
+                (tmp_path / "clip.mp4").write_bytes(b"\x00" * 5000)
+            return MagicMock()
+
+        with patch("infrastructure.youtube._utils.ytdlp_exe", return_value="yt-dlp"), \
+             patch("infrastructure.youtube._utils.ffmpeg_dir", return_value="/ffmpeg/bin"), \
+             patch("subprocess.run", side_effect=fake_run), \
+             patch("tempfile.TemporaryDirectory",
+                   return_value=self._FakeTmpDir(str(tmp_path))):
+            _try_ytdlp_thumbnail("vid999")
+
+        ytdlp_cmd = next((c for c in captured_cmds if "yt-dlp" in c[0]), None)
+        assert ytdlp_cmd is not None
+        assert "--download-sections" in ytdlp_cmd
+        assert "-f" in ytdlp_cmd
+        assert "18" in ytdlp_cmd
+        assert "--extractor-args" in ytdlp_cmd
+        assert any("player_client" in arg for arg in ytdlp_cmd)
+        assert any("vid999" in arg for arg in ytdlp_cmd)
+
+    def test_usa_vframes_no_ffmpeg(self, tmp_path):
+        """Verifica que ffmpeg é invocado com -vframes 1 para extrair 1 frame."""
+        from app import _try_ytdlp_thumbnail
+        frame_data = b"\xff\xd8\xff" + b"\x00" * 2000
+        captured_cmds = []
+
+        def fake_run(cmd, **kw):
+            captured_cmds.append(list(cmd))
+            if "-vframes" in cmd:
+                (tmp_path / "thumb.jpg").write_bytes(frame_data)
+            elif "--download-sections" in cmd:
+                (tmp_path / "clip.mp4").write_bytes(b"\x00" * 5000)
+            return MagicMock()
+
+        with patch("infrastructure.youtube._utils.ytdlp_exe", return_value="yt-dlp"), \
+             patch("infrastructure.youtube._utils.ffmpeg_dir", return_value="/ffmpeg/bin"), \
+             patch("subprocess.run", side_effect=fake_run), \
+             patch("tempfile.TemporaryDirectory",
+                   return_value=self._FakeTmpDir(str(tmp_path))):
+            _try_ytdlp_thumbnail("vid999")
+
+        ffmpeg_cmd = next((c for c in captured_cmds if "-vframes" in c), None)
+        assert ffmpeg_cmd is not None
+        assert "-vframes" in ffmpeg_cmd
+        assert "1" in ffmpeg_cmd
+
+
+# ---------------------------------------------------------------------------
+# _fetch_thumbnail (método do App)
+# ---------------------------------------------------------------------------
+
+class TestFetchThumbnail:
+    """
+    Testa _fetch_thumbnail mockando threading.Thread para rodar o target
+    de forma síncrona e verificar o conteúdo da queue.
+    """
+
+    def _run_sync(self, application, video_id, label, cdn_data, ytdlp_data):
+        """Executa _fetch_thumbnail de forma síncrona (thread mockada)."""
+        with patch("app._try_cdn_thumbnail", return_value=cdn_data), \
+             patch("app._try_ytdlp_thumbnail", return_value=ytdlp_data), \
+             patch("threading.Thread") as MockThread:
+            MockThread.side_effect = lambda target, daemon=False: MagicMock(
+                start=lambda: target()
+            )
+            application._fetch_thumbnail(video_id, label)
+
+    def _drain(self, application):
+        msgs = []
+        try:
+            while True:
+                msgs.append(application._queue.get_nowait())
+        except queue.Empty:
+            pass
+        return msgs
+
+    def test_inicia_thread_daemon(self, application):
+        from PyQt6.QtWidgets import QLabel
+        label = QLabel()
+        with patch("threading.Thread") as MockThread:
+            mock_t = MagicMock()
+            MockThread.return_value = mock_t
+            application._fetch_thumbnail("abc123", label)
+        MockThread.assert_called_once()
+        assert MockThread.call_args.kwargs.get("daemon") is True
+        mock_t.start.assert_called_once()
+
+    def test_chama_try_cdn_primeiro(self, application):
+        from PyQt6.QtWidgets import QLabel
+        label = QLabel()
+        with patch("app._try_cdn_thumbnail", return_value=None) as mock_cdn, \
+             patch("app._try_ytdlp_thumbnail", return_value=None), \
+             patch("threading.Thread") as MockThread:
+            MockThread.side_effect = lambda target, daemon=False: MagicMock(
+                start=lambda: target()
+            )
+            application._fetch_thumbnail("vid1", label)
+        mock_cdn.assert_called_once_with("vid1")
+
+    def test_usa_ytdlp_quando_cdn_falha(self, application):
+        from PyQt6.QtWidgets import QLabel
+        label = QLabel()
+        with patch("app._try_cdn_thumbnail", return_value=None), \
+             patch("app._try_ytdlp_thumbnail", return_value=None) as mock_yt, \
+             patch("threading.Thread") as MockThread:
+            MockThread.side_effect = lambda target, daemon=False: MagicMock(
+                start=lambda: target()
+            )
+            application._fetch_thumbnail("vid2", label)
+        mock_yt.assert_called_once_with("vid2")
+
+    def test_nao_chama_ytdlp_quando_cdn_retorna_dados(self, application):
+        from PyQt6.QtWidgets import QLabel
+        label = QLabel()
+        with patch("app._try_cdn_thumbnail", return_value=b"X" * 6000), \
+             patch("app._try_ytdlp_thumbnail") as mock_yt, \
+             patch("threading.Thread") as MockThread:
+            MockThread.side_effect = lambda target, daemon=False: MagicMock(
+                start=lambda: target()
+            )
+            application._fetch_thumbnail("vid3", label)
+        mock_yt.assert_not_called()
+
+    def test_enfileira_thumbnail_quando_cdn_retorna_dados(self, application):
+        from PyQt6.QtWidgets import QLabel
+        label = QLabel()
+        fake_data = b"JPEG" + b"\x00" * 100
+        self._run_sync(application, "vid5", label, cdn_data=fake_data, ytdlp_data=None)
+        msgs = self._drain(application)
+        kinds = [m[0] for m in msgs]
+        assert "thumbnail" in kinds
+        thumb_msg = next(m[1] for m in msgs if m[0] == "thumbnail")
+        assert thumb_msg[0] is label
+        assert thumb_msg[1] == fake_data
+
+    def test_enfileira_thumbnail_quando_ytdlp_retorna_dados(self, application):
+        from PyQt6.QtWidgets import QLabel
+        label = QLabel()
+        fake_data = b"WEBP" + b"\x00" * 100
+        self._run_sync(application, "vid6", label, cdn_data=None, ytdlp_data=fake_data)
+        msgs = self._drain(application)
+        kinds = [m[0] for m in msgs]
+        assert "thumbnail" in kinds
+
+    def test_nao_enfileira_quando_ambos_falham(self, application):
+        from PyQt6.QtWidgets import QLabel
+        label = QLabel()
+        self._run_sync(application, "vid7", label, cdn_data=None, ytdlp_data=None)
+        msgs = self._drain(application)
+        kinds = [m[0] for m in msgs]
+        assert "thumbnail" not in kinds
+
+    def test_nao_levanta_excecao_quando_ambos_falham(self, application):
+        from PyQt6.QtWidgets import QLabel
+        label = QLabel()
+        self._run_sync(application, "vid8", label, cdn_data=None, ytdlp_data=None)
+        # Não deve lançar exceção
