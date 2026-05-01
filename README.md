@@ -66,7 +66,7 @@ python app.py
 1. Informe a data do culto (DD/MM/AAAA) ou use o seletor de calendário 📅
 2. Clique em **Processar**
 3. Selecione os vídeos desejados no popup e clique em **Prosseguir**
-4. O **player** abre com o vídeo no YouTube — assista e clique **◀** para marcar o início e o fim da pregação
+4. O **player** abre com o vídeo no YouTube — assista e clique **⏱ Marcar** para capturar o tempo de início e fim da pregação
 5. Clique em **Confirmar trecho** (ou **Usar vídeo completo** para enviar sem corte)
 6. Acompanhe o progresso pelas barras de **Download**, **Conversão** e **Upload**
 7. Uma notificação desktop é exibida ao concluir

@@ -19,7 +19,7 @@ import sys
 
 sys.stdout.reconfigure(encoding="utf-8")
 
-from PyQt6.QtCore import QTimer, QUrl
+from PyQt6.QtCore import Qt, QTimer, QUrl
 from PyQt6.QtWebEngineCore import QWebEngineProfile, QWebEngineSettings
 from PyQt6.QtWebEngineWidgets import QWebEngineView
 from PyQt6.QtWidgets import (
@@ -36,48 +36,105 @@ from PyQt6.QtWidgets import (
 )
 
 # ---------------------------------------------------------------------------
-# Paleta de cores
+# Paleta — alinhada ao tema escuro do app principal (app.py / _Palette)
 # ---------------------------------------------------------------------------
-_BG       = "#1e1e1e"
-_PANEL    = "#2b2b2b"
-_TEXT     = "#e0e0e0"
-_GRAY     = "#888888"
-_GREEN    = "#2fa84f"
-_RED      = "#e05252"
-_YELLOW   = "#e0a020"
-_BLUE     = "#1565c0"
-_PURPLE   = "#6a1b9a"
-_BTN_DARK = "#3a3a3a"
+_BG          = "#1e1e1e"
+_PANEL       = "#272727"
+_CARD        = "#222222"
+_INPUT       = "#2c2c2c"
+_BORDER      = "#3a3a3a"
+_SEP         = "#2c2c2c"
+_TEXT        = "#f0f0f0"
+_TEXT_SUB    = "#888"
+_TEXT_MUTED  = "#666"
+
+_GREEN       = "#2ea84f"
+_GREEN_HOVER = "#37c15e"
+_RED         = "#c0392b"
+_RED_HOVER   = "#e74c3c"
+_YELLOW      = "#e0a020"
+_GRAY_BTN    = "#3a3a3a"
+_GRAY_HOV    = "#4a4a4a"
+_BTN_DIS     = "#2a2a2a"
+_BTN_DIS_T   = "#555"
 
 _QSS = f"""
-QMainWindow, QWidget {{ background: {_BG}; color: {_TEXT}; }}
-QFrame#panel {{ background: {_PANEL}; }}
-QLabel {{ color: {_TEXT}; }}
-QLineEdit {{
-    background: #3c3c3c; color: {_TEXT}; border: 1px solid #555;
-    border-radius: 3px; padding: 2px 6px; font-family: monospace; font-size: 13px;
+QMainWindow, QWidget {{
+    background-color: {_BG};
+    color: {_TEXT};
+    font-family: 'Segoe UI', Arial, sans-serif;
+    font-size: 13px;
 }}
-QLineEdit:focus {{ border: 1px solid #1e88e5; }}
+QLabel {{ background: transparent; color: {_TEXT}; }}
+
+/* ── Cartões e separadores ── */
+QFrame#panel    {{ background: {_PANEL}; border-top: 1px solid {_SEP}; }}
+QFrame#card     {{ background: {_CARD}; border-radius: 8px; }}
+QFrame#sep      {{ background: {_SEP}; }}
+QFrame#vsep     {{ background: {_BORDER}; }}
+
+/* ── Labels semânticas ── */
+QLabel#title    {{ color: {_TEXT}; font-size: 14px; font-weight: bold; }}
+QLabel#counter  {{ color: {_TEXT_SUB}; font-size: 12px; }}
+QLabel#caption  {{
+    color: {_TEXT_SUB}; font-size: 10px; font-weight: bold;
+    letter-spacing: 1px;
+}}
+QLabel#duration {{
+    color: {_TEXT}; font-family: 'Consolas', 'Courier New', monospace;
+    font-size: 22px; font-weight: bold;
+}}
+QLabel#status   {{ color: {_TEXT_SUB}; font-size: 12px; }}
+QLabel#dot      {{ font-size: 13px; }}
+
+/* ── Campos de tempo (grandes, monoespaçados) ── */
+QLineEdit#time {{
+    background: {_INPUT}; color: {_TEXT};
+    border: 1px solid {_BORDER}; border-radius: 6px;
+    padding: 6px 10px;
+    font-family: 'Consolas', 'Courier New', monospace;
+    font-size: 22px; font-weight: bold;
+    selection-background-color: {_GREEN};
+}}
+QLineEdit#time:focus {{ border: 1px solid {_GREEN}; }}
+
+/* ── Botão padrão (verde primário) ── */
 QPushButton {{
-    background: {_BTN_DARK}; color: {_TEXT}; border: none;
-    border-radius: 4px; padding: 5px 14px; font-size: 13px;
+    background: {_GREEN}; color: #fff;
+    border: none; border-radius: 5px;
+    padding: 7px 18px; font-size: 13px; font-weight: bold;
 }}
-QPushButton:hover   {{ background: #4a4a4a; }}
-QPushButton:disabled {{ background: #2a2a2a; color: #555; }}
-QPushButton#btnConfirm {{
-    background: {_BLUE}; color: #fff; font-weight: bold; padding: 5px 18px;
+QPushButton:hover    {{ background: {_GREEN_HOVER}; }}
+QPushButton:disabled {{ background: {_BTN_DIS}; color: {_BTN_DIS_T}; }}
+
+/* ── Botão "marcar tempo" (cinza, captura vídeo atual) ── */
+QPushButton#mark {{
+    background: {_GRAY_BTN}; color: {_TEXT};
+    font-size: 13px; font-weight: bold;
+    padding: 0 14px; min-width: 96px; min-height: 42px;
+    border-radius: 6px;
+    text-align: center;
 }}
-QPushButton#btnConfirm:hover    {{ background: #1976d2; }}
-QPushButton#btnConfirm:disabled {{ background: #1a3a5c; color: #555; }}
-QPushButton#btnFull  {{ background: #37474f; color: {_TEXT}; }}
-QPushButton#btnFull:hover    {{ background: #455a64; }}
-QPushButton#btnFull:disabled {{ background: #2a2a2a; color: #555; }}
-QPushButton#btnCancel {{
-    background: transparent; color: #aaa; border: 1px solid #555;
-    border-radius: 4px; padding: 5px 10px;
+QPushButton#mark:hover    {{ background: {_GRAY_HOV}; }}
+QPushButton#mark:disabled {{ background: {_BTN_DIS}; color: {_BTN_DIS_T}; }}
+
+/* ── Botão secundário cinza ── */
+QPushButton#gray {{
+    background: {_GRAY_BTN}; color: {_TEXT};
+    font-weight: normal;
 }}
-QPushButton#btnCancel:hover {{ background: #3a3a3a; color: {_TEXT}; }}
-QFrame#sep {{ background: #444; }}
+QPushButton#gray:hover    {{ background: {_GRAY_HOV}; }}
+QPushButton#gray:disabled {{ background: {_BTN_DIS}; color: {_BTN_DIS_T}; }}
+
+/* ── Botão cancelar (vermelho transparente, ícone) ── */
+QPushButton#cancel {{
+    background: transparent; color: {_TEXT_SUB};
+    border: 1px solid {_BORDER}; border-radius: 5px;
+    padding: 7px 12px; font-weight: normal;
+}}
+QPushButton#cancel:hover {{
+    background: {_RED}; color: #fff; border: 1px solid {_RED};
+}}
 """
 
 
@@ -147,6 +204,52 @@ _OVERLAY_JS = """
 
 _UPDATE_INFO_JS = "if(window._ipm_info) window._ipm_info.textContent = {!r};"
 
+_HIDE_CHAT_JS = """
+(function tryHideChat(n) {
+    var frame = document.querySelector('ytd-live-chat-frame');
+    if (frame) {
+        if (frame.hasAttribute('collapsed')) return;          // já fechado
+        var btn = frame.querySelector('#show-hide-button button');
+        if (btn) { try { btn.click(); } catch (e) {} return; }
+    }
+    if (n > 0) setTimeout(function() { tryHideChat(n - 1); }, 700);
+})(25);
+"""
+
+
+# ---------------------------------------------------------------------------
+# Helpers de construção de widgets
+# ---------------------------------------------------------------------------
+
+def _vsep() -> QFrame:
+    """Separador vertical fino para dividir blocos no card."""
+    f = QFrame()
+    f.setObjectName("vsep")
+    f.setFrameShape(QFrame.Shape.VLine)
+    f.setFixedWidth(1)
+    return f
+
+
+def _time_block(caption: str, entry: QLineEdit, mark_btn: QPushButton) -> QWidget:
+    """Bloco vertical: label de seção + entry monoespaçado + botão de marcar."""
+    container = QWidget()
+    container.setStyleSheet("background: transparent;")
+    v = QVBoxLayout(container)
+    v.setContentsMargins(0, 0, 0, 0)
+    v.setSpacing(6)
+
+    cap = QLabel(caption)
+    cap.setObjectName("caption")
+    v.addWidget(cap)
+
+    row = QHBoxLayout()
+    row.setSpacing(8)
+    row.addWidget(entry)
+    row.addWidget(mark_btn)
+    v.addLayout(row)
+
+    return container
+
 
 # ---------------------------------------------------------------------------
 # Janela principal
@@ -165,7 +268,7 @@ class _PlayerWindow(QMainWindow):
 
         self.setWindowTitle("IPMadalena — Seleção de Trecho")
         self.resize(1200, 820)
-        self.setMinimumSize(900, 600)
+        self.setMinimumSize(960, 640)
         self.setStyleSheet(_QSS)
 
         # user-agent Chrome para evitar bloqueios do YouTube
@@ -196,96 +299,113 @@ class _PlayerWindow(QMainWindow):
         panel.setObjectName("panel")
         panel.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         panel_layout = QVBoxLayout(panel)
-        panel_layout.setContentsMargins(12, 6, 12, 8)
-        panel_layout.setSpacing(4)
+        panel_layout.setContentsMargins(20, 14, 20, 14)
+        panel_layout.setSpacing(12)
 
-        # separador
-        sep = QFrame()
-        sep.setObjectName("sep")
-        sep.setFrameShape(QFrame.Shape.HLine)
-        sep.setFixedHeight(1)
-        panel_layout.addWidget(sep)
-
-        # linha 1: título + contador
-        row1 = QHBoxLayout()
+        # ── linha 1: título + contador ──────────────────────────────────────
+        header_row = QHBoxLayout()
         self._title_lbl = QLabel("")
-        self._title_lbl.setStyleSheet("font-weight:bold; font-size:13px;")
+        self._title_lbl.setObjectName("title")
+        self._title_lbl.setWordWrap(False)
+        self._title_lbl.setSizePolicy(QSizePolicy.Policy.Expanding,
+                                      QSizePolicy.Policy.Preferred)
         self._counter_lbl = QLabel("")
-        self._counter_lbl.setStyleSheet(f"color:{_GRAY}; font-size:12px;")
-        row1.addWidget(self._title_lbl, stretch=1)
-        row1.addWidget(self._counter_lbl)
-        panel_layout.addLayout(row1)
+        self._counter_lbl.setObjectName("counter")
+        header_row.addWidget(self._title_lbl, stretch=1)
+        header_row.addWidget(self._counter_lbl)
+        panel_layout.addLayout(header_row)
 
-        # linha 2: controles de tempo + botões de ação
-        row2 = QHBoxLayout()
-        row2.setSpacing(6)
+        # ── card de marcação de trecho ──────────────────────────────────────
+        card = QFrame()
+        card.setObjectName("card")
+        card_layout = QHBoxLayout(card)
+        card_layout.setContentsMargins(18, 14, 18, 14)
+        card_layout.setSpacing(20)
 
         # Início
-        row2.addWidget(QLabel("Início:"))
         self._start_entry = QLineEdit("00:00:00")
-        self._start_entry.setFixedWidth(88)
+        self._start_entry.setObjectName("time")
+        self._start_entry.setFixedWidth(150)
+        self._start_entry.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._start_entry.textChanged.connect(self._update_duration)
-        row2.addWidget(self._start_entry)
 
-        self._btn_mark_start = QPushButton("◄")
-        self._btn_mark_start.setFixedWidth(34)
+        self._btn_mark_start = QPushButton("⏱  Marcar")
+        self._btn_mark_start.setObjectName("mark")
         self._btn_mark_start.setToolTip("Capturar tempo atual do vídeo como Início")
         self._btn_mark_start.setEnabled(False)
+        self._btn_mark_start.setCursor(Qt.CursorShape.PointingHandCursor)
         self._btn_mark_start.clicked.connect(lambda: self._mark("start"))
-        row2.addWidget(self._btn_mark_start)
 
-        row2.addSpacing(12)
+        card_layout.addWidget(_time_block("INÍCIO", self._start_entry, self._btn_mark_start))
+        card_layout.addWidget(_vsep())
 
         # Fim
-        row2.addWidget(QLabel("Fim:"))
         self._end_entry = QLineEdit("00:00:00")
-        self._end_entry.setFixedWidth(88)
+        self._end_entry.setObjectName("time")
+        self._end_entry.setFixedWidth(150)
+        self._end_entry.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._end_entry.textChanged.connect(self._update_duration)
-        row2.addWidget(self._end_entry)
 
-        self._btn_mark_end = QPushButton("◄")
-        self._btn_mark_end.setFixedWidth(34)
+        self._btn_mark_end = QPushButton("⏱  Marcar")
+        self._btn_mark_end.setObjectName("mark")
         self._btn_mark_end.setToolTip("Capturar tempo atual do vídeo como Fim")
         self._btn_mark_end.setEnabled(False)
+        self._btn_mark_end.setCursor(Qt.CursorShape.PointingHandCursor)
         self._btn_mark_end.clicked.connect(lambda: self._mark("end"))
-        row2.addWidget(self._btn_mark_end)
 
-        row2.addSpacing(12)
+        card_layout.addWidget(_time_block("FIM", self._end_entry, self._btn_mark_end))
+        card_layout.addWidget(_vsep())
 
         # Duração
-        row2.addWidget(QLabel("Dur:"))
+        dur_box = QWidget()
+        dur_box.setStyleSheet("background: transparent;")
+        dur_v = QVBoxLayout(dur_box)
+        dur_v.setContentsMargins(0, 0, 0, 0)
+        dur_v.setSpacing(6)
+        dur_cap = QLabel("DURAÇÃO")
+        dur_cap.setObjectName("caption")
         self._dur_lbl = QLabel("--:--:--")
-        self._dur_lbl.setStyleSheet("font-family:monospace; font-weight:bold; font-size:13px;")
-        row2.addWidget(self._dur_lbl)
+        self._dur_lbl.setObjectName("duration")
+        self._dur_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        dur_v.addWidget(dur_cap)
+        dur_v.addWidget(self._dur_lbl)
+        card_layout.addWidget(dur_box, stretch=1)
 
-        row2.addStretch()
+        panel_layout.addWidget(card)
 
-        # Botões de ação
-        self._btn_full = QPushButton("Usar completo")
-        self._btn_full.setObjectName("btnFull")
+        # ── linha 3: status (esquerda) + ações (direita) ─────────────────────
+        action_row = QHBoxLayout()
+        action_row.setSpacing(10)
+
+        self._dot = QLabel("●")
+        self._dot.setObjectName("dot")
+        self._dot.setStyleSheet(f"color: {_TEXT_MUTED}; font-size: 13px;")
+        self._status_lbl = QLabel("Carregando vídeo...")
+        self._status_lbl.setObjectName("status")
+        action_row.addWidget(self._dot)
+        action_row.addWidget(self._status_lbl, stretch=1)
+
+        self._btn_cancel = QPushButton("✕  Cancelar")
+        self._btn_cancel.setObjectName("cancel")
+        self._btn_cancel.setToolTip("Cancelar e fechar")
+        self._btn_cancel.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._btn_cancel.clicked.connect(self._cancel)
+        action_row.addWidget(self._btn_cancel)
+
+        self._btn_full = QPushButton("Usar vídeo completo")
+        self._btn_full.setObjectName("gray")
         self._btn_full.setEnabled(False)
+        self._btn_full.setCursor(Qt.CursorShape.PointingHandCursor)
         self._btn_full.clicked.connect(self._use_full)
-        row2.addWidget(self._btn_full)
+        action_row.addWidget(self._btn_full)
 
-        self._btn_confirm = QPushButton("Confirmar trecho →")
-        self._btn_confirm.setObjectName("btnConfirm")
+        self._btn_confirm = QPushButton("Confirmar trecho  →")
         self._btn_confirm.setEnabled(False)
+        self._btn_confirm.setCursor(Qt.CursorShape.PointingHandCursor)
         self._btn_confirm.clicked.connect(self._confirm)
-        row2.addWidget(self._btn_confirm)
+        action_row.addWidget(self._btn_confirm)
 
-        btn_cancel = QPushButton("✕")
-        btn_cancel.setObjectName("btnCancel")
-        btn_cancel.setFixedWidth(34)
-        btn_cancel.setToolTip("Cancelar")
-        btn_cancel.clicked.connect(self._cancel)
-        row2.addWidget(btn_cancel)
-
-        panel_layout.addLayout(row2)
-
-        # linha 3: status
-        self._status_lbl = QLabel("⏳ Carregando vídeo...")
-        self._status_lbl.setStyleSheet(f"color:{_GRAY}; font-size:11px;")
-        panel_layout.addWidget(self._status_lbl)
+        panel_layout.addLayout(action_row)
 
         # ── layout principal ─────────────────────────────────────────────────
         central = QWidget()
@@ -310,7 +430,7 @@ class _PlayerWindow(QMainWindow):
         self._start_entry.setText("00:00:00")
         self._end_entry.setText("00:00:00")
         self._dur_lbl.setText("--:--:--")
-        self._set_status(f"⏳ Carregando vídeo...", _GRAY)
+        self._set_status("Carregando vídeo...", _TEXT_MUTED)
         self._set_controls_enabled(False)
         self._view.load(QUrl(f"https://www.youtube.com/watch?v={video['id']}"))
 
@@ -320,14 +440,16 @@ class _PlayerWindow(QMainWindow):
 
     def _on_loaded(self, ok: bool):
         if not ok:
-            self._set_status("⚠ Erro ao carregar o vídeo.", _RED)
+            self._set_status("Erro ao carregar o vídeo.", _RED)
             self._set_controls_enabled(True)
             return
         self._set_status(
-            "✓ Pronto — assista e clique em ◄ para marcar os tempos.", _GREEN
+            "Pronto — assista e clique em ⏱ Marcar para capturar Início e Fim.",
+            _GREEN,
         )
         self._ready = True
         self._set_controls_enabled(True)
+        QTimer.singleShot(800,  self._hide_chat)
         QTimer.singleShot(2500, self._activate_theater)
         QTimer.singleShot(3000, self._inject_overlay)
 
@@ -337,6 +459,9 @@ class _PlayerWindow(QMainWindow):
     def _inject_overlay(self):
         self._view.page().runJavaScript(_OVERLAY_JS)
 
+    def _hide_chat(self):
+        self._view.page().runJavaScript(_HIDE_CHAT_JS)
+
     # -----------------------------------------------------------------------
     # Marcação de tempo via runJavaScript
     # -----------------------------------------------------------------------
@@ -345,7 +470,7 @@ class _PlayerWindow(QMainWindow):
         def _got_time(t):
             try:
                 if t is None or t < 0:
-                    self._set_status("⚠ Vídeo não encontrado na página.", _YELLOW)
+                    self._set_status("Vídeo não encontrado na página.", _YELLOW)
                     return
                 hms = _seconds_to_hms(t)
                 if target == "start":
@@ -357,7 +482,7 @@ class _PlayerWindow(QMainWindow):
                 # diferir JS aninhado para evitar crash
                 QTimer.singleShot(0, self._update_overlay)
             except Exception as e:
-                self._set_status(f"⚠ Erro ao marcar tempo: {e}", _RED)
+                self._set_status(f"Erro ao marcar tempo: {e}", _RED)
 
         self._view.page().runJavaScript(
             "var v = document.querySelector('video'); v ? v.currentTime : -1;",
@@ -380,8 +505,10 @@ class _PlayerWindow(QMainWindow):
         end_s   = _hms_to_seconds(self._end_entry.text())
         if start_s is not None and end_s is not None and end_s > start_s:
             self._dur_lbl.setText(_seconds_to_hms(end_s - start_s))
+            self._dur_lbl.setStyleSheet(f"color: {_GREEN};")
         else:
             self._dur_lbl.setText("--:--:--")
+            self._dur_lbl.setStyleSheet(f"color: {_TEXT_MUTED};")
 
     # -----------------------------------------------------------------------
     # Ações do usuário
@@ -393,14 +520,14 @@ class _PlayerWindow(QMainWindow):
         start_s   = _hms_to_seconds(start_str)
         end_s     = _hms_to_seconds(end_str)
         if start_s is None or end_s is None:
-            self._set_status("⚠ Tempo inválido — use HH:MM:SS.", _RED)
+            self._set_status("Tempo inválido — use HH:MM:SS.", _RED)
             return
         if end_s <= start_s:
-            self._set_status("⚠ O tempo de fim deve ser maior que o início.", _RED)
+            self._set_status("O tempo de fim deve ser maior que o início.", _RED)
             return
         if start_s == 0 and end_s == 0:
             self._set_status(
-                "⚠ Informe o trecho ou clique em 'Usar completo'.", _RED
+                "Informe o trecho ou clique em 'Usar vídeo completo'.", _RED
             )
             return
         self._save_segment(start_str, end_str)
@@ -455,9 +582,10 @@ class _PlayerWindow(QMainWindow):
         self._btn_confirm.setEnabled(enabled)
         self._btn_full.setEnabled(enabled)
 
-    def _set_status(self, text: str, color: str = _GRAY):
+    def _set_status(self, text: str, color: str = _TEXT_SUB):
         self._status_lbl.setText(text)
-        self._status_lbl.setStyleSheet(f"color:{color}; font-size:11px;")
+        self._status_lbl.setStyleSheet(f"color: {color}; font-size: 12px;")
+        self._dot.setStyleSheet(f"color: {color}; font-size: 13px;")
 
 
 # ---------------------------------------------------------------------------
