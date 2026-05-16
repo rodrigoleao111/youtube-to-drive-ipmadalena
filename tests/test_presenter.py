@@ -30,13 +30,18 @@ def _make_audio(path="/tmp/culto.mp3", title="Culto", vid="abc123") -> AudioFile
 
 
 def _make_presenter(
-    *, list_uc=None, download_uc=None, upload_uc=None,
+    *, list_uc=None, download_uc=None, edit_uc=None, upload_uc=None,
     channel_url="https://youtube.com/@IPMadalena/streams",
     download_dir="/tmp/downloads",
 ) -> ProcessingPresenter:
+    # edit_uc default = passa adiante a lista de entrada (no-op)
+    if edit_uc is None:
+        edit_uc = MagicMock()
+        edit_uc.execute.side_effect = lambda audio_files, **kw: audio_files
     return ProcessingPresenter(
         list_videos_uc=list_uc or MagicMock(),
         download_uc=download_uc or MagicMock(),
+        edit_uc=edit_uc,
         upload_uc=upload_uc or MagicMock(),
         channel_url=channel_url,
         download_dir=download_dir,
@@ -273,14 +278,112 @@ class TestPresenterProcessSegments:
     def test_propaga_operacao_cancelada_no_upload(self):
         upload_uc = MagicMock()
         upload_uc.execute.side_effect = OperacaoCancelada("cancelado")
-        p, _, _ = self._setup(upload_result=None)
-        # Substitui o upload_uc do setup pelo que levanta exceção
+        # Substitui o upload_uc do helper pelo que levanta exceção
+        edit_uc = MagicMock()
+        edit_uc.execute.side_effect = lambda audio_files, **kw: audio_files
         p = ProcessingPresenter(
             list_videos_uc=MagicMock(),
             download_uc=MagicMock(execute=MagicMock(return_value=[_make_audio()])),
+            edit_uc=edit_uc,
             upload_uc=upload_uc,
             channel_url="x",
             download_dir="/tmp",
         )
         with pytest.raises(OperacaoCancelada):
             p.process_segments("19/04/2026", [{"id": "v1", "title": "x"}])
+
+
+# ===========================================================================
+# Passo de edição entre download e upload
+# ===========================================================================
+
+class TestPresenterPipelineComEdicao:
+    def _setup(self, edit_returns=None):
+        """Helper: monta presenter com download/edit/upload mockados."""
+        download_uc = MagicMock()
+        edit_uc     = MagicMock()
+        upload_uc   = MagicMock()
+
+        downloaded = [_make_audio(path="/tmp/a.mp3"),
+                      _make_audio(path="/tmp/b.mp3")]
+        download_uc.execute.return_value = downloaded
+
+        if edit_returns is None:
+            edit_uc.execute.side_effect = lambda audio_files, **kw: audio_files
+        else:
+            edit_uc.execute.return_value = edit_returns
+
+        upload_uc.execute.return_value = ProcessingResult(
+            date_str="19/04/2026", uploaded_files=("a.mp3",),
+        )
+        p = _make_presenter(
+            download_uc=download_uc, edit_uc=edit_uc, upload_uc=upload_uc,
+        )
+        return p, download_uc, edit_uc, upload_uc
+
+    def test_edicao_chamada_uma_vez_entre_download_e_upload(self):
+        p, _, edit_uc, _ = self._setup()
+        p.process_segments("19/04/2026", [{"id": "v1", "title": "x"}])
+        assert edit_uc.execute.call_count == 1
+
+    def test_edicao_recebe_audio_files_do_download(self):
+        p, download_uc, edit_uc, _ = self._setup()
+        p.process_segments("19/04/2026", [{"id": "v1", "title": "x"}])
+
+        downloaded = download_uc.execute.return_value
+        first_arg = edit_uc.execute.call_args.args[0]
+        assert first_arg == downloaded
+
+    def test_upload_recebe_audio_files_da_edicao(self):
+        # Edição devolve uma lista DIFERENTE (simulando que pôde editar in-place)
+        edited = [_make_audio(path="/tmp/edited.mp3")]
+        p, _, _, upload_uc = self._setup(edit_returns=edited)
+        p.process_segments("19/04/2026", [{"id": "v1", "title": "x"}])
+
+        # 2º arg posicional do upload é a lista de AudioFile
+        args = upload_uc.execute.call_args.args
+        assert args[1] == edited
+
+    def test_ordem_de_chamada_download_edicao_upload(self):
+        p, download_uc, edit_uc, upload_uc = self._setup()
+
+        call_order = []
+        download_uc.execute.side_effect = lambda *a, **kw: (
+            call_order.append("download") or
+            [_make_audio(path="/tmp/a.mp3")]
+        )
+        edit_uc.execute.side_effect = lambda audio_files, **kw: (
+            call_order.append("edit") or audio_files
+        )
+        upload_uc.execute.side_effect = lambda *a, **kw: (
+            call_order.append("upload") or
+            ProcessingResult(date_str="19/04/2026", uploaded_files=("a.mp3",))
+        )
+        p.process_segments("19/04/2026", [{"id": "v1", "title": "x"}])
+
+        assert call_order == ["download", "edit", "upload"]
+
+    def test_repassa_on_edit_progress_para_o_use_case(self):
+        p, _, edit_uc, _ = self._setup()
+        progress = MagicMock()
+        p.process_segments(
+            "19/04/2026", [{"id": "v1", "title": "x"}],
+            on_edit_progress=progress,
+        )
+        kwargs = edit_uc.execute.call_args.kwargs
+        assert kwargs["on_progress"] is progress
+
+    def test_repassa_cancel_event_para_a_edicao(self):
+        p, _, edit_uc, _ = self._setup()
+        ev = threading.Event()
+        p.process_segments(
+            "19/04/2026", [{"id": "v1", "title": "x"}], cancel_event=ev,
+        )
+        assert edit_uc.execute.call_args.kwargs["cancel_event"] is ev
+
+    def test_propaga_operacao_cancelada_na_edicao(self):
+        p, _, edit_uc, upload_uc = self._setup()
+        edit_uc.execute.side_effect = OperacaoCancelada("cancelado")
+        with pytest.raises(OperacaoCancelada):
+            p.process_segments("19/04/2026", [{"id": "v1", "title": "x"}])
+        upload_uc.execute.assert_not_called()

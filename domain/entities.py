@@ -10,7 +10,7 @@ Regras:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Optional, Tuple
 
 
 @dataclass(frozen=True)
@@ -112,3 +112,144 @@ class ProcessingResult:
         if self.skipped_files:
             parts.append(f"{len(self.skipped_files)} já existia(m)")
         return ", ".join(parts) if parts else "nenhum arquivo processado"
+
+
+# ===========================================================================
+# Edição de áudio (vinhetas, fade, EQ, redução de ruído)
+# ===========================================================================
+
+@dataclass(frozen=True)
+class EqBand:
+    """
+    Banda de equalização paramétrica.
+
+    Uma frequência fixa (definida pelo preset) e um ganho ajustável em dB.
+    A largura de banda Q é constante no pipeline ffmpeg (ver FfmpegAudioEditor).
+    """
+
+    freq_hz: int
+    """Frequência central da banda em Hz (ex.: 80, 250, 1000, 4000, 10000)."""
+
+    gain_db: float
+    """Ganho/atenuação em dB (intervalo recomendado: -12.0 a +12.0)."""
+
+
+def _default_eq_bands() -> Tuple[EqBand, ...]:
+    """Constrói as bandas de EQ a partir do preset Voz Masculina."""
+    from domain.audio_presets import EQ_PRESET_VOZ_MASCULINA
+    return tuple(EqBand(freq_hz=f, gain_db=g) for f, g in EQ_PRESET_VOZ_MASCULINA)
+
+
+@dataclass(frozen=True)
+class AudioEditConfig:
+    """
+    Configuração do pipeline de edição de áudio.
+
+    Aplicado entre o download do trecho e o upload para o Drive.
+    Quando todas as etapas estão desligadas (`has_any_filter_enabled` é False),
+    o editor é um no-op rápido — o arquivo passa direto.
+
+    Persistido em `config.json` sob a chave `audio_edit` via `to_dict()` /
+    reconstruído via `from_dict()` (campos ausentes recebem o default desta
+    classe — backwards compatibility automática).
+    """
+
+    intro_path: Optional[str] = None
+    """Caminho do arquivo de áudio da vinheta de entrada (None = sem vinheta)."""
+
+    outro_path: Optional[str] = None
+    """Caminho do arquivo de áudio da vinheta de saída (None = sem vinheta)."""
+
+    intro_overlap_secs: float = 0.0
+    """Segundos de sobreposição entre vinheta de entrada e início do áudio."""
+
+    outro_overlap_secs: float = 0.0
+    """Segundos de sobreposição entre fim do áudio e vinheta de saída."""
+
+    fade_in_enabled: bool = False
+    """Se True, aplica fade in no início do áudio."""
+
+    fade_in_secs: float = 2.0
+    """Duração do fade in em segundos (ignorado se fade_in_enabled=False)."""
+
+    fade_out_enabled: bool = False
+    """Se True, aplica fade out no fim do áudio."""
+
+    fade_out_secs: float = 3.0
+    """Duração do fade out em segundos (ignorado se fade_out_enabled=False)."""
+
+    eq_enabled: bool = False
+    """Se True, aplica equalização paramétrica de 5 bandas."""
+
+    eq_bands: Tuple[EqBand, ...] = field(default_factory=_default_eq_bands)
+    """5 bandas de EQ. Default = preset 'Voz Masculina' (clareza em pregação)."""
+
+    noise_reduction_enabled: bool = False
+    """Se True, aplica redução de ruído (filtro afftdn)."""
+
+    noise_reduction_intensity: str = "media"
+    """Intensidade da redução: 'baixa' | 'media' | 'alta'."""
+
+    @property
+    def has_any_filter_enabled(self) -> bool:
+        """True se qualquer etapa do pipeline estiver ativa (caso contrário, no-op)."""
+        return (
+            self.fade_in_enabled
+            or self.fade_out_enabled
+            or self.eq_enabled
+            or self.noise_reduction_enabled
+            or self.intro_path is not None
+            or self.outro_path is not None
+        )
+
+    def to_dict(self) -> dict:
+        """Serializa para dict JSON-friendly (eq_bands vira lista de objetos)."""
+        return {
+            "intro_path":                self.intro_path,
+            "outro_path":                self.outro_path,
+            "intro_overlap_secs":        self.intro_overlap_secs,
+            "outro_overlap_secs":        self.outro_overlap_secs,
+            "fade_in_enabled":           self.fade_in_enabled,
+            "fade_in_secs":              self.fade_in_secs,
+            "fade_out_enabled":          self.fade_out_enabled,
+            "fade_out_secs":             self.fade_out_secs,
+            "eq_enabled":                self.eq_enabled,
+            "eq_bands":                  [{"freq_hz": b.freq_hz, "gain_db": b.gain_db}
+                                          for b in self.eq_bands],
+            "noise_reduction_enabled":   self.noise_reduction_enabled,
+            "noise_reduction_intensity": self.noise_reduction_intensity,
+        }
+
+    @classmethod
+    def from_dict(cls, d: Optional[dict]) -> "AudioEditConfig":
+        """
+        Constrói a partir de dict JSON.
+
+        Campos ausentes recebem o default da classe (backwards compatibility
+        ao adicionar novos campos em versões futuras). Aceita None ou {} —
+        ambos retornam a configuração padrão.
+        """
+        if not d:
+            return cls()
+        bands_raw = d.get("eq_bands")
+        if bands_raw:
+            bands = tuple(
+                EqBand(freq_hz=int(b["freq_hz"]), gain_db=float(b["gain_db"]))
+                for b in bands_raw
+            )
+        else:
+            bands = _default_eq_bands()
+        return cls(
+            intro_path                = d.get("intro_path"),
+            outro_path                = d.get("outro_path"),
+            intro_overlap_secs        = float(d.get("intro_overlap_secs", 0.0)),
+            outro_overlap_secs        = float(d.get("outro_overlap_secs", 0.0)),
+            fade_in_enabled           = bool(d.get("fade_in_enabled", False)),
+            fade_in_secs              = float(d.get("fade_in_secs", 2.0)),
+            fade_out_enabled          = bool(d.get("fade_out_enabled", False)),
+            fade_out_secs             = float(d.get("fade_out_secs", 3.0)),
+            eq_enabled                = bool(d.get("eq_enabled", False)),
+            eq_bands                  = bands,
+            noise_reduction_enabled   = bool(d.get("noise_reduction_enabled", False)),
+            noise_reduction_intensity = d.get("noise_reduction_intensity", "media"),
+        )

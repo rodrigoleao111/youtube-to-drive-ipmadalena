@@ -7,7 +7,21 @@ Cobre: entities, exceptions, ports (verificação estrutural de Protocol).
 
 import pytest
 
-from domain.entities import AudioFile, ProcessingResult, Segment, Video
+from domain.audio_presets import (
+    EQ_FREQS,
+    EQ_GAIN_MAX_DB,
+    EQ_GAIN_MIN_DB,
+    EQ_PRESET_VOZ_MASCULINA,
+    NOISE_INTENSITIES,
+)
+from domain.entities import (
+    AudioEditConfig,
+    AudioFile,
+    EqBand,
+    ProcessingResult,
+    Segment,
+    Video,
+)
 from domain.exceptions import (
     ConfiguracaoInvalida,
     DomainError,
@@ -18,6 +32,7 @@ from domain.exceptions import (
 )
 from domain.ports import (
     IAudioDownloader,
+    IAudioEditor,
     ICloudStorage,
     IConfigRepository,
     IHistoryRepository,
@@ -308,3 +323,228 @@ class TestPorts:
         class Vazio:
             pass
         assert not isinstance(Vazio(), IAudioDownloader)
+
+
+# ===========================================================================
+# audio_presets — constantes do pipeline de edição de áudio
+# ===========================================================================
+
+class TestAudioPresets:
+    def test_eq_freqs_sao_5_bandas_em_ordem_crescente(self):
+        assert len(EQ_FREQS) == 5
+        assert list(EQ_FREQS) == sorted(EQ_FREQS)
+
+    def test_eq_freqs_cobrem_espectro_audivel(self):
+        assert EQ_FREQS[0] >= 20      # graves
+        assert EQ_FREQS[-1] <= 20000  # agudos
+
+    def test_eq_gain_min_e_menor_que_max(self):
+        assert EQ_GAIN_MIN_DB < EQ_GAIN_MAX_DB
+
+    def test_preset_voz_masculina_tem_5_bandas(self):
+        assert len(EQ_PRESET_VOZ_MASCULINA) == 5
+
+    def test_preset_voz_masculina_freqs_batem_com_eq_freqs(self):
+        freqs_preset = tuple(f for f, _ in EQ_PRESET_VOZ_MASCULINA)
+        assert freqs_preset == EQ_FREQS
+
+    def test_preset_voz_masculina_corta_graves(self):
+        # 80 Hz e 250 Hz devem ter ganho negativo (corte para clareza)
+        gains = dict(EQ_PRESET_VOZ_MASCULINA)
+        assert gains[80]  < 0
+        assert gains[250] < 0
+
+    def test_preset_voz_masculina_realca_presenca(self):
+        # 4 kHz deve ter ganho positivo (presença/inteligibilidade)
+        gains = dict(EQ_PRESET_VOZ_MASCULINA)
+        assert gains[4000] > 0
+
+    def test_noise_intensities_tem_3_niveis(self):
+        assert NOISE_INTENSITIES == ("baixa", "media", "alta")
+
+
+# ===========================================================================
+# EqBand
+# ===========================================================================
+
+class TestEqBand:
+    def test_criacao_basica(self):
+        b = EqBand(freq_hz=1000, gain_db=2.5)
+        assert b.freq_hz == 1000
+        assert b.gain_db == 2.5
+
+    def test_imutavel(self):
+        b = EqBand(freq_hz=80, gain_db=-3.0)
+        with pytest.raises((AttributeError, TypeError)):
+            b.gain_db = 5.0  # type: ignore[misc]
+
+    def test_igualdade_por_valor(self):
+        b1 = EqBand(freq_hz=80, gain_db=-3.0)
+        b2 = EqBand(freq_hz=80, gain_db=-3.0)
+        assert b1 == b2
+
+    def test_diferenca_por_ganho(self):
+        b1 = EqBand(freq_hz=80, gain_db=-3.0)
+        b2 = EqBand(freq_hz=80, gain_db=+3.0)
+        assert b1 != b2
+
+
+# ===========================================================================
+# AudioEditConfig
+# ===========================================================================
+
+class TestAudioEditConfigDefaults:
+    def test_default_tudo_desligado_exceto_eq_bands(self):
+        c = AudioEditConfig()
+        assert c.intro_path is None
+        assert c.outro_path is None
+        assert c.fade_in_enabled  is False
+        assert c.fade_out_enabled is False
+        assert c.eq_enabled       is False
+        assert c.noise_reduction_enabled is False
+
+    def test_default_eq_bands_e_o_preset_voz_masculina(self):
+        c = AudioEditConfig()
+        bandas = tuple((b.freq_hz, b.gain_db) for b in c.eq_bands)
+        assert bandas == EQ_PRESET_VOZ_MASCULINA
+
+    def test_default_intensidade_de_ruido_e_media(self):
+        assert AudioEditConfig().noise_reduction_intensity == "media"
+
+    def test_default_fade_secs_padroes_razoaveis(self):
+        c = AudioEditConfig()
+        assert c.fade_in_secs  == 2.0
+        assert c.fade_out_secs == 3.0
+
+    def test_imutavel(self):
+        c = AudioEditConfig()
+        with pytest.raises((AttributeError, TypeError)):
+            c.eq_enabled = True  # type: ignore[misc]
+
+
+class TestAudioEditConfigHasAnyFilterEnabled:
+    def test_default_e_no_op(self):
+        assert AudioEditConfig().has_any_filter_enabled is False
+
+    def test_fade_in_ativa(self):
+        assert AudioEditConfig(fade_in_enabled=True).has_any_filter_enabled is True
+
+    def test_fade_out_ativa(self):
+        assert AudioEditConfig(fade_out_enabled=True).has_any_filter_enabled is True
+
+    def test_eq_ativa(self):
+        assert AudioEditConfig(eq_enabled=True).has_any_filter_enabled is True
+
+    def test_noise_reduction_ativa(self):
+        assert AudioEditConfig(noise_reduction_enabled=True).has_any_filter_enabled is True
+
+    def test_intro_path_ativa(self):
+        assert AudioEditConfig(intro_path="/tmp/intro.mp3").has_any_filter_enabled is True
+
+    def test_outro_path_ativa(self):
+        assert AudioEditConfig(outro_path="/tmp/outro.mp3").has_any_filter_enabled is True
+
+
+class TestAudioEditConfigToDict:
+    def test_round_trip_default(self):
+        original = AudioEditConfig()
+        roundtrip = AudioEditConfig.from_dict(original.to_dict())
+        assert roundtrip == original
+
+    def test_round_trip_com_alteracoes(self):
+        original = AudioEditConfig(
+            intro_path="/tmp/i.mp3",
+            outro_path="/tmp/o.mp3",
+            intro_overlap_secs=1.5,
+            outro_overlap_secs=2.5,
+            fade_in_enabled=True,
+            fade_in_secs=4.0,
+            fade_out_enabled=True,
+            fade_out_secs=5.0,
+            eq_enabled=True,
+            eq_bands=(EqBand(80, -5.0), EqBand(1000, 0.0), EqBand(10000, 2.0)),
+            noise_reduction_enabled=True,
+            noise_reduction_intensity="alta",
+        )
+        roundtrip = AudioEditConfig.from_dict(original.to_dict())
+        assert roundtrip == original
+
+    def test_to_dict_e_serializavel_em_json(self):
+        import json
+        d = AudioEditConfig().to_dict()
+        # Não deve lançar nenhuma exceção
+        json.dumps(d)
+
+    def test_to_dict_usa_listas_para_eq_bands(self):
+        d = AudioEditConfig().to_dict()
+        assert isinstance(d["eq_bands"], list)
+        assert all(isinstance(b, dict) for b in d["eq_bands"])
+        assert all("freq_hz" in b and "gain_db" in b for b in d["eq_bands"])
+
+
+class TestAudioEditConfigFromDict:
+    def test_none_retorna_default(self):
+        assert AudioEditConfig.from_dict(None) == AudioEditConfig()
+
+    def test_dict_vazio_retorna_default(self):
+        assert AudioEditConfig.from_dict({}) == AudioEditConfig()
+
+    def test_campos_ausentes_recebem_default(self):
+        c = AudioEditConfig.from_dict({"fade_in_enabled": True})
+        assert c.fade_in_enabled is True
+        # Demais campos com defaults
+        assert c.fade_in_secs == 2.0
+        assert c.eq_enabled is False
+        assert c.noise_reduction_intensity == "media"
+
+    def test_eq_bands_ausente_aplica_preset_voz_masculina(self):
+        c = AudioEditConfig.from_dict({"eq_enabled": True})
+        bandas = tuple((b.freq_hz, b.gain_db) for b in c.eq_bands)
+        assert bandas == EQ_PRESET_VOZ_MASCULINA
+
+    def test_eq_bands_vazio_aplica_preset(self):
+        # Lista vazia explícita também aciona o default
+        c = AudioEditConfig.from_dict({"eq_bands": []})
+        assert len(c.eq_bands) == 5
+
+    def test_eq_bands_customizadas_preservam_valores(self):
+        c = AudioEditConfig.from_dict({
+            "eq_bands": [
+                {"freq_hz": 100, "gain_db": -6.0},
+                {"freq_hz": 5000, "gain_db": 4.0},
+            ],
+        })
+        assert len(c.eq_bands) == 2
+        assert c.eq_bands[0] == EqBand(100, -6.0)
+        assert c.eq_bands[1] == EqBand(5000, 4.0)
+
+    def test_floats_sao_convertidos_de_int(self):
+        c = AudioEditConfig.from_dict({
+            "fade_in_secs": 3,           # int em vez de float
+            "fade_out_secs": 5,
+            "intro_overlap_secs": 1,
+        })
+        assert c.fade_in_secs        == 3.0
+        assert c.fade_out_secs       == 5.0
+        assert c.intro_overlap_secs  == 1.0
+
+
+# ===========================================================================
+# IAudioEditor (Protocol)
+# ===========================================================================
+
+class TestIAudioEditorProtocol:
+    def _make_editor(self):
+        class FakeEditor:
+            def process(self, audio, config, *, cancel_event=None,
+                        on_log=None, on_progress=None):
+                return audio
+        return FakeEditor()
+
+    def test_iaudio_editor_isinstance(self):
+        assert isinstance(self._make_editor(), IAudioEditor)
+
+    def test_objeto_sem_metodo_nao_implementa(self):
+        class Vazio:
+            pass
+        assert not isinstance(Vazio(), IAudioEditor)

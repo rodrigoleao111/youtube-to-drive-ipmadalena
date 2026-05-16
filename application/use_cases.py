@@ -15,13 +15,19 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable, List, Optional
 
-from domain.entities import AudioFile, ProcessingResult, Segment, Video
+from domain.entities import AudioEditConfig, AudioFile, ProcessingResult, Segment, Video
 from domain.ports import (
     IAudioDownloader,
+    IAudioEditor,
     ICloudStorage,
+    IConfigRepository,
     IHistoryRepository,
     IVideoSource,
 )
+
+
+def _noop(*_a, **_kw):
+    pass
 
 
 # ---------------------------------------------------------------------------
@@ -131,6 +137,104 @@ class DownloadSegmentsUseCase:
             on_status=on_status,
             on_progress=on_progress,
         )
+
+
+# ---------------------------------------------------------------------------
+# Fase 2.5 do fluxo: edição de áudio (vinhetas, fade, EQ, denoise)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class EditAudioUseCase:
+    """
+    Aplica edição de áudio em uma lista de AudioFiles entre o download e o
+    upload — vinhetas, fade in/out, equalização e redução de ruído.
+
+    A configuração é lida do `IConfigRepository` a cada execução (assim
+    mudanças feitas pelo usuário desde a última operação são refletidas).
+    Quando `AudioEditConfig.has_any_filter_enabled` é False, é um no-op rápido:
+    a lista de entrada é devolvida inalterada e o editor não é chamado.
+
+    O `IAudioEditor` substitui cada arquivo no caminho original (path
+    preservado), então a lista de saída tem os mesmos `AudioFile`s da entrada.
+
+    Atributos
+    ---------
+    editor:
+        Implementação concreta do `IAudioEditor` que aplica os filtros.
+    config_repo:
+        Repositório de configuração — ``execute()`` chama ``load()`` a cada
+        invocação para refletir mudanças feitas pelo usuário.
+    path_resolver:
+        Função opcional aplicada ao dict ``audio_edit`` lido do config antes
+        de construir o `AudioEditConfig`. Composition root injeta um resolver
+        que expande basenames de vinheta para paths absolutos (vide
+        `baixar_audio.audio_edit_resolve_paths`). Default = identidade.
+    """
+
+    editor: IAudioEditor
+    config_repo: IConfigRepository
+    path_resolver: Callable[[dict], dict] = lambda d: d
+
+    def execute(
+        self,
+        audio_files: List[AudioFile],
+        *,
+        cancel_event=None,
+        on_log: Optional[Callable[[str], None]] = None,
+        on_status: Optional[Callable[[str], None]] = None,
+        on_progress: Optional[Callable[[float], None]] = None,
+    ) -> List[AudioFile]:
+        """
+        Aplica o pipeline de edição em cada arquivo da lista.
+
+        Parameters
+        ----------
+        audio_files:
+            Arquivos baixados (substituídos in-place no disco quando há filtros).
+        cancel_event:
+            threading.Event opcional — propaga OperacaoCancelada se sinalizado.
+        on_log / on_status / on_progress:
+            Callbacks de feedback para a UI. ``on_progress`` recebe um valor
+            normalizado em [0.0, 1.0] cobrindo o lote inteiro (cada arquivo
+            ocupa ``1/n`` da barra).
+
+        Returns
+        -------
+        List[AudioFile]
+            Mesma lista de entrada (paths preservados; conteúdo dos arquivos
+            no disco pode ter sido editado).
+        """
+        log    = on_log    if callable(on_log)    else _noop
+        status = on_status if callable(on_status) else _noop
+
+        cfg_dict = (self.config_repo.load() or {}).get("audio_edit") or {}
+        cfg_dict = self.path_resolver(cfg_dict)
+        config = AudioEditConfig.from_dict(cfg_dict)
+
+        if not config.has_any_filter_enabled:
+            log("[Edição] Configuração de edição desabilitada — pulando.")
+            return audio_files
+
+        n = max(1, len(audio_files))
+        status("Editando áudio...")
+        for idx, af in enumerate(audio_files):
+            log(f"[Edição] Processando {idx + 1}/{n}: {af.title}")
+
+            def _scoped_progress(p: float, _idx=idx) -> None:
+                if callable(on_progress):
+                    on_progress((_idx + p) / n)
+
+            self.editor.process(
+                af,
+                config,
+                cancel_event=cancel_event,
+                on_log=on_log,
+                on_progress=_scoped_progress,
+            )
+
+        if callable(on_progress):
+            on_progress(1.0)
+        return audio_files
 
 
 # ---------------------------------------------------------------------------

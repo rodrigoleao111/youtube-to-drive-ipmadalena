@@ -261,3 +261,75 @@ class TestJsonConfigRepository:
         repo.update(channel_url="https://novo.canal")
         assert (tmp_path / "config.json").exists()
         assert repo.get("channel_url") == "https://novo.canal"
+
+
+# ===========================================================================
+# JsonConfigRepository — chave 'audio_edit' (PR 1 do plano de edição de áudio)
+# ===========================================================================
+
+class TestJsonConfigRepositoryAudioEdit:
+    """
+    Verifica que a chave 'audio_edit' do config.json:
+      - é preenchida com o default de AudioEditConfig().to_dict() em arquivos
+        legados que não a possuem (backwards compatibility);
+      - sobrevive a round-trip JSON sem perda de informação;
+      - reconstrói corretamente um AudioEditConfig via from_dict().
+    """
+
+    def _repo(self, tmp_path, with_audio_default=True):
+        from domain.entities import AudioEditConfig
+        defaults = {
+            "channel_url":     "https://example.com",
+            "drive_folder_id": "FOLDER",
+        }
+        if with_audio_default:
+            defaults["audio_edit"] = AudioEditConfig().to_dict()
+        return JsonConfigRepository(
+            file_path=str(tmp_path / "config.json"),
+            defaults=defaults,
+        )
+
+    def test_load_aplica_default_em_arquivo_legado_sem_chave(self, tmp_path):
+        # Simula um config.json antigo (pré-edição-de-áudio)
+        legacy = {"channel_url": "https://canal.legado", "drive_folder_id": "LEG"}
+        (tmp_path / "config.json").write_text(json.dumps(legacy), encoding="utf-8")
+
+        cfg = self._repo(tmp_path).load()
+
+        assert "audio_edit" in cfg
+        assert cfg["audio_edit"]["fade_in_enabled"] is False
+        assert cfg["audio_edit"]["eq_enabled"]     is False
+        assert cfg["audio_edit"]["noise_reduction_enabled"] is False
+
+    def test_load_sem_arquivo_retorna_default(self, tmp_path):
+        cfg = self._repo(tmp_path).load()
+        assert cfg["audio_edit"]["fade_in_enabled"] is False
+
+    def test_save_load_roundtrip_preserva_audio_edit(self, tmp_path):
+        from domain.entities import AudioEditConfig
+        repo = self._repo(tmp_path)
+
+        custom = AudioEditConfig(
+            fade_in_enabled=True,
+            fade_in_secs=4.0,
+            eq_enabled=True,
+            noise_reduction_enabled=True,
+            noise_reduction_intensity="alta",
+        )
+        cfg = repo.load()
+        cfg["audio_edit"] = custom.to_dict()
+        repo.save(cfg)
+
+        cfg_loaded = repo.load()
+        recovered = AudioEditConfig.from_dict(cfg_loaded["audio_edit"])
+        assert recovered == custom
+
+    def test_audio_edit_serializa_em_json_no_disco(self, tmp_path):
+        repo = self._repo(tmp_path)
+        repo.save(repo.load())  # grava com audio_edit nos defaults
+
+        raw = (tmp_path / "config.json").read_text(encoding="utf-8")
+        data = json.loads(raw)
+        assert "audio_edit" in data
+        assert isinstance(data["audio_edit"]["eq_bands"], list)
+        assert len(data["audio_edit"]["eq_bands"]) == 5

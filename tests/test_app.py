@@ -1194,3 +1194,1054 @@ class TestFetchThumbnail:
         label = QLabel()
         self._run_sync(application, "vid8", label, cdn_data=None, ytdlp_data=None)
         # Não deve lançar exceção
+
+
+# ===========================================================================
+# SettingsDialog — sidebar com subpáginas (PR 4 do plano de edição de áudio)
+# ===========================================================================
+
+class TestConfigPageStructure:
+    """
+    Verifica a nova estrutura da página Configurações do App:
+      - QTabWidget com 2 abas: Geral e Edição de áudio
+      - Aba Geral mantém os campos `_cfg_channel_entry` e `_cfg_folder_entry`
+      - Aba Edição de áudio é uma instância de `_AudioSettingsTab`
+      - Save unificado (`_cfg_save`) persiste AMBAS as abas em uma chamada
+    """
+
+    def test_config_page_tem_qtabwidget_com_duas_abas(self, application):
+        from PyQt6.QtWidgets import QTabWidget
+        assert isinstance(application._cfg_tabs, QTabWidget)
+        assert application._cfg_tabs.count() == 2
+
+    def test_aba_geral_e_a_primeira(self, application):
+        assert "Geral" in application._cfg_tabs.tabText(0)
+
+    def test_aba_audio_e_a_segunda(self, application):
+        assert "áudio" in application._cfg_tabs.tabText(1).lower()
+
+    def test_audio_tab_e_instancia_de_audio_settings_tab(self, application):
+        from app import _AudioSettingsTab
+        assert isinstance(application._audio_tab, _AudioSettingsTab)
+
+    def test_aba_geral_tem_campos_de_canal_e_folder(self, application):
+        assert hasattr(application, "_cfg_channel_entry")
+        assert hasattr(application, "_cfg_folder_entry")
+
+    # -----------------------------------------------------------------------
+    # Save unificado: persiste AMBAS as abas em uma gravação
+    # -----------------------------------------------------------------------
+
+    def test_cfg_save_persiste_canal_folder_e_audio_em_uma_chamada(self, application):
+        """
+        Footgun corrigido: usuário muda canal + ajustes de áudio simultaneamente,
+        clica em Save → as duas abas são gravadas no mesmo `repo.save()`.
+        """
+        application._cfg_channel_entry.setText("https://novo.canal")
+        application._cfg_folder_entry.setText("NOVA_FOLDER")
+        application._audio_tab._fade_in_check.setChecked(True)
+        application._audio_tab._fade_in_spin.setValue(2.5)
+
+        mock_repo = MagicMock()
+        mock_repo.load.return_value = {}
+        with patch("baixar_audio.config_repo", return_value=mock_repo):
+            application._cfg_save()
+
+        mock_repo.save.assert_called_once()
+        saved = mock_repo.save.call_args.args[0]
+        assert saved["channel_url"]                  == "https://novo.canal"
+        assert saved["drive_folder_id"]              == "NOVA_FOLDER"
+        assert saved["audio_edit"]["fade_in_enabled"] is True
+        assert saved["audio_edit"]["fade_in_secs"]    == 2.5
+
+    def test_cfg_save_recusa_canal_vazio(self, application):
+        application._cfg_channel_entry.setText("   ")
+        application._cfg_folder_entry.setText("FOLDER_OK")
+        with patch("baixar_audio.config_repo") as mock_repo_factory:
+            application._cfg_save()
+        mock_repo_factory.assert_not_called()
+        assert "vazia" in application._cfg_feedback_label.text().lower()
+
+    def test_cfg_save_recusa_folder_vazio(self, application):
+        application._cfg_channel_entry.setText("https://canal.ok")
+        application._cfg_folder_entry.setText("")
+        with patch("baixar_audio.config_repo") as mock_repo_factory:
+            application._cfg_save()
+        mock_repo_factory.assert_not_called()
+        assert "vazio" in application._cfg_feedback_label.text().lower()
+
+    def test_cfg_save_emite_feedback_de_sucesso(self, application):
+        application._cfg_channel_entry.setText("https://canal.ok")
+        application._cfg_folder_entry.setText("FOLDER_OK")
+        mock_repo = MagicMock()
+        mock_repo.load.return_value = {}
+        with patch("baixar_audio.config_repo", return_value=mock_repo):
+            application._cfg_save()
+        assert "sucesso" in application._cfg_feedback_label.text().lower()
+
+    def test_cfg_save_emite_feedback_de_erro_em_falha_de_io(self, application):
+        application._cfg_channel_entry.setText("https://canal.ok")
+        application._cfg_folder_entry.setText("FOLDER_OK")
+        mock_repo = MagicMock()
+        mock_repo.load.return_value = {}
+        mock_repo.save.side_effect = OSError("disk full")
+        with patch("baixar_audio.config_repo", return_value=mock_repo):
+            application._cfg_save()
+        assert "erro" in application._cfg_feedback_label.text().lower()
+
+    def test_cfg_save_persiste_vinheta_como_basename(self, application):
+        """
+        intro_path absoluto em VINHETAS_DIR vira basename no config.json
+        (portabilidade entre instalações).
+        """
+        application._cfg_channel_entry.setText("https://canal.ok")
+        application._cfg_folder_entry.setText("FOLDER_OK")
+        application._audio_tab._intro_path = os.path.join(
+            baixar_audio.VINHETAS_DIR, "intro.mp3"
+        )
+        application._audio_tab._eq_check.setChecked(True)
+
+        mock_repo = MagicMock()
+        mock_repo.load.return_value = {}
+        with patch("baixar_audio.config_repo", return_value=mock_repo):
+            application._cfg_save()
+        saved = mock_repo.save.call_args.args[0]
+        assert saved["audio_edit"]["intro_path"] == "intro.mp3"
+
+
+# ===========================================================================
+# Página "Configurações de Áudio" — controles funcionais (PR 5)
+# ===========================================================================
+
+class TestSettingsDialogPaginaAudio:
+    """
+    Cobre os controles funcionais da subpágina de áudio:
+      - leitura inicial dos defaults
+      - selecionar/remover vinhetas
+      - mexer slider de EQ → preset auto-troca para Personalizado
+      - restaurar preset Voz Masculina
+      - salvar persiste o audio_edit no config.json
+      - play button usa QMediaPlayer (mockado)
+    """
+
+    def _make_dialog(self, application, audio_edit=None):
+        """
+        Constrói um _AudioSettingsTab fresco — cada teste tem seu próprio
+        widget (estado isolado). O `application` fornece o QApplication
+        global; o widget não precisa ser mostrado nem anexado à página.
+        """
+        from app import _AudioSettingsTab
+        from domain.entities import AudioEditConfig
+        cfg = {
+            "channel_url": "https://canal.exemplo",
+            "drive_folder_id": "FOLDER",
+            "audio_edit": audio_edit if audio_edit is not None else AudioEditConfig().to_dict(),
+        }
+        with patch("baixar_audio.check_auth_status", return_value=True), \
+             patch("baixar_audio.load_config", return_value=cfg):
+            return _AudioSettingsTab(parent=application)
+
+    # -----------------------------------------------------------------------
+    # Estado inicial
+    # -----------------------------------------------------------------------
+
+    def test_pagina_audio_carrega_defaults(self, application):
+        dlg = self._make_dialog(application)
+        assert dlg._intro_path == ""
+        assert dlg._outro_path == ""
+        assert dlg._fade_in_check.isChecked() is False
+        assert dlg._fade_out_check.isChecked() is False
+        assert dlg._eq_check.isChecked() is False
+        assert dlg._noise_check.isChecked() is False
+        assert dlg._noise_intensity_radios["media"].isChecked() is True
+
+    def test_eq_sliders_iniciam_com_preset_voz_masculina(self, application):
+        from domain.audio_presets import EQ_PRESET_VOZ_MASCULINA
+        dlg = self._make_dialog(application)
+        # 5 sliders, valores em décimos de dB
+        for (freq, slider), (_freq, expected) in zip(
+            dlg._eq_sliders, EQ_PRESET_VOZ_MASCULINA
+        ):
+            assert freq == _freq
+            assert slider.value() == int(expected * 10)
+
+    def test_combo_preset_inicia_em_voz_masculina(self, application):
+        dlg = self._make_dialog(application)
+        assert dlg._eq_preset_combo.currentIndex() == 0
+
+    def test_carrega_valores_personalizados_do_config(self, application):
+        from domain.entities import AudioEditConfig
+        custom = AudioEditConfig(
+            fade_in_enabled=True,
+            fade_in_secs=4.5,
+            eq_enabled=True,
+            noise_reduction_enabled=True,
+            noise_reduction_intensity="alta",
+        )
+        dlg = self._make_dialog(application, audio_edit=custom.to_dict())
+        assert dlg._fade_in_check.isChecked() is True
+        assert dlg._fade_in_spin.value() == 4.5
+        assert dlg._eq_check.isChecked() is True
+        assert dlg._noise_check.isChecked() is True
+        assert dlg._noise_intensity_radios["alta"].isChecked() is True
+
+    # -----------------------------------------------------------------------
+    # Vinhetas: selecionar e remover
+    # -----------------------------------------------------------------------
+
+    def test_select_vinheta_atualiza_path_e_habilita_botoes(self, application, tmp_path):
+        dlg = self._make_dialog(application)
+        # Origem real (será copiada)
+        src = tmp_path / "origem.mp3"
+        src.write_bytes(b"audio fake")
+        vdir = tmp_path / "assets_vinhetas"
+
+        with patch.object(
+            __import__("app").QFileDialog, "getOpenFileName",
+            return_value=(str(src), "Audio"),
+        ), patch("baixar_audio.VINHETAS_DIR", str(vdir)):
+            dlg._select_vinheta("intro")
+
+        assert dlg._intro_path.startswith(str(vdir))
+        assert dlg._intro_path.endswith("intro.mp3")
+        assert dlg._intro_btn_play.isEnabled() is True
+        assert dlg._intro_btn_remove.isEnabled() is True
+
+    def test_select_vinheta_cancelado_nao_altera_estado(self, application):
+        dlg = self._make_dialog(application)
+        with patch.object(
+            __import__("app").QFileDialog, "getOpenFileName",
+            return_value=("", ""),
+        ):
+            dlg._select_vinheta("intro")
+        assert dlg._intro_path == ""
+        assert dlg._intro_btn_play.isEnabled() is False
+
+    def test_remove_vinheta_limpa_path_e_desabilita_botoes(self, application, tmp_path):
+        # Cria um arquivo simulando vinheta já copiada para VINHETAS_DIR
+        from domain.entities import AudioEditConfig
+        vdir = tmp_path / "assets_vinhetas"
+        vdir.mkdir()
+        existing = vdir / "intro.mp3"
+        existing.write_bytes(b"old")
+
+        custom = AudioEditConfig(intro_path=str(existing)).to_dict()
+        dlg = self._make_dialog(application, audio_edit=custom)
+        assert dlg._intro_btn_play.isEnabled() is True
+
+        with patch("baixar_audio.VINHETAS_DIR", str(vdir)):
+            dlg._remove_vinheta("intro")
+
+        assert dlg._intro_path == ""
+        assert dlg._intro_btn_play.isEnabled() is False
+        assert dlg._intro_btn_remove.isEnabled() is False
+        # Arquivo físico foi removido
+        assert not existing.exists()
+
+    # -----------------------------------------------------------------------
+    # EQ: sliders e presets
+    # -----------------------------------------------------------------------
+
+    def test_mexer_slider_muda_preset_para_personalizado(self, application):
+        dlg = self._make_dialog(application)
+        assert dlg._eq_preset_combo.currentIndex() == 0
+        # Move o primeiro slider 1 unidade pra cima
+        _freq, slider = dlg._eq_sliders[0]
+        slider.setValue(slider.value() + 1)
+        assert dlg._eq_preset_combo.currentIndex() == 1
+
+    def test_restaurar_padrao_volta_sliders_para_voz_masculina(self, application):
+        from domain.audio_presets import EQ_PRESET_VOZ_MASCULINA
+        dlg = self._make_dialog(application)
+        # Bagunça os sliders
+        for _freq, slider in dlg._eq_sliders:
+            slider.setValue(50)  # +5.0 dB
+
+        dlg._restore_eq_default()
+
+        for (freq, slider), (_f, expected) in zip(
+            dlg._eq_sliders, EQ_PRESET_VOZ_MASCULINA
+        ):
+            assert slider.value() == int(expected * 10)
+        assert dlg._eq_preset_combo.currentIndex() == 0
+
+    def test_combo_preset_voz_masculina_restaura_sliders(self, application):
+        from domain.audio_presets import EQ_PRESET_VOZ_MASCULINA
+        dlg = self._make_dialog(application)
+        # Mexe sliders → preset vira "Personalizado"
+        _freq, slider = dlg._eq_sliders[0]
+        slider.setValue(slider.value() + 30)
+        assert dlg._eq_preset_combo.currentIndex() == 1
+
+        # Trocar combo para "Voz Masculina" deve restaurar
+        dlg._eq_preset_combo.setCurrentIndex(0)
+        for (freq, slider), (_f, expected) in zip(
+            dlg._eq_sliders, EQ_PRESET_VOZ_MASCULINA
+        ):
+            assert slider.value() == int(expected * 10)
+
+    # -----------------------------------------------------------------------
+    # Leitura do estado da UI → AudioEditConfig
+    # -----------------------------------------------------------------------
+
+    def test_read_audio_config_from_ui_reflete_estado(self, application):
+        dlg = self._make_dialog(application)
+        dlg._fade_in_check.setChecked(True)
+        dlg._fade_in_spin.setValue(2.5)
+        dlg._eq_check.setChecked(True)
+        dlg._noise_check.setChecked(True)
+        dlg._noise_intensity_radios["alta"].setChecked(True)
+        dlg._intro_path = "/tmp/intro.mp3"
+        dlg._intro_overlap_spin.setValue(1.5)
+
+        cfg = dlg._read_audio_config_from_ui()
+
+        assert cfg.fade_in_enabled is True
+        assert cfg.fade_in_secs == 2.5
+        assert cfg.eq_enabled is True
+        assert cfg.noise_reduction_enabled is True
+        assert cfg.noise_reduction_intensity == "alta"
+        assert cfg.intro_path == "/tmp/intro.mp3"
+        assert cfg.intro_overlap_secs == 1.5
+        assert cfg.has_any_filter_enabled is True
+
+    def test_read_audio_config_intro_path_vazio_vira_none(self, application):
+        dlg = self._make_dialog(application)
+        cfg = dlg._read_audio_config_from_ui()
+        assert cfg.intro_path is None
+        assert cfg.outro_path is None
+
+    # -----------------------------------------------------------------------
+    # PR 8: vinheta path persistido como basename (portabilidade)
+    # -----------------------------------------------------------------------
+
+    def test_carrega_basename_do_config_e_resolve_para_abs(self, application):
+        """
+        Config legado com basename ('intro.mp3') vira abs path em runtime
+        (resolvido via VINHETAS_DIR — funciona mesmo se a pasta foi movida).
+        """
+        from domain.entities import AudioEditConfig
+        # Persistimos só o basename, sem path
+        cfg_dict = AudioEditConfig().to_dict()
+        cfg_dict["intro_path"] = "intro.mp3"
+
+        dlg = self._make_dialog(application, audio_edit=cfg_dict)
+
+        # Na UI, _intro_path é absoluto (resolvido)
+        assert dlg._intro_path == os.path.join(
+            baixar_audio.VINHETAS_DIR, "intro.mp3"
+        )
+
+    # -----------------------------------------------------------------------
+    # Player de preview (QMediaPlayer mockado)
+    # -----------------------------------------------------------------------
+
+    def test_toggle_play_sem_path_nao_chama_player(self, application):
+        dlg = self._make_dialog(application)
+        # _intro_path está vazio
+        with patch.object(dlg, "_ensure_media_player") as ensure:
+            dlg._toggle_play_vinheta("intro")
+        ensure.assert_not_called()
+
+    def test_toggle_play_inicia_reproducao(self, application):
+        from domain.entities import AudioEditConfig
+        custom = AudioEditConfig(intro_path="/tmp/intro.mp3").to_dict()
+        dlg = self._make_dialog(application, audio_edit=custom)
+
+        # Mock do _ensure_media_player que injeta um player fake
+        fake_player = MagicMock()
+        def _ensure():
+            dlg._media_player = fake_player
+        with patch.object(dlg, "_ensure_media_player", side_effect=_ensure):
+            dlg._toggle_play_vinheta("intro")
+
+        fake_player.play.assert_called_once()
+        assert dlg._currently_playing == "intro"
+
+    def test_toggle_play_segunda_vez_para(self, application):
+        from domain.entities import AudioEditConfig
+        custom = AudioEditConfig(intro_path="/tmp/intro.mp3").to_dict()
+        dlg = self._make_dialog(application, audio_edit=custom)
+
+        fake_player = MagicMock()
+        dlg._media_player = fake_player
+        dlg._currently_playing = "intro"
+
+        dlg._toggle_play_vinheta("intro")
+        fake_player.stop.assert_called_once()
+        assert dlg._currently_playing is None
+
+    def test_remove_vinheta_para_player_se_estava_tocando(self, application, tmp_path):
+        from domain.entities import AudioEditConfig
+        vdir = tmp_path / "assets_vinhetas"
+        vdir.mkdir()
+        existing = vdir / "intro.mp3"
+        existing.write_bytes(b"old")
+        custom = AudioEditConfig(intro_path=str(existing)).to_dict()
+        dlg = self._make_dialog(application, audio_edit=custom)
+
+        fake_player = MagicMock()
+        dlg._media_player = fake_player
+        dlg._currently_playing = "intro"
+
+        with patch("baixar_audio.VINHETAS_DIR", str(vdir)):
+            dlg._remove_vinheta("intro")
+        fake_player.stop.assert_called_once()
+        assert dlg._intro_path == ""
+
+
+# ===========================================================================
+# Gerenciamento dos assets de vinheta (PR 6)
+# ===========================================================================
+
+class TestVinhetasAssetManagement:
+    """
+    Cobre a cópia/limpeza dos arquivos de vinheta em `assets/vinhetas/`:
+      - cria a pasta se não existir
+      - copia o arquivo escolhido para {kind}.{ext}
+      - sobrescreve vinheta anterior do mesmo tipo (mesmo com extensão diferente)
+      - remove o arquivo físico em _remove_vinheta
+      - persiste o caminho INTERNO (assets/vinhetas/), não o original
+    """
+
+    def _make_dialog(self, application, audio_edit=None):
+        """
+        Constrói um _AudioSettingsTab fresco — cada teste tem seu próprio
+        widget (estado isolado). O `application` fornece o QApplication
+        global; o widget não precisa ser mostrado nem anexado à página.
+        """
+        from app import _AudioSettingsTab
+        from domain.entities import AudioEditConfig
+        cfg = {
+            "channel_url": "https://canal.exemplo",
+            "drive_folder_id": "FOLDER",
+            "audio_edit": audio_edit if audio_edit is not None else AudioEditConfig().to_dict(),
+        }
+        with patch("baixar_audio.check_auth_status", return_value=True), \
+             patch("baixar_audio.load_config", return_value=cfg):
+            return _AudioSettingsTab(parent=application)
+
+    def test_select_cria_pasta_se_nao_existir(self, application, tmp_path):
+        dlg = self._make_dialog(application)
+        src = tmp_path / "origem.mp3"
+        src.write_bytes(b"x")
+        vdir = tmp_path / "novos_assets" / "vinhetas"  # ainda não existe
+
+        assert not vdir.exists()
+        with patch.object(
+            __import__("app").QFileDialog, "getOpenFileName",
+            return_value=(str(src), ""),
+        ), patch("baixar_audio.VINHETAS_DIR", str(vdir)):
+            dlg._select_vinheta("intro")
+
+        assert vdir.exists()
+
+    def test_select_copia_arquivo_para_assets_vinhetas(self, application, tmp_path):
+        dlg = self._make_dialog(application)
+        src = tmp_path / "origem.mp3"
+        src.write_bytes(b"conteudo audio fake")
+        vdir = tmp_path / "vinhetas"
+
+        with patch.object(
+            __import__("app").QFileDialog, "getOpenFileName",
+            return_value=(str(src), ""),
+        ), patch("baixar_audio.VINHETAS_DIR", str(vdir)):
+            dlg._select_vinheta("intro")
+
+        dest = vdir / "intro.mp3"
+        assert dest.exists()
+        assert dest.read_bytes() == b"conteudo audio fake"
+        assert dlg._intro_path == str(dest)
+
+    def test_select_preserva_extensao_original(self, application, tmp_path):
+        dlg = self._make_dialog(application)
+        src = tmp_path / "minha_vinheta.wav"
+        src.write_bytes(b"x")
+        vdir = tmp_path / "vinhetas"
+
+        with patch.object(
+            __import__("app").QFileDialog, "getOpenFileName",
+            return_value=(str(src), ""),
+        ), patch("baixar_audio.VINHETAS_DIR", str(vdir)):
+            dlg._select_vinheta("intro")
+
+        assert (vdir / "intro.wav").exists()
+        assert not (vdir / "intro.mp3").exists()
+
+    def test_select_outro_usa_prefixo_outro(self, application, tmp_path):
+        dlg = self._make_dialog(application)
+        src = tmp_path / "encerramento.m4a"
+        src.write_bytes(b"x")
+        vdir = tmp_path / "vinhetas"
+
+        with patch.object(
+            __import__("app").QFileDialog, "getOpenFileName",
+            return_value=(str(src), ""),
+        ), patch("baixar_audio.VINHETAS_DIR", str(vdir)):
+            dlg._select_vinheta("outro")
+
+        assert (vdir / "outro.m4a").exists()
+        assert dlg._outro_path.endswith("outro.m4a")
+
+    def test_select_sobrescreve_mesma_extensao(self, application, tmp_path):
+        dlg = self._make_dialog(application)
+        vdir = tmp_path / "vinhetas"
+        vdir.mkdir()
+        # Vinheta antiga
+        old = vdir / "intro.mp3"
+        old.write_bytes(b"velha")
+
+        # Nova vinheta substitui
+        src = tmp_path / "nova.mp3"
+        src.write_bytes(b"nova")
+
+        with patch.object(
+            __import__("app").QFileDialog, "getOpenFileName",
+            return_value=(str(src), ""),
+        ), patch("baixar_audio.VINHETAS_DIR", str(vdir)):
+            dlg._select_vinheta("intro")
+
+        assert (vdir / "intro.mp3").read_bytes() == b"nova"
+
+    def test_select_apaga_vinheta_antiga_de_extensao_diferente(
+        self, application, tmp_path
+    ):
+        """
+        Se já existe `intro.wav` e o usuário escolhe um `.mp3`, o `.wav`
+        deve ser removido para não acumular arquivos órfãos.
+        """
+        dlg = self._make_dialog(application)
+        vdir = tmp_path / "vinhetas"
+        vdir.mkdir()
+        old_wav = vdir / "intro.wav"
+        old_wav.write_bytes(b"velha wav")
+
+        src = tmp_path / "nova.mp3"
+        src.write_bytes(b"nova mp3")
+
+        with patch.object(
+            __import__("app").QFileDialog, "getOpenFileName",
+            return_value=(str(src), ""),
+        ), patch("baixar_audio.VINHETAS_DIR", str(vdir)):
+            dlg._select_vinheta("intro")
+
+        assert not old_wav.exists()
+        assert (vdir / "intro.mp3").exists()
+
+    def test_select_outro_nao_apaga_intro(self, application, tmp_path):
+        """Selecionar uma vinheta outro não deve mexer em intro existente."""
+        dlg = self._make_dialog(application)
+        vdir = tmp_path / "vinhetas"
+        vdir.mkdir()
+        intro_existente = vdir / "intro.mp3"
+        intro_existente.write_bytes(b"intro preservada")
+
+        src = tmp_path / "nova_outro.mp3"
+        src.write_bytes(b"outro")
+
+        with patch.object(
+            __import__("app").QFileDialog, "getOpenFileName",
+            return_value=(str(src), ""),
+        ), patch("baixar_audio.VINHETAS_DIR", str(vdir)):
+            dlg._select_vinheta("outro")
+
+        assert intro_existente.exists()
+        assert intro_existente.read_bytes() == b"intro preservada"
+
+    def test_remove_apaga_arquivo_fisico(self, application, tmp_path):
+        from domain.entities import AudioEditConfig
+        vdir = tmp_path / "vinhetas"
+        vdir.mkdir()
+        existing = vdir / "intro.mp3"
+        existing.write_bytes(b"x")
+
+        dlg = self._make_dialog(
+            application,
+            audio_edit=AudioEditConfig(intro_path=str(existing)).to_dict(),
+        )
+
+        with patch("baixar_audio.VINHETAS_DIR", str(vdir)):
+            dlg._remove_vinheta("intro")
+
+        assert not existing.exists()
+
+    def test_remove_apaga_arquivos_de_qualquer_extensao(self, application, tmp_path):
+        """Remove deve apagar `intro.*` regardless of extension."""
+        from domain.entities import AudioEditConfig
+        vdir = tmp_path / "vinhetas"
+        vdir.mkdir()
+        wav  = vdir / "intro.wav"
+        ogg  = vdir / "intro.ogg"
+        wav.write_bytes(b"a")
+        ogg.write_bytes(b"b")
+
+        dlg = self._make_dialog(
+            application,
+            audio_edit=AudioEditConfig(intro_path=str(wav)).to_dict(),
+        )
+
+        with patch("baixar_audio.VINHETAS_DIR", str(vdir)):
+            dlg._remove_vinheta("intro")
+
+        assert not wav.exists()
+        assert not ogg.exists()
+
+    def test_remove_intro_nao_apaga_outro(self, application, tmp_path):
+        from domain.entities import AudioEditConfig
+        vdir = tmp_path / "vinhetas"
+        vdir.mkdir()
+        intro = vdir / "intro.mp3"
+        outro = vdir / "outro.mp3"
+        intro.write_bytes(b"i")
+        outro.write_bytes(b"o")
+
+        dlg = self._make_dialog(
+            application,
+            audio_edit=AudioEditConfig(
+                intro_path=str(intro), outro_path=str(outro),
+            ).to_dict(),
+        )
+        with patch("baixar_audio.VINHETAS_DIR", str(vdir)):
+            dlg._remove_vinheta("intro")
+
+        assert not intro.exists()
+        assert outro.exists()
+
+    def test_select_persiste_path_interno_e_nao_o_original(
+        self, application, tmp_path
+    ):
+        """O save deve persistir o path em assets/vinhetas/, não o externo."""
+        dlg = self._make_dialog(application)
+        src = tmp_path / "longe" / "minha.mp3"
+        src.parent.mkdir()
+        src.write_bytes(b"x")
+        vdir = tmp_path / "vinhetas"
+
+        with patch.object(
+            __import__("app").QFileDialog, "getOpenFileName",
+            return_value=(str(src), ""),
+        ), patch("baixar_audio.VINHETAS_DIR", str(vdir)):
+            dlg._select_vinheta("intro")
+            cfg = dlg._read_audio_config_from_ui()
+
+        # O path no AudioEditConfig é o interno (em assets/vinhetas/)
+        assert cfg.intro_path == str(vdir / "intro.mp3")
+        assert "longe" not in cfg.intro_path
+
+    def test_baixar_audio_define_vinhetas_dir(self):
+        """Sanity check da constante exposta por baixar_audio."""
+        assert hasattr(baixar_audio, "VINHETAS_DIR")
+        assert "vinhetas" in baixar_audio.VINHETAS_DIR
+        assert "assets" in baixar_audio.VINHETAS_DIR
+
+
+# ===========================================================================
+# Card "Teste de configuração" (PR 7)
+# ===========================================================================
+
+class TestTestPreviewCard:
+    """
+    Smoke tests do card de teste:
+      - estado inicial: botões desabilitados
+      - Selecionar exemplo habilita "Gerar preview"
+      - Gerar preview sem exemplo mostra erro
+      - Gerar preview chama o presenter (mockado) com a config da UI
+      - Cancelar sinaliza o cancel_event
+      - Limpar apaga o preview
+    """
+
+    def _make_dialog(self, application, audio_edit=None):
+        """
+        Constrói um _AudioSettingsTab fresco — cada teste tem seu próprio
+        widget (estado isolado). O `application` fornece o QApplication
+        global; o widget não precisa ser mostrado nem anexado à página.
+        """
+        from app import _AudioSettingsTab
+        from domain.entities import AudioEditConfig
+        cfg = {
+            "channel_url": "https://canal.exemplo",
+            "drive_folder_id": "FOLDER",
+            "audio_edit": audio_edit if audio_edit is not None else AudioEditConfig().to_dict(),
+        }
+        with patch("baixar_audio.check_auth_status", return_value=True), \
+             patch("baixar_audio.load_config", return_value=cfg):
+            return _AudioSettingsTab(parent=application)
+
+    # -----------------------------------------------------------------------
+    # Estado inicial
+    # -----------------------------------------------------------------------
+
+    def test_botoes_iniciais_desabilitados(self, application):
+        dlg = self._make_dialog(application)
+        assert dlg._test_btn_generate.isEnabled() is False
+        assert dlg._test_btn_play.isEnabled()     is False
+        assert dlg._test_btn_clear.isEnabled()    is False
+        assert dlg._test_btn_cancel.isVisible()   is False
+
+    def test_progresso_oculto_inicialmente(self, application):
+        dlg = self._make_dialog(application)
+        assert dlg._test_progress.isVisible() is False
+
+    # -----------------------------------------------------------------------
+    # Selecionar arquivo de exemplo
+    # -----------------------------------------------------------------------
+
+    def test_selecionar_exemplo_habilita_gerar_preview(self, application):
+        dlg = self._make_dialog(application)
+        with patch.object(
+            __import__("app").QFileDialog, "getOpenFileName",
+            return_value=("/tmp/exemplo.mp3", ""),
+        ):
+            dlg._select_test_sample()
+        assert dlg._test_sample_path == "/tmp/exemplo.mp3"
+        assert dlg._test_btn_generate.isEnabled() is True
+
+    def test_selecionar_cancelado_nao_altera_estado(self, application):
+        dlg = self._make_dialog(application)
+        with patch.object(
+            __import__("app").QFileDialog, "getOpenFileName",
+            return_value=("", ""),
+        ):
+            dlg._select_test_sample()
+        assert dlg._test_sample_path == ""
+        assert dlg._test_btn_generate.isEnabled() is False
+
+    # -----------------------------------------------------------------------
+    # Gerar preview
+    # -----------------------------------------------------------------------
+
+    def test_gerar_sem_exemplo_mostra_erro(self, application):
+        dlg = self._make_dialog(application)
+        # Sem patchear _test_sample_path → vazio
+        dlg._generate_test_preview()
+        assert "selecione" in dlg._test_status_label.text().lower()
+        assert dlg._test_running is False
+
+    def test_gerar_chama_presenter_com_config_da_ui(self, application, tmp_path):
+        """
+        Build dialog, marca fade in habilitado na UI (sem salvar no config),
+        clica "Gerar preview" → presenter.execute deve receber a config com
+        fade_in_enabled=True.
+        """
+        import threading
+
+        dlg = self._make_dialog(application)
+        dlg._test_sample_path = str(tmp_path / "exemplo.mp3")
+        dlg._fade_in_check.setChecked(True)
+        dlg._fade_in_spin.setValue(2.5)
+
+        # Captura síncrona da config passada ao presenter (em vez de iniciar thread)
+        captured = {}
+
+        class FakePresenter:
+            def execute(self, sample_path, preview_path, config, **kw):
+                captured["sample_path"]  = sample_path
+                captured["preview_path"] = preview_path
+                captured["config"]       = config
+                return preview_path
+
+        # Patchear threading.Thread para rodar inline (sem thread real)
+        class _InlineThread:
+            def __init__(self, target=None, daemon=None):
+                self._target = target
+            def start(self):
+                self._target()
+
+        # Não precisamos mais patchear QTimer.singleShot — o fluxo agora usa
+        # signals do _AudioPreviewDispatcher, que ficam pendentes no event
+        # loop. Só validamos que o presenter foi chamado com a config certa.
+        with patch("composition_root.build_audio_test_presenter",
+                   return_value=FakePresenter()), \
+             patch.object(threading, "Thread", _InlineThread):
+            dlg._generate_test_preview()
+
+        assert captured["sample_path"] == dlg._test_sample_path
+        assert captured["config"].fade_in_enabled is True
+        assert captured["config"].fade_in_secs == 2.5
+
+    def test_gerar_quando_running_e_no_op(self, application):
+        dlg = self._make_dialog(application)
+        dlg._test_running = True
+        dlg._test_sample_path = "/tmp/x.mp3"
+        with patch("composition_root.build_audio_test_presenter") as mock_build:
+            dlg._generate_test_preview()
+        mock_build.assert_not_called()
+
+    # -----------------------------------------------------------------------
+    # Cancelamento
+    # -----------------------------------------------------------------------
+
+    def test_cancel_sinaliza_event(self, application):
+        import threading
+        dlg = self._make_dialog(application)
+        ev = threading.Event()
+        dlg._test_cancel_event = ev
+        dlg._cancel_test_preview()
+        assert ev.is_set() is True
+        assert "cancelando" in dlg._test_status_label.text().lower()
+
+    def test_cancel_sem_event_e_no_op(self, application):
+        dlg = self._make_dialog(application)
+        dlg._test_cancel_event = None
+        dlg._cancel_test_preview()  # não deve levantar
+        # Atualiza só status
+        assert "cancelando" in dlg._test_status_label.text().lower()
+
+    # -----------------------------------------------------------------------
+    # Callbacks pós-thread (chamados via QTimer.singleShot)
+    # -----------------------------------------------------------------------
+
+    def test_on_test_done_habilita_play_e_clear(self, application, tmp_path):
+        dlg = self._make_dialog(application)
+        preview = str(tmp_path / "_test_preview.mp3")
+
+        dlg._on_test_done(preview)
+
+        assert dlg._test_preview_path == preview
+        assert dlg._test_btn_play.isEnabled()  is True
+        assert dlg._test_btn_clear.isEnabled() is True
+        assert dlg._test_running is False
+        assert "preview gerado" in dlg._test_status_label.text().lower()
+
+    def test_on_test_error_mostra_erro_e_destrava_botoes(self, application):
+        dlg = self._make_dialog(application)
+        dlg._test_running = True
+
+        dlg._on_test_error("ffmpeg explodiu")
+
+        assert dlg._test_running is False
+        assert "erro" in dlg._test_status_label.text().lower()
+        assert "ffmpeg explodiu" in dlg._test_status_label.text()
+
+    def test_on_test_cancelled_destrava_botoes(self, application):
+        dlg = self._make_dialog(application)
+        dlg._test_running = True
+
+        dlg._on_test_cancelled()
+
+        assert dlg._test_running is False
+        assert "cancelad" in dlg._test_status_label.text().lower()
+
+    # -----------------------------------------------------------------------
+    # Limpar
+    # -----------------------------------------------------------------------
+
+    def test_clear_apaga_preview_e_zera_estado(self, application, tmp_path):
+        dlg = self._make_dialog(application)
+        preview = tmp_path / "_test_preview.mp3"
+        preview.write_bytes(b"xyz")
+        dlg._test_preview_path = str(preview)
+        dlg._test_sample_path  = "/tmp/exemplo.mp3"
+        dlg._test_btn_play.setEnabled(True)
+        dlg._test_btn_clear.setEnabled(True)
+        dlg._test_btn_generate.setEnabled(True)
+
+        dlg._clear_test_preview()
+
+        assert not preview.exists()
+        assert dlg._test_preview_path == ""
+        assert dlg._test_sample_path  == ""
+        assert dlg._test_btn_play.isEnabled()     is False
+        assert dlg._test_btn_clear.isEnabled()    is False
+        assert dlg._test_btn_generate.isEnabled() is False
+
+    def test_clear_para_player_se_estava_tocando_preview(self, application, tmp_path):
+        dlg = self._make_dialog(application)
+        preview = tmp_path / "_test_preview.mp3"
+        preview.write_bytes(b"xyz")
+        dlg._test_preview_path = str(preview)
+
+        fake_player = MagicMock()
+        dlg._media_player = fake_player
+        dlg._currently_playing = "_test_"
+
+        dlg._clear_test_preview()
+
+        fake_player.stop.assert_called_once()
+        assert dlg._currently_playing is None
+
+    # -----------------------------------------------------------------------
+    # Player do preview — agora abre _AudioPlayerDialog modal
+    # -----------------------------------------------------------------------
+
+    def test_toggle_play_test_sem_path_nao_abre_dialog(self, application):
+        dlg = self._make_dialog(application)
+        # _test_preview_path está vazio
+        with patch("app._AudioPlayerDialog") as MockDialog:
+            dlg._toggle_play_test_preview()
+        MockDialog.assert_not_called()
+
+    def test_toggle_play_test_preview_inexistente_mostra_erro(
+        self, application, tmp_path
+    ):
+        dlg = self._make_dialog(application)
+        # Preview path aponta para arquivo que não existe
+        dlg._test_preview_path = str(tmp_path / "nao_existe.mp3")
+        with patch("app._AudioPlayerDialog") as MockDialog:
+            dlg._toggle_play_test_preview()
+        MockDialog.assert_not_called()
+        assert "não encontrado" in dlg._test_status_label.text().lower()
+
+    def test_toggle_play_test_abre_audio_player_dialog(
+        self, application, tmp_path
+    ):
+        dlg = self._make_dialog(application)
+        preview = tmp_path / "_test_preview.mp3"
+        preview.write_bytes(b"x")
+        dlg._test_preview_path = str(preview)
+
+        with patch("app._AudioPlayerDialog") as MockDialog:
+            mock_instance = MagicMock()
+            MockDialog.return_value = mock_instance
+            dlg._toggle_play_test_preview()
+
+        # Diálogo foi construído com o path do preview
+        MockDialog.assert_called_once()
+        args, kwargs = MockDialog.call_args
+        assert args[0] == str(preview)
+        # E exec() foi chamado (modal)
+        mock_instance.exec.assert_called_once()
+
+    def test_toggle_play_test_para_vinheta_antes_de_abrir_dialog(
+        self, application, tmp_path
+    ):
+        """Se estava tocando uma vinheta, para antes de abrir o popup."""
+        dlg = self._make_dialog(application)
+        preview = tmp_path / "_test_preview.mp3"
+        preview.write_bytes(b"x")
+        dlg._test_preview_path = str(preview)
+
+        fake_player = MagicMock()
+        dlg._media_player = fake_player
+        dlg._currently_playing = "intro"
+
+        with patch("app._AudioPlayerDialog"):
+            dlg._toggle_play_test_preview()
+
+        fake_player.stop.assert_called_once()
+        assert dlg._currently_playing is None
+
+
+# ===========================================================================
+# _AudioPlayerDialog — popup com player simples (play/pause, skip ±10s, slider)
+# ===========================================================================
+
+class TestAudioPlayerDialog:
+    """
+    Cobre o player popup do preview:
+      - inicialização (player, slider, labels)
+      - format do tempo (_fmt)
+      - skip ±10s clampado entre 0 e duração
+      - slider drag não sobrescreve durante reprodução
+      - closeEvent para o player
+    """
+
+    def _make_dialog(self, application, tmp_path):
+        """Cria o diálogo com QMediaPlayer mockado (não toca áudio de verdade)."""
+        from app import _AudioPlayerDialog
+        f = tmp_path / "audio.mp3"
+        f.write_bytes(b"x")
+
+        # Mock total do QMediaPlayer/QAudioOutput para não tocar áudio
+        # nem depender dos plugins multimedia do sistema.
+        fake_player = MagicMock()
+        fake_player.position.return_value = 0
+        with patch("PyQt6.QtMultimedia.QMediaPlayer", return_value=fake_player), \
+             patch("PyQt6.QtMultimedia.QAudioOutput"):
+            dlg = _AudioPlayerDialog(str(f), parent=application)
+        return dlg, fake_player
+
+    def test_dialog_tem_controles_basicos(self, application, tmp_path):
+        dlg, _ = self._make_dialog(application, tmp_path)
+        assert hasattr(dlg, "_slider")
+        assert hasattr(dlg, "_btn_play")
+        assert hasattr(dlg, "_btn_back")
+        assert hasattr(dlg, "_btn_fwd")
+        assert hasattr(dlg, "_time_label")
+        assert hasattr(dlg, "_duration_label")
+
+    def test_dialog_e_modal(self, application, tmp_path):
+        dlg, _ = self._make_dialog(application, tmp_path)
+        assert dlg.isModal() is True
+
+    def test_auto_play_ao_abrir(self, application, tmp_path):
+        _, player = self._make_dialog(application, tmp_path)
+        player.play.assert_called_once()
+
+    def test_fmt_converte_ms_para_mm_ss(self):
+        from app import _AudioPlayerDialog
+        assert _AudioPlayerDialog._fmt(0)        == "00:00"
+        assert _AudioPlayerDialog._fmt(1000)     == "00:01"
+        assert _AudioPlayerDialog._fmt(59_999)   == "00:59"
+        assert _AudioPlayerDialog._fmt(60_000)   == "01:00"
+        assert _AudioPlayerDialog._fmt(125_000)  == "02:05"
+        assert _AudioPlayerDialog._fmt(3_725_000) == "62:05"
+
+    def test_fmt_lida_com_valor_negativo(self):
+        from app import _AudioPlayerDialog
+        assert _AudioPlayerDialog._fmt(-5) == "00:00"
+
+    def test_skip_avança_10s(self, application, tmp_path):
+        dlg, player = self._make_dialog(application, tmp_path)
+        dlg._duration_ms = 60_000  # 60s
+        player.position.return_value = 5_000  # 5s
+        dlg._skip(10)
+        # Deve setar para 15_000 ms
+        player.setPosition.assert_called_with(15_000)
+
+    def test_skip_retorna_10s_clampado_em_zero(self, application, tmp_path):
+        dlg, player = self._make_dialog(application, tmp_path)
+        dlg._duration_ms = 60_000
+        player.position.return_value = 3_000  # 3s
+        dlg._skip(-10)
+        # 3000 - 10000 = -7000 → clampado em 0
+        player.setPosition.assert_called_with(0)
+
+    def test_skip_avança_clampado_na_duracao_total(self, application, tmp_path):
+        dlg, player = self._make_dialog(application, tmp_path)
+        dlg._duration_ms = 60_000
+        player.position.return_value = 55_000  # 55s
+        dlg._skip(10)
+        # 55s + 10s = 65s > 60s → clampado em 60s
+        player.setPosition.assert_called_with(60_000)
+
+    def test_position_atualiza_slider_e_label(self, application, tmp_path):
+        dlg, _ = self._make_dialog(application, tmp_path)
+        dlg._duration_ms = 60_000
+        dlg._slider.setRange(0, 60_000)
+        dlg._on_position_changed(30_000)
+        assert dlg._slider.value() == 30_000
+        assert dlg._time_label.text() == "00:30"
+
+    def test_position_nao_sobrescreve_slider_durante_drag(self, application, tmp_path):
+        dlg, _ = self._make_dialog(application, tmp_path)
+        dlg._slider.setRange(0, 100_000)
+        dlg._slider.setValue(10_000)
+        dlg._slider_dragging = True
+        # Player tenta atualizar slider durante o drag — deve ignorar
+        dlg._on_position_changed(50_000)
+        # Slider continua onde o usuário arrastou
+        assert dlg._slider.value() == 10_000
+
+    def test_duration_changed_atualiza_range_e_label(self, application, tmp_path):
+        dlg, _ = self._make_dialog(application, tmp_path)
+        dlg._on_duration_changed(90_000)
+        assert dlg._duration_ms == 90_000
+        assert dlg._slider.maximum() == 90_000
+        assert dlg._duration_label.text() == "01:30"
+
+    def test_slider_release_aplica_seek(self, application, tmp_path):
+        dlg, player = self._make_dialog(application, tmp_path)
+        dlg._slider.setRange(0, 60_000)
+        dlg._slider.setValue(25_000)
+        dlg._slider_dragging = True
+        dlg._on_slider_released()
+        player.setPosition.assert_called_with(25_000)
+        assert dlg._slider_dragging is False
+
+    def test_close_event_para_player(self, application, tmp_path):
+        from PyQt6.QtGui import QCloseEvent
+        dlg, player = self._make_dialog(application, tmp_path)
+        evt = QCloseEvent()
+        dlg.closeEvent(evt)
+        player.stop.assert_called_once()

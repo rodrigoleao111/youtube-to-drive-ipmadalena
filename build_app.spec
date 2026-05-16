@@ -43,6 +43,10 @@ else:
 qt6_we_d,  qt6_we_b,  qt6_we_h  = collect_all("PyQt6.QtWebEngineWidgets")
 qt6_wec_d, qt6_wec_b, qt6_wec_h = collect_all("PyQt6.QtWebEngineCore")
 
+# ── PyQt6 Multimedia: usado pelo SettingsDialog para preview das vinhetas ────
+# Inclui plugins de codec e DLLs (FFmpegMediaPlayer, WindowsMediaFoundation).
+qt6_mm_d,  qt6_mm_b,  qt6_mm_h  = collect_all("PyQt6.QtMultimedia")
+
 # ── Modulos adicionais PyQt6 usados diretamente ───────────────────────────────
 # Os hooks do pyinstaller-hooks-contrib ja cuidam dos binarios Qt6; aqui
 # apenas garantimos que os hidden imports sejam reconhecidos pelo analisador.
@@ -55,6 +59,7 @@ _qt6_hidden = [
     "PyQt6.QtNetwork",
     "PyQt6.QtWebEngineCore",
     "PyQt6.QtWebEngineWidgets",
+    "PyQt6.QtMultimedia",
     # player_subprocess_qt e importado condicionalmente via --player-mode-qt
     "player_subprocess_qt",
 ]
@@ -62,8 +67,8 @@ _qt6_hidden = [
 a = Analysis(
     ["app.py"],
     pathex=[os.path.abspath(".")],
-    binaries=extra_binaries + qt6_we_b + qt6_wec_b,
-    datas=qt6_we_d + qt6_wec_d + [
+    binaries=extra_binaries + qt6_we_b + qt6_wec_b + qt6_mm_b,
+    datas=qt6_we_d + qt6_wec_d + qt6_mm_d + [
         # Modulos Python locais (importados condicionalmente)
         ("setup_wizard.py",        "."),
         ("player_window_qt.py",    "."),
@@ -71,7 +76,7 @@ a = Analysis(
         # Icone da janela / barra de tarefas
         ("icon.ico", "."),
     ],
-    hiddenimports=qt6_we_h + qt6_wec_h + _qt6_hidden + [
+    hiddenimports=qt6_we_h + qt6_wec_h + qt6_mm_h + _qt6_hidden + [
         # Google APIs
         "google.auth",
         "google.auth.transport",

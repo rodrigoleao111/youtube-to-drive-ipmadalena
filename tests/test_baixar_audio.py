@@ -368,3 +368,79 @@ class TestGetDriveServiceToken:
         MockFlow.from_client_config.assert_called_once()
 
 
+# ===========================================================================
+# Helpers de path para vinhetas (PR 8 — portabilidade)
+# ===========================================================================
+
+class TestAudioEditPathHelpers:
+    """
+    Cobre `audio_edit_persist_paths` e `audio_edit_resolve_paths`:
+      - persist: abs (em VINHETAS_DIR) → basename
+      - resolve: basename → abs (junta com VINHETAS_DIR)
+      - paths fora de VINHETAS_DIR ou já absolutos não são alterados
+    """
+
+    def test_persist_converte_abs_em_vinhetas_dir_para_basename(self):
+        d = {"intro_path": os.path.join(baixar_audio.VINHETAS_DIR, "intro.mp3")}
+        result = baixar_audio.audio_edit_persist_paths(d)
+        assert result["intro_path"] == "intro.mp3"
+
+    def test_persist_outro_path_funciona(self):
+        d = {"outro_path": os.path.join(baixar_audio.VINHETAS_DIR, "outro.wav")}
+        result = baixar_audio.audio_edit_persist_paths(d)
+        assert result["outro_path"] == "outro.wav"
+
+    def test_persist_path_fora_de_vinhetas_dir_nao_altera(self):
+        d = {"intro_path": "/algum/lugar/externo/intro.mp3"}
+        result = baixar_audio.audio_edit_persist_paths(d)
+        assert result["intro_path"] == "/algum/lugar/externo/intro.mp3"
+
+    def test_persist_none_e_string_vazia_passam(self):
+        for val in (None, ""):
+            d = {"intro_path": val}
+            result = baixar_audio.audio_edit_persist_paths(d)
+            assert result["intro_path"] == val
+
+    def test_persist_nao_modifica_o_dict_de_entrada(self):
+        original = {"intro_path": os.path.join(baixar_audio.VINHETAS_DIR, "intro.mp3")}
+        snapshot = dict(original)
+        baixar_audio.audio_edit_persist_paths(original)
+        assert original == snapshot
+
+    def test_persist_dict_vazio_retorna_dict_vazio(self):
+        assert baixar_audio.audio_edit_persist_paths({}) == {}
+        assert baixar_audio.audio_edit_persist_paths(None) is None
+
+    def test_resolve_converte_basename_para_abs_em_vinhetas_dir(self):
+        d = {"intro_path": "intro.mp3"}
+        result = baixar_audio.audio_edit_resolve_paths(d)
+        assert result["intro_path"] == os.path.join(
+            baixar_audio.VINHETAS_DIR, "intro.mp3"
+        )
+
+    def test_resolve_path_ja_absoluto_nao_altera(self):
+        # Configs antigas (pré-PR-8) gravavam abs; precisam continuar funcionando
+        abs_path = "/algum/lugar/externo/intro.mp3"
+        d = {"intro_path": abs_path}
+        result = baixar_audio.audio_edit_resolve_paths(d)
+        assert result["intro_path"] == abs_path
+
+    def test_resolve_none_e_vazio_passam(self):
+        for val in (None, ""):
+            d = {"intro_path": val}
+            result = baixar_audio.audio_edit_resolve_paths(d)
+            assert result["intro_path"] == val
+
+    def test_resolve_dict_vazio_retorna_dict_vazio(self):
+        assert baixar_audio.audio_edit_resolve_paths({}) == {}
+        assert baixar_audio.audio_edit_resolve_paths(None) is None
+
+    def test_persist_resolve_e_round_trip(self):
+        original = {
+            "intro_path": os.path.join(baixar_audio.VINHETAS_DIR, "intro.mp3"),
+            "outro_path": os.path.join(baixar_audio.VINHETAS_DIR, "outro.wav"),
+        }
+        roundtrip = baixar_audio.audio_edit_resolve_paths(
+            baixar_audio.audio_edit_persist_paths(original)
+        )
+        assert roundtrip == original

@@ -40,15 +40,21 @@ run_tests.bat
 youtube_to_drive/
 │
 ├── domain/                         ← núcleo (zero dependências externas)
-│   ├── entities.py                 Video, Segment, AudioFile, ProcessingResult
-│   ├── ports.py                    IVideoSource, IAudioDownloader, ICloudStorage,
-│   │                                IHistoryRepository, IConfigRepository, INotifier
+│   ├── entities.py                 Video, Segment, AudioFile, ProcessingResult,
+│   │                                EqBand, AudioEditConfig
+│   ├── audio_presets.py            EQ_FREQS, EQ_PRESET_VOZ_MASCULINA, NOISE_INTENSITIES
+│   ├── ports.py                    IVideoSource, IAudioDownloader, IAudioEditor,
+│   │                                ICloudStorage, IHistoryRepository,
+│   │                                IConfigRepository, INotifier
 │   └── exceptions.py               IPMadalenaError, OperacaoCancelada, DomainError, ...
 │
 ├── infrastructure/                 ← adaptadores que implementam os ports
 │   ├── youtube/
 │   │   ├── _utils.py               ytdlp_exe(), ffmpeg_dir(), start_process(), check_cancel()
 │   │   └── ytdlp_source.py         YtDlpVideoSource, YtDlpAudioDownloader
+│   ├── audio/
+│   │   ├── _utils.py               ffmpeg_exe(), ffprobe_exe(), start_process()
+│   │   └── ffmpeg_editor.py        FfmpegAudioEditor (denoise/EQ/fade/concat de vinhetas)
 │   ├── drive/
 │   │   └── gdrive_storage.py       GoogleDriveStorage, _ProgressFile
 │   ├── persistence/
@@ -57,30 +63,35 @@ youtube_to_drive/
 │       └── plyer_notifier.py       PlyerNotifier
 │
 ├── application/                    ← use cases (orquestradores de domínio)
-│   └── use_cases.py                ListVideosUseCase, DownloadSegmentsUseCase, UploadAudioUseCase
+│   └── use_cases.py                ListVideosUseCase, DownloadSegmentsUseCase,
+│                                    EditAudioUseCase, UploadAudioUseCase
 │
 ├── presentation/                   ← adaptadores de UI
-│   └── processing_presenter.py     ProcessingPresenter
+│   ├── processing_presenter.py     ProcessingPresenter (download → edit → upload)
+│   └── audio_test_presenter.py     AudioTestPresenter (preview da config de áudio)
 │
-├── composition_root.py             ← fábrica única do presenter (DI)
+├── composition_root.py             ← fábrica única (DI) de ProcessingPresenter,
+│                                    AudioTestPresenter e PlyerNotifier
 │
-├── app.py                          interface gráfica (customtkinter)
+├── app.py                          interface gráfica (PyQt6) com SettingsDialog
+│                                    em duas subpáginas (Geral / Edição de áudio)
 ├── baixar_audio.py                 constantes, utilidades de SO, OAuth config, CLI
 ├── setup_wizard.py                 wizard de primeira execução
-├── player_window.py                painel de controles de trecho (CTkToplevel)
-├── player_subprocess.py            subprocesso do player YouTube (pywebview/Edge)
+├── player_window_qt.py             launcher do player Qt (subprocess)
+├── player_subprocess_qt.py         subprocesso do player YouTube (QWebEngine)
 │
-├── tests/                          suíte com 331 testes (pytest + unittest.mock)
+├── tests/                          suíte com 594 testes (pytest + unittest.mock)
 │
 ├── historico.json                  datas já processadas (gerado em runtime)
-├── config.json                     canal e pasta Drive (gerado em runtime)
+├── config.json                     canal/pasta Drive + audio_edit (gerado em runtime)
 ├── credentials/token.pkl           token OAuth (gerado em runtime)
 ├── downloads/                      pasta temporária (limpa após upload em produção)
+├── assets/vinhetas/                vinhetas de entrada e saída (intro.{ext}, outro.{ext})
 ├── logs/DD-MM-YYYY.log             log diário (gerado em runtime)
-├── ffmpeg/bin/ffmpeg.exe           conversor de áudio local
+├── ffmpeg/bin/ffmpeg.exe           conversor de áudio local (+ ffprobe.exe)
 │
 ├── instalar.bat                    instalador sem PyInstaller
-├── build_app.spec                  spec do PyInstaller
+├── build_app.spec                  spec do PyInstaller (inclui QtMultimedia)
 ├── build_installer.bat             gera IPMadalena_Setup.exe
 └── installer.iss                   script Inno Setup
 ```
@@ -88,14 +99,17 @@ youtube_to_drive/
 ## Dependências Python
 
 ```
-yt-dlp
-google-api-python-client
-google-auth-oauthlib
-customtkinter
-tkcalendar
-plyer
-pywebview
+PyQt6                        ← UI principal + QWebEngine + QtMultimedia
+yt-dlp                       ← listagem e download de áudio
+google-api-python-client     ← Google Drive API
+google-auth-oauthlib         ← OAuth 2.0 com browser
+plyer                        ← notificações desktop
 ```
+
+**Binários nativos** (em `ffmpeg/bin/` ou no bundle PyInstaller):
+- `ffmpeg.exe` — conversor + filtros de edição
+- `ffprobe.exe` — duração de áudio (usado pelo `FfmpegAudioEditor`)
+- `yt-dlp.exe` — extração do YouTube
 
 ---
 
@@ -129,6 +143,7 @@ Todos os Protocols do domínio têm implementação concreta em `infrastructure/
 |---|---|
 | `IVideoSource` | `infrastructure.youtube.ytdlp_source.YtDlpVideoSource` |
 | `IAudioDownloader` | `infrastructure.youtube.ytdlp_source.YtDlpAudioDownloader` |
+| `IAudioEditor` | `infrastructure.audio.ffmpeg_editor.FfmpegAudioEditor` |
 | `ICloudStorage` | `infrastructure.drive.gdrive_storage.GoogleDriveStorage` |
 | `IHistoryRepository` | `infrastructure.persistence.json_repositories.JsonHistoryRepository` |
 | `IConfigRepository` | `infrastructure.persistence.json_repositories.JsonConfigRepository` |
@@ -144,9 +159,50 @@ App._start(date_str)
                  └─> PlayerWindow              [marcação de trechos]
                       └─> _worker_phase2       [delega → ProcessingPresenter.process_segments]
                            ├─> DownloadSegmentsUseCase
+                           ├─> EditAudioUseCase  (no-op rápido se nada habilitado)
                            ├─> UploadAudioUseCase  (grava histórico via IHistoryRepository)
                            └─> _on_done           [notificação via INotifier]
 ```
+
+### Pipeline de edição de áudio (`EditAudioUseCase` → `FfmpegAudioEditor`)
+
+Aplicado entre o download do trecho e o upload para o Drive. Etapas no
+filter graph do ffmpeg, **nessa ordem**:
+
+```
+trecho.mp3 ──► afftdn (denoise) ──► equalizer ×5 (EQ) ──► afade (fade in/out)
+                                                              │
+                                                              ▼
+                                          aresample=44100 normalizado
+                                                              │
+                                                              ▼
+                              concat (ou acrossfade) com intro + outro
+                                                              │
+                                                              ▼
+                                                   trecho.mp3 substituído
+                                                   (os.replace atômico)
+```
+
+Se `AudioEditConfig.has_any_filter_enabled` é False, é um no-op rápido —
+nenhum subprocess é disparado e o arquivo original é preservado.
+
+A configuração vive em `config.json` na chave `audio_edit`. Paths de
+vinheta são persistidos como **basename** (ex.: `"intro.mp3"`) e expandidos
+em runtime para `assets/vinhetas/intro.mp3` via `audio_edit_resolve_paths` —
+isso torna a config portátil entre instalações (mover a pasta do app não
+quebra a referência).
+
+**Cuidado com a flag `-f mp3`:** o ffmpeg grava em `arquivo.mp3.tmp` (sufixo
+necessário para `os.replace` atômico) mas a extensão `.tmp` impede o ffmpeg
+de inferir o formato de saída. Sem `-f mp3` explícito, o pipeline falha com
+`Unable to choose an output format for '...mp3.tmp'`. A flag está em
+`FfmpegAudioEditor._build_cmd` — NÃO remover.
+
+**Diagnóstico de erros do ffmpeg:** `FfmpegAudioEditor.process` acumula as
+últimas 20 linhas do stdout/stderr (`deque(maxlen=20)`) e as inclui na
+`RuntimeError` quando o ffmpeg falha — assim o erro real (ex.: arquivo
+corrompido, codec faltando) fica visível no log do app sem precisar abrir
+um terminal.
 
 ---
 
@@ -166,7 +222,8 @@ Esta seção é a **norma para qualquer mudança ou adição** ao projeto. Segui
 | Tradução de tipos do domínio para a View | `presentation/processing_presenter.py` (ou novo presenter) |
 | Wiring de dependências | `composition_root.py` |
 | Constante ou path do projeto | `baixar_audio.py` (até existir motivo para extrair) |
-| UI / customtkinter | `app.py` (ou novo módulo de UI sem deps de domínio) |
+| Preset / constante do domínio | `domain/audio_presets.py` ou módulo similar (sem lógica) |
+| UI / PyQt6 | `app.py` (ou novo módulo de UI sem deps de domínio) |
 
 ## 2. Regras de dependência (NÃO QUEBRAR)
 
@@ -187,6 +244,7 @@ Esta seção é a **norma para qualquer mudança ou adição** ao projeto. Segui
 - **Callbacks opcionais (`on_log`, `on_status`, `on_progress`):** aceitar `Optional[Callable]`. Pattern: `log = on_log if callable(on_log) else _noop`. `_noop` é função privada do módulo.
 - **Cancelamento:** qualquer operação longa aceita `cancel_event: Optional[threading.Event]`. Em pontos seguros, chamar `check_cancel(cancel_event)` (de `infrastructure.youtube._utils`) — levanta `OperacaoCancelada`.
 - **Best-effort em coisas opcionais:** notificação desktop, cleanup de arquivos residuais, log de stats — usar `try/except: pass` ou silenciar I/O errors (ver `JsonHistoryRepository.save`).
+- **Logging para diagnóstico:** mensagens de baixo nível (comando ffmpeg construído, durações detectadas, stderr de subprocess) usam `logging.getLogger("audio_edit")` — vai para `logs/DD-MM-YYYY.log`. NÃO usar `print(..., file=sys.stderr)` em código que rode no .exe empacotado: o usuário não vê stderr.
 
 ## 4. Regras de teste
 
@@ -217,7 +275,7 @@ Esta seção é a **norma para qualquer mudança ou adição** ao projeto. Segui
 
 ## 6. Antes de fazer push
 
-1. `python -m pytest tests/` — DEVE passar 100% (atualmente 331/331).
+1. `python -m pytest tests/` — DEVE passar 100% (atualmente 579/579).
 2. Atualizar `CLAUDE.md` se a arquitetura, convenções ou estrutura mudaram.
 3. Atualizar `README.md` se o comportamento visível ao usuário/dev mudou.
 4. Mensagem de commit em formato convencional: `feat:`, `fix:`, `refactor:`, `docs:`, `test:`, `chore:`.
@@ -240,6 +298,9 @@ Módulo "raiz" do projeto: hospeda constantes, configuração OAuth, utilidades 
 - **`update_ytdlp()`:** frozen → `yt-dlp -U` (auto-update standalone); script → `pip install --upgrade yt-dlp`. Em ambos: `creationflags=CREATE_NO_WINDOW` no Windows.
 - **`run()` (CLI):** delega ao `composition_root.build_processing_presenter()`; processa todos os vídeos da data inteiros (sem corte de trecho).
 - **Re-export:** `OperacaoCancelada` é importada de `domain.exceptions` (mesma classe; código legado que importa de `baixar_audio` continua funcionando).
+- **`VINHETAS_DIR`:** `BASE_DIR/assets/vinhetas/` — pasta interna do app onde as vinhetas selecionadas pelo usuário são copiadas. Sobrevive a renomeações da pasta original.
+- **`config_repo()`:** público (não mais `_config_repo`) — fábrica do `JsonConfigRepository` com defaults do projeto, incluindo `audio_edit` (config padrão do pipeline de edição). Usado pelo composition root para injetar o repo em use cases.
+- **`audio_edit_persist_paths(d)` / `audio_edit_resolve_paths(d)`:** convertem entre formato persistido (basename) e runtime (path absoluto em `VINHETAS_DIR`). Chamados respectivamente no save da UI e no load do `EditAudioUseCase`. Configs antigas com paths absolutos continuam funcionando (resolve só age em paths não-absolutos).
 
 ## `infrastructure/youtube/`
 
@@ -304,24 +365,29 @@ Módulo "raiz" do projeto: hospeda constantes, configuração OAuth, utilidades 
 
 ## `app.py`
 
-- **Framework:** `customtkinter` (dark mode) + `tkcalendar` para popup de calendário.
-- **Janela:** 660×700 px.
-- **Thread safety:** `queue.Queue` para comunicação worker→GUI; polling com `self.after(100, _process_queue)`.
+- **Framework:** PyQt6. **Janela:** `QMainWindow` com sidebar à esquerda + `QStackedWidget` à direita (3 páginas: Processar / Histórico / Configurações).
+- **Thread safety:** `queue.Queue` para o pipeline principal (download → edit → upload) + polling com `QTimer` no main thread. Para o preview de áudio, ver "Dispatcher cross-thread" abaixo.
 - **Cancelamento:** `threading.Event` passado a todas as fases; watchdog daemon termina o subprocess; `check_cancel()` no loop de leitura do stdout.
 - **Instância única:** porta TCP 47892 reservada via `_acquire_single_instance()`; segunda instância exibe alerta e encerra.
-- **Log em arquivo:** `logs/DD-MM-YYYY.log` via `logging.basicConfig`; todo log/status/erro é gravado.
+- **Log em arquivo:** `logs/DD-MM-YYYY.log` via `logging.basicConfig`. **No modo script (não-frozen), também escreve em stderr** — `_setup_file_logging()` adiciona um `StreamHandler` quando `sys.frozen` é False. Isso faz `logging.getLogger("audio_edit").info(...)` aparecer no console do dev, sem prejudicar o .exe empacotado (que não tem stderr visível).
 - **Auto-update yt-dlp:** thread daemon roda `update_ytdlp()` ao iniciar.
-- **Primeira execução:** se `credentials/token.pkl` não existe, janela principal é `withdraw()` e `SetupWizard` abre; ao concluir, `_check_auth_visibility()` é chamado e a janela é exibida via `deiconify()`.
-- **Banner de autorização:** frame condicional no topo — `pack()` quando Drive não autorizado, `pack_forget()` quando autorizado.
-- **`_set_status(text, state)`:** atualiza `status_label` e `_status_dot`; estados: `idle` (cinza), `running` (azul), `done` (verde), `error` (vermelho).
-- **Barras de progresso (3 uniformes):** `download_bar`, `conversion_bar` (animação suave a cada 160 ms até 90 %), `upload_bar`. Agrupadas em `_progress_frame`.
-- **`SettingsWindow` (`CTkToplevel`):** Drive (autorizar/logout), YouTube (URL do canal), Drive folder (ID da pasta).
+- **Primeira execução:** se `credentials/token.pkl` não existe, janela principal é `hide()` e `SetupWizard` abre; ao concluir, `_check_auth_visibility()` é chamado e a janela é exibida.
+- **Banner de autorização:** `QFrame` condicional no topo — visível quando Drive não autorizado.
+- **`_set_status(text, state)`:** atualiza `status_label` e `_status_dot`; estados: `idle` (cinza), `running` (verde), `done` (verde), `error` (vermelho).
+- **Barras de progresso (3 uniformes):** `download_bar`, `convert_bar` (mostra progresso REAL da edição de áudio quando habilitada; anima até 90% no fallback de yt-dlp), `progress_bar` (upload). Agrupadas em `_progress_frame`.
+- **Página Configurações (`_build_config_page`):** título + subtítulo + **`QTabWidget`** com 2 abas:
+  - **Geral** (`_build_general_tab`): Drive auth, canal YouTube, pasta Drive.
+  - **Edição de áudio** (instância de `_AudioSettingsTab`): 4 cards funcionais (vinhetas, fade, EQ, redução de ruído) + card de teste de configuração.
+  - Save unificado no rodapé (`_cfg_save`): persiste AMBAS as abas em uma única gravação — evita o footgun de o usuário clicar Save com a aba errada visível e perder mudanças.
+- **`_AudioSettingsTab(QWidget)`:** widget self-contained com a sub-aba de edição de áudio. Lê `audio_edit` do `config.json` no construtor (basenames são expandidos para abs paths via `audio_edit_resolve_paths`). Expõe `read_config_from_ui()` para o save unificado da página principal.
+- **`_AudioPlayerDialog(QDialog)`:** popup modal de player de áudio (usado pelo botão "Tocar" do card de teste). Tem slider de posição draggable, botões `⏪ -10s` / `▶|⏸` / `+10s ⏩`, display `MM:SS / MM:SS`. Auto-play ao abrir; para o `QMediaPlayer` no `closeEvent`. Flag `_slider_dragging` evita conflito entre player tick e arrasto do usuário.
+- **Dispatcher cross-thread (`_AudioPreviewDispatcher(QObject)`):** ponte thread→GUI para o worker do preview de teste. Razão: `QTimer.singleShot(0, callable)` chamado de uma `threading.Thread` Python NÃO dispara — não há event loop nessa thread. Solução: sinais `pyqtSignal` num `QObject` criado na thread principal; Qt entrega via `QueuedConnection` automático. Sinais: `log_received(str)`, `progress_changed(float)`, `completed(str)`, `cancelled()`, `failed(str)`.
 - **`_build_presenter()`:** delega ao `composition_root.build_processing_presenter()`. Reconstrói a cada operação para refletir mudanças nas configurações.
 - **`_worker()` (Fase 1) e `_worker_phase2()` (Fase 2):** delegam ao presenter; convertem `OperacaoCancelada` em `("cancelled", None)`, exceções genéricas em `("error", str(e))`.
 - **`_worker_preflight`:** chama `baixar_audio.check_internet()`, `check_disk_space()`, `cleanup_downloads()`, `load_history()` diretamente (utilidades, não use cases).
 - **`_on_done()`:** salva histórico (`baixar_audio.save_history`) + notificação via `self._notifier.notify(...)` (instância de `PlyerNotifier`).
-- **Mensagens da fila:** `log`, `status`, `progress`, `download_progress`, `upload_stats`, `done`, `cancelled`, `error`, `preflight_error`, `history_warning`, `auth_done`, `auth_error`, `select_videos`, `open_player`.
-- **Modo subprocesso do player (frozen exe):** `app.py` detecta `--player-mode` antes de qualquer import Tkinter; importa `player_subprocess` e chama `main()`, encerrando em seguida — permite que `IPMadalena.exe --player-mode video_id x y w h` rode o player sem inicializar a GUI principal.
+- **Mensagens da fila:** `log`, `status`, `progress`, `download_progress`, `edit_progress`, `upload_stats`, `done`, `cancelled`, `error`, `preflight_error`, `history_warning`, `auth_done`, `auth_error`, `select_videos`, `open_player`.
+- **Modo subprocesso do player (frozen exe):** `app.py` detecta `--player-mode-qt` antes de qualquer import Qt; importa `player_subprocess_qt` e chama `main()`, encerrando em seguida — permite que `IPMadalena.exe --player-mode-qt` rode o player sem inicializar a GUI principal.
 
 ## `setup_wizard.py`
 

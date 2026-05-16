@@ -19,18 +19,28 @@ import pytest
 import baixar_audio
 from application.use_cases import (
     DownloadSegmentsUseCase,
+    EditAudioUseCase,
     ListVideosUseCase,
     UploadAudioUseCase,
 )
-from composition_root import build_notifier, build_processing_presenter
+from composition_root import (
+    build_audio_test_presenter,
+    build_notifier,
+    build_processing_presenter,
+)
 from domain.ports import INotifier
+from infrastructure.audio.ffmpeg_editor import FfmpegAudioEditor
 from infrastructure.drive.gdrive_storage import GoogleDriveStorage
 from infrastructure.notification.plyer_notifier import PlyerNotifier
-from infrastructure.persistence.json_repositories import JsonHistoryRepository
+from infrastructure.persistence.json_repositories import (
+    JsonConfigRepository,
+    JsonHistoryRepository,
+)
 from infrastructure.youtube.ytdlp_source import (
     YtDlpAudioDownloader,
     YtDlpVideoSource,
 )
+from presentation.audio_test_presenter import AudioTestPresenter
 from presentation.processing_presenter import ProcessingPresenter
 
 
@@ -53,8 +63,17 @@ class TestBuildProcessingPresenter:
         }):
             p = build_processing_presenter()
         assert isinstance(p.list_videos_uc, ListVideosUseCase)
-        assert isinstance(p.download_uc, DownloadSegmentsUseCase)
-        assert isinstance(p.upload_uc, UploadAudioUseCase)
+        assert isinstance(p.download_uc,    DownloadSegmentsUseCase)
+        assert isinstance(p.edit_uc,        EditAudioUseCase)
+        assert isinstance(p.upload_uc,      UploadAudioUseCase)
+
+    def test_edit_uc_usa_ffmpeg_editor_e_json_config_repo(self):
+        with patch("baixar_audio.load_config", return_value={
+            "channel_url": "x", "drive_folder_id": "y",
+        }):
+            p = build_processing_presenter()
+        assert isinstance(p.edit_uc.editor,      FfmpegAudioEditor)
+        assert isinstance(p.edit_uc.config_repo, JsonConfigRepository)
 
     def test_video_source_e_yt_dlp(self):
         with patch("baixar_audio.load_config", return_value={
@@ -167,3 +186,23 @@ class TestBuildNotifier:
 
     def test_implementa_inotifier_protocol(self):
         assert isinstance(build_notifier(), INotifier)
+
+
+# ===========================================================================
+# build_audio_test_presenter()
+# ===========================================================================
+
+class TestBuildAudioTestPresenter:
+
+    def test_retorna_audio_test_presenter(self):
+        assert isinstance(build_audio_test_presenter(), AudioTestPresenter)
+
+    def test_usa_ffmpeg_audio_editor(self):
+        p = build_audio_test_presenter()
+        assert isinstance(p.editor, FfmpegAudioEditor)
+
+    def test_reconstrucao_devolve_instancias_separadas(self):
+        # Cada chamada cria um presenter novo (sem estado compartilhado)
+        p1 = build_audio_test_presenter()
+        p2 = build_audio_test_presenter()
+        assert p1 is not p2

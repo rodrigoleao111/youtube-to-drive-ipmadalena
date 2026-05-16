@@ -52,6 +52,7 @@ DOWNLOAD_DIR     = os.path.join(BASE_DIR, "downloads")
 HISTORY_FILE     = os.path.join(BASE_DIR, "historico.json")
 LOGS_DIR         = os.path.join(BASE_DIR, "logs")
 CONFIG_FILE      = os.path.join(BASE_DIR, "config.json")
+VINHETAS_DIR     = os.path.join(BASE_DIR, "assets", "vinhetas")
 
 # ffmpeg: primeiro ao lado do exe/fonte, depois no bundle PyInstaller
 _LOCAL_FFMPEG = os.path.join(BASE_DIR, "ffmpeg", "bin", "ffmpeg.exe")
@@ -82,26 +83,87 @@ def _noop(*args, **kwargs):
 # Configurações persistidas — delegam para JsonConfigRepository
 # ---------------------------------------------------------------------------
 
-def _config_repo():
-    """Instancia JsonConfigRepository com os defaults do projeto."""
+def config_repo():
+    """
+    Instancia JsonConfigRepository com os defaults do projeto.
+
+    Público para que `composition_root` possa injetá-lo nos use cases que
+    precisam ler/escrever configuração em runtime (ex.: EditAudioUseCase).
+    """
     from infrastructure.persistence.json_repositories import JsonConfigRepository
+    from domain.entities import AudioEditConfig
     return JsonConfigRepository(
         file_path = CONFIG_FILE,
         defaults  = {
             "channel_url":     _DEFAULT_CHANNEL_URL,
             "drive_folder_id": _DEFAULT_DRIVE_FOLDER_ID,
+            "audio_edit":      AudioEditConfig().to_dict(),
         },
     )
 
 
 def load_config() -> dict:
     """Retorna o dict de configuração (lê config.json ou usa defaults)."""
-    return _config_repo().load()
+    return config_repo().load()
 
 
 def save_config(channel_url: str = None, drive_folder_id: str = None):
     """Persiste as configurações em config.json (apenas os campos fornecidos)."""
-    _config_repo().update(channel_url=channel_url, drive_folder_id=drive_folder_id)
+    config_repo().update(channel_url=channel_url, drive_folder_id=drive_folder_id)
+
+
+# ---------------------------------------------------------------------------
+# Helpers de path para vinhetas — convertem entre absolute (runtime) e
+# basename (formato persistido no config.json).
+#
+# Por que separar: o config.json é o ÚNICO arquivo que precisa ser portátil
+# entre instalações (mover a pasta do app não pode quebrar a config). Como
+# o BASE_DIR é recalculado a cada inicialização, basta gravar só o nome da
+# vinheta (`intro.mp3`) e expandir para `{VINHETAS_DIR}/intro.mp3` no load.
+# Paths fora de VINHETAS_DIR (caso o usuário ainda não tenha "selecionado")
+# são preservados sem modificação.
+# ---------------------------------------------------------------------------
+
+def audio_edit_persist_paths(d: dict) -> dict:
+    """
+    Converte caminhos absolutos dentro de VINHETAS_DIR para apenas o basename.
+
+    Usado no caminho UI → config.json. Paths fora de VINHETAS_DIR (raro —
+    só aconteceria se o copy do _select_vinheta foi pulado por algum motivo)
+    permanecem absolutos.
+    """
+    if not d:
+        return d
+    result = dict(d)
+    for key in ("intro_path", "outro_path"):
+        p = result.get(key)
+        if not p:
+            continue
+        try:
+            if os.path.dirname(os.path.abspath(p)) == os.path.abspath(VINHETAS_DIR):
+                result[key] = os.path.basename(p)
+        except Exception:
+            pass
+    return result
+
+
+def audio_edit_resolve_paths(d: dict) -> dict:
+    """
+    Converte basenames para caminhos absolutos dentro de VINHETAS_DIR.
+
+    Usado no caminho config.json → AudioEditConfig. Paths já absolutos
+    (legado de versões antigas) permanecem inalterados.
+    """
+    if not d:
+        return d
+    result = dict(d)
+    for key in ("intro_path", "outro_path"):
+        p = result.get(key)
+        if not p:
+            continue
+        if not os.path.isabs(p):
+            result[key] = os.path.join(VINHETAS_DIR, p)
+    return result
 
 
 def logout_drive():

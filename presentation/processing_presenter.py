@@ -25,6 +25,7 @@ from typing import Callable, List, Optional
 
 from application.use_cases import (
     DownloadSegmentsUseCase,
+    EditAudioUseCase,
     ListVideosUseCase,
     UploadAudioUseCase,
 )
@@ -43,6 +44,7 @@ class ProcessingPresenter:
 
     list_videos_uc: ListVideosUseCase
     download_uc: DownloadSegmentsUseCase
+    edit_uc: EditAudioUseCase
     upload_uc: UploadAudioUseCase
     channel_url: str
     download_dir: str
@@ -103,11 +105,12 @@ class ProcessingPresenter:
         on_log: Optional[Callable[[str], None]] = None,
         on_status: Optional[Callable[[str], None]] = None,
         on_download_progress: Optional[Callable[[float], None]] = None,
+        on_edit_progress: Optional[Callable[[float], None]] = None,
         on_upload_progress: Optional[Callable[[float], None]] = None,
         on_upload_stats: Optional[Callable] = None,
     ) -> List[str]:
         """
-        Faz download e upload dos segmentos selecionados.
+        Faz download, edição e upload dos segmentos selecionados.
 
         ``segments_data`` é o formato esperado pela GUI:
             [{"id": str, "title": str, "start": str|None, "end": str|None}, ...]
@@ -115,7 +118,9 @@ class ProcessingPresenter:
         Etapas:
           1. Converte dicts → Segment (entidade do domínio).
           2. ``DownloadSegmentsUseCase.execute()`` → List[AudioFile].
-          3. ``UploadAudioUseCase.execute()`` → ProcessingResult (também grava
+          3. ``EditAudioUseCase.execute()`` aplica vinhetas/fade/EQ/denoise
+             quando habilitados (no-op rápido caso contrário).
+          4. ``UploadAudioUseCase.execute()`` → ProcessingResult (também grava
              no histórico via IHistoryRepository quando há ao menos um upload).
 
         Returns
@@ -129,7 +134,7 @@ class ProcessingPresenter:
         RuntimeError
             Se o download não gerar nenhum arquivo MP3.
         OperacaoCancelada
-            Se ``cancel_event`` for sinalizado durante download ou upload.
+            Se ``cancel_event`` for sinalizado durante download, edição ou upload.
         """
         segments = [
             Segment(
@@ -152,6 +157,14 @@ class ProcessingPresenter:
 
         if not audio_files:
             raise RuntimeError("Nenhum arquivo MP3 gerado após o download.")
+
+        audio_files = self.edit_uc.execute(
+            audio_files,
+            cancel_event=cancel_event,
+            on_log=on_log,
+            on_status=on_status,
+            on_progress=on_edit_progress,
+        )
 
         self.upload_uc.execute(
             date_str,

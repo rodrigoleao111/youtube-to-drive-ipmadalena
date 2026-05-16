@@ -23,13 +23,14 @@ import threading
 import urllib.request
 from datetime import datetime
 
-from PyQt6.QtCore import QDate, QTimer, Qt
+from PyQt6.QtCore import QDate, QObject, QTimer, Qt, pyqtSignal
 from PyQt6.QtGui import QIcon, QPixmap
 from PyQt6.QtWidgets import (
-    QApplication, QDialog, QFrame, QGridLayout, QHBoxLayout,
+    QApplication, QButtonGroup, QCheckBox, QComboBox, QDialog, QDoubleSpinBox,
+    QFileDialog, QFrame, QGridLayout, QHBoxLayout,
     QLabel, QLineEdit, QMainWindow, QMessageBox, QPlainTextEdit,
-    QProgressBar, QPushButton, QScrollArea,
-    QStackedWidget, QVBoxLayout, QWidget,
+    QProgressBar, QPushButton, QRadioButton, QScrollArea, QSlider,
+    QStackedWidget, QTabWidget, QVBoxLayout, QWidget,
 )
 
 import baixar_audio
@@ -61,16 +62,30 @@ def _acquire_single_instance():
 # ---------------------------------------------------------------------------
 
 def _setup_file_logging():
+    """
+    Configura logging:
+      - SEMPRE escreve em `logs/DD-MM-YYYY.log`
+      - QUANDO RODANDO COMO SCRIPT (não frozen), também imprime no terminal
+        (stderr) para ajudar no debug do dev — `_log.info(...)` em
+        `infrastructure/audio/...` aparece direto no console.
+    """
     os.makedirs(baixar_audio.LOGS_DIR, exist_ok=True)
     log_file = os.path.join(
         baixar_audio.LOGS_DIR,
         datetime.now().strftime("%d-%m-%Y") + ".log",
     )
+    handlers = [logging.FileHandler(log_file, encoding="utf-8")]
+    # Console handler só faz sentido fora do .exe (frozen não tem terminal)
+    if not getattr(sys, "frozen", False):
+        console_handler = logging.StreamHandler(sys.stderr)
+        console_handler.setLevel(logging.DEBUG)
+        handlers.append(console_handler)
+
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s  %(message)s",
         datefmt="%H:%M:%S",
-        handlers=[logging.FileHandler(log_file, encoding="utf-8")],
+        handlers=handlers,
     )
     logging.info("App iniciado.")
 
@@ -875,7 +890,7 @@ class App(QMainWindow):
         layout.addLayout(theme_row)
 
         # Versão
-        ver = QLabel("v2.1.0")
+        ver = QLabel("v3.0.0")
         ver.setContentsMargins(16, 2, 0, 10)
         ver.setAlignment(Qt.AlignmentFlag.AlignLeft)
         ver.setStyleSheet(
@@ -1160,7 +1175,7 @@ class App(QMainWindow):
         return card
 
     # -----------------------------------------------------------------------
-    # Página 2 — Configurações (inline, card-based)
+    # Página 2 — Configurações (inline, com sub-abas Geral / Edição de áudio)
     # -----------------------------------------------------------------------
     def _build_config_page(self) -> QWidget:
         PAD = 26
@@ -1173,7 +1188,11 @@ class App(QMainWindow):
         title.setStyleSheet("font-size: 19px; font-weight: bold;")
         layout.addWidget(title)
 
-        sub = QLabel("Ajuste o canal, a pasta do Drive e a autorização Google")
+        sub = QLabel(
+            "Ajuste o canal, a pasta do Drive, a autorização Google e a "
+            "edição de áudio (vinhetas, fade, EQ e redução de ruído)."
+        )
+        sub.setWordWrap(True)
         sub.setStyleSheet(f"color: {P.HINT}; font-size: 12px;")
         layout.addWidget(sub)
 
@@ -1183,6 +1202,36 @@ class App(QMainWindow):
         sep.setFixedHeight(1)
         layout.addWidget(sep)
         layout.addSpacing(4)
+
+        # ── Sub-abas ────────────────────────────────────────────────────────
+        self._cfg_tabs = QTabWidget()
+        self._cfg_tabs.addTab(self._build_general_tab(), "⚙  Geral")
+        self._audio_tab = _AudioSettingsTab(self)
+        self._cfg_tabs.addTab(self._audio_tab, "🎚  Edição de áudio")
+        layout.addWidget(self._cfg_tabs, stretch=1)
+
+        # ── Save unificado (persiste AMBAS as abas em uma chamada) ──────────
+        btn_row = QHBoxLayout()
+        self._cfg_feedback_label = QLabel("")
+        self._cfg_feedback_label.setStyleSheet(
+            f"color: {P.GREEN}; font-size: 11px;"
+        )
+        btn_row.addWidget(self._cfg_feedback_label, stretch=1)
+
+        btn_save = QPushButton("💾  Salvar configurações")
+        btn_save.setStyleSheet("font-weight: bold; padding: 8px 24px;")
+        btn_save.clicked.connect(self._cfg_save)
+        btn_row.addWidget(btn_save)
+        layout.addLayout(btn_row)
+
+        return page
+
+    def _build_general_tab(self) -> QWidget:
+        """Sub-aba 'Geral' — autorização Drive, canal YouTube e pasta Drive."""
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        layout.setContentsMargins(4, 14, 4, 4)
+        layout.setSpacing(10)
 
         # ── Card: Autorização Google Drive ──────────────────────────────────
         auth_card = QFrame()
@@ -1266,24 +1315,7 @@ class App(QMainWindow):
         layout.addWidget(dr_card)
 
         layout.addStretch()
-
-        # ── Salvar ──────────────────────────────────────────────────────────
-        btn_row = QHBoxLayout()
-        btn_save = QPushButton("💾  Salvar configurações")
-        btn_save.setStyleSheet("font-weight: bold; padding: 8px 24px;")
-        btn_save.clicked.connect(self._cfg_save)
-        btn_row.addStretch()
-        btn_row.addWidget(btn_save)
-        layout.addLayout(btn_row)
-
-        self._cfg_feedback_label = QLabel("")
-        self._cfg_feedback_label.setStyleSheet(
-            f"color: {P.GREEN}; font-size: 11px;"
-        )
-        self._cfg_feedback_label.setAlignment(Qt.AlignmentFlag.AlignRight)
-        layout.addWidget(self._cfg_feedback_label)
-
-        return page
+        return tab
 
     @staticmethod
     def _icon_label(icon: str, size: int = 20) -> QLabel:
@@ -1357,6 +1389,15 @@ class App(QMainWindow):
         self._cfg_feedback_label.setStyleSheet(f"color: {P.ERROR}; font-size: 11px;")
 
     def _cfg_save(self):
+        """
+        Save unificado: persiste a aba GERAL (canal/pasta) e a aba EDIÇÃO DE
+        ÁUDIO (vinhetas/fade/EQ/denoise) em uma única gravação. Evita o
+        footgun de o usuário clicar Save com a aba errada visível e perder
+        mudanças que fez na outra.
+
+        Paths de vinheta dentro de VINHETAS_DIR são convertidos para basename
+        antes de gravar (portabilidade — `audio_edit_persist_paths`).
+        """
         channel = self._cfg_channel_entry.text().strip()
         folder  = self._cfg_folder_entry.text().strip()
         if not channel:
@@ -1367,7 +1408,22 @@ class App(QMainWindow):
             self._cfg_feedback_label.setText("ID da pasta não pode estar vazio.")
             self._cfg_feedback_label.setStyleSheet(f"color: {P.ERROR}; font-size: 11px;")
             return
-        baixar_audio.save_config(channel_url=channel, drive_folder_id=folder)
+
+        try:
+            audio_cfg = self._audio_tab.read_config_from_ui()
+            audio_dict = baixar_audio.audio_edit_persist_paths(audio_cfg.to_dict())
+
+            repo = baixar_audio.config_repo()
+            current = repo.load() or {}
+            current["channel_url"]     = channel
+            current["drive_folder_id"] = folder
+            current["audio_edit"]      = audio_dict
+            repo.save(current)
+        except Exception as e:
+            self._cfg_feedback_label.setText(f"Erro ao salvar: {e}")
+            self._cfg_feedback_label.setStyleSheet(f"color: {P.ERROR}; font-size: 11px;")
+            return
+
         self._cfg_feedback_label.setText("Configurações salvas com sucesso!")
         self._cfg_feedback_label.setStyleSheet(f"color: {P.GREEN}; font-size: 11px;")
 
@@ -1418,6 +1474,13 @@ class App(QMainWindow):
                 elif kind == "download_progress":
                     self.download_bar.set(value)
                     self.download_stats.setText(f"{value * 100:.0f}%")
+
+                elif kind == "edit_progress":
+                    # Reaproveita a barra de Conversão para mostrar progresso real
+                    # da edição de áudio (substitui a animação ate-90% do yt-dlp).
+                    self._converting = False
+                    self.convert_bar.set(value)
+                    self.convert_stats.setText(f"{value * 100:.0f}%")
 
                 elif kind == "progress":
                     self.progress_bar.set(value / 100)
@@ -1716,6 +1779,7 @@ class App(QMainWindow):
                 on_log=lambda m: self._queue.put(("log", m)),
                 on_status=lambda m: self._queue.put(("status", m)),
                 on_download_progress=lambda p: self._queue.put(("download_progress", p)),
+                on_edit_progress=lambda p: self._queue.put(("edit_progress", p)),
                 on_upload_progress=lambda p: self._queue.put(("progress", p)),
                 on_upload_stats=lambda d, t, r: self._queue.put(("upload_stats", (d, t, r))),
             )
@@ -2062,154 +2126,1161 @@ class App(QMainWindow):
 
 
 # ---------------------------------------------------------------------------
-# Configurações (dialog modal) — mantido para compatibilidade
+# Player de áudio em popup — usado pelo botão "Tocar" do preview de teste
 # ---------------------------------------------------------------------------
-class SettingsDialog(QDialog):
+class _AudioPlayerDialog(QDialog):
+    """
+    Diálogo modal com player de áudio simples:
+      - Slider de posição (draggable para seek)
+      - Botões: ⏪ -10s | ▶/⏸ | +10s ⏩
+      - Display de tempo: 00:00 / total
 
-    def __init__(self, parent=None):
+    O player começa a tocar automaticamente ao abrir. Ao fechar o diálogo
+    (X, Esc, botão Fechar), a reprodução é interrompida.
+    """
+
+    def __init__(self, file_path: str, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Configurações")
-        self.setFixedSize(540, 490)
-        self._auth_running = False
+        self._file_path = file_path
+        self._duration_ms = 0
+        self._slider_dragging = False
+
+        self.setWindowTitle("Reproduzindo: " + os.path.basename(file_path))
+        self.setMinimumSize(480, 200)
+        self.setModal(True)
+
         self._build_ui()
+        self._init_player()
+
+    # -----------------------------------------------------------------------
+    # UI
+    # -----------------------------------------------------------------------
 
     def _build_ui(self):
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(28, 22, 28, 22)
-        layout.setSpacing(10)
+        layout.setContentsMargins(20, 18, 20, 18)
+        layout.setSpacing(12)
 
-        title = QLabel("Configurações")
-        title.setStyleSheet("font-size: 18px; font-weight: bold;")
+        # Filename
+        title = QLabel(os.path.basename(self._file_path))
+        title.setStyleSheet("font-weight: bold; font-size: 13px;")
+        title.setWordWrap(True)
         layout.addWidget(title)
 
-        layout.addWidget(self._section_label("Google Drive"))
+        # Slider de posição
+        self._slider = QSlider(Qt.Orientation.Horizontal)
+        self._slider.setRange(0, 0)
+        self._slider.sliderPressed.connect(self._on_slider_pressed)
+        self._slider.sliderReleased.connect(self._on_slider_released)
+        # Click-to-seek: ao mover via teclado/click direto, segue até soltar
+        self._slider.valueChanged.connect(self._on_slider_value_changed)
+        layout.addWidget(self._slider)
 
-        auth_card = QFrame()
-        auth_card.setObjectName("card")
-        ac = QHBoxLayout(auth_card)
-        ac.setContentsMargins(14, 10, 14, 10)
-        self._auth_status_label = QLabel("")
-        self._auth_action_btn = QPushButton("")
-        self._auth_action_btn.setFixedWidth(110)
-        self._auth_action_btn.clicked.connect(self._toggle_auth)
-        ac.addWidget(self._auth_status_label, stretch=1)
-        ac.addWidget(self._auth_action_btn)
-        layout.addWidget(auth_card)
-        self._refresh_auth_status()
-
-        layout.addWidget(self._section_label("Canal do YouTube"))
-        cfg = baixar_audio.load_config()
-        self._channel_entry = QLineEdit(cfg["channel_url"])
-        layout.addWidget(self._channel_entry)
-        yt_hint = QLabel("Ex: https://www.youtube.com/@SeuCanal/streams")
-        yt_hint.setStyleSheet("color: gray; font-size: 11px;")
-        layout.addWidget(yt_hint)
-
-        layout.addWidget(self._section_label("Pasta do Google Drive"))
-        self._folder_entry = QLineEdit(cfg["drive_folder_id"])
-        layout.addWidget(self._folder_entry)
-        dr_hint = QLabel(
-            "ID da pasta raiz no Drive (encontrado no final da URL da pasta)"
+        # Linha de tempo: 00:15  ----  01:30
+        time_row = QHBoxLayout()
+        self._time_label = QLabel("00:00")
+        self._time_label.setStyleSheet(
+            "font-family: Consolas, monospace; font-size: 11px;"
         )
-        dr_hint.setStyleSheet("color: gray; font-size: 11px;")
-        layout.addWidget(dr_hint)
+        self._duration_label = QLabel("00:00")
+        self._duration_label.setStyleSheet(
+            f"font-family: Consolas, monospace; font-size: 11px; color: {P.HINT};"
+        )
+        time_row.addWidget(self._time_label)
+        time_row.addStretch()
+        time_row.addWidget(self._duration_label)
+        layout.addLayout(time_row)
 
-        layout.addStretch()
+        layout.addSpacing(6)
 
-        btn_row = QHBoxLayout()
-        btn_save = QPushButton("Salvar")
-        btn_save.setStyleSheet("font-weight: bold;")
-        btn_save.clicked.connect(self._save)
+        # Botões de controle
+        ctrl_row = QHBoxLayout()
+        ctrl_row.setSpacing(10)
+        ctrl_row.addStretch()
+
+        self._btn_back = QPushButton("⏪  -10s")
+        self._btn_back.setObjectName("gray_btn")
+        self._btn_back.setFixedWidth(95)
+        self._btn_back.clicked.connect(lambda: self._skip(-10))
+        ctrl_row.addWidget(self._btn_back)
+
+        self._btn_play = QPushButton("⏸  Pausar")
+        self._btn_play.setFixedWidth(120)
+        self._btn_play.setStyleSheet("font-weight: bold;")
+        self._btn_play.clicked.connect(self._toggle_play)
+        ctrl_row.addWidget(self._btn_play)
+
+        self._btn_fwd = QPushButton("+10s  ⏩")
+        self._btn_fwd.setObjectName("gray_btn")
+        self._btn_fwd.setFixedWidth(95)
+        self._btn_fwd.clicked.connect(lambda: self._skip(10))
+        ctrl_row.addWidget(self._btn_fwd)
+
+        ctrl_row.addStretch()
+        layout.addLayout(ctrl_row)
+
+        # Espaço + botão de fechar
+        layout.addSpacing(4)
+        close_row = QHBoxLayout()
+        close_row.addStretch()
         btn_close = QPushButton("Fechar")
         btn_close.setObjectName("gray_btn")
         btn_close.clicked.connect(self.accept)
-        btn_row.addStretch()
-        btn_row.addWidget(btn_save)
-        btn_row.addWidget(btn_close)
-        layout.addLayout(btn_row)
+        close_row.addWidget(btn_close)
+        layout.addLayout(close_row)
 
-        self._feedback_label = QLabel("")
-        self._feedback_label.setStyleSheet(f"color: {P.GREEN}; font-size: 11px;")
-        layout.addWidget(self._feedback_label)
+    # -----------------------------------------------------------------------
+    # Player (QMediaPlayer)
+    # -----------------------------------------------------------------------
+
+    def _init_player(self):
+        from PyQt6.QtCore import QUrl
+        from PyQt6.QtMultimedia import QAudioOutput, QMediaPlayer
+        self._audio_output = QAudioOutput()
+        self._player = QMediaPlayer()
+        self._player.setAudioOutput(self._audio_output)
+        self._player.setSource(QUrl.fromLocalFile(self._file_path))
+        self._player.positionChanged.connect(self._on_position_changed)
+        self._player.durationChanged.connect(self._on_duration_changed)
+        self._player.playbackStateChanged.connect(self._on_state_changed)
+        # Auto-play ao abrir o diálogo
+        self._player.play()
+
+    def _toggle_play(self):
+        from PyQt6.QtMultimedia import QMediaPlayer
+        if self._player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
+            self._player.pause()
+        else:
+            self._player.play()
+
+    def _skip(self, secs: int):
+        """Avança/retorna `secs` segundos (clampado entre 0 e duração total)."""
+        target = self._player.position() + secs * 1000
+        target = max(0, min(self._duration_ms or target, target))
+        self._player.setPosition(target)
+
+    # -----------------------------------------------------------------------
+    # Sincronização player ↔ slider
+    # -----------------------------------------------------------------------
+
+    def _on_position_changed(self, ms: int):
+        if not self._slider_dragging:
+            # Bloqueia o sinal valueChanged para não chamar setPosition em loop
+            self._slider.blockSignals(True)
+            self._slider.setValue(ms)
+            self._slider.blockSignals(False)
+        self._time_label.setText(self._fmt(ms))
+
+    def _on_duration_changed(self, ms: int):
+        self._duration_ms = ms
+        self._slider.setRange(0, max(0, ms))
+        self._duration_label.setText(self._fmt(ms))
+
+    def _on_state_changed(self, state):
+        from PyQt6.QtMultimedia import QMediaPlayer
+        if state == QMediaPlayer.PlaybackState.PlayingState:
+            self._btn_play.setText("⏸  Pausar")
+        else:
+            self._btn_play.setText("▶  Tocar")
+
+    def _on_slider_pressed(self):
+        self._slider_dragging = True
+
+    def _on_slider_released(self):
+        self._player.setPosition(self._slider.value())
+        self._slider_dragging = False
+
+    def _on_slider_value_changed(self, value: int):
+        # Só faz seek quando o usuário interage diretamente — durante
+        # reprodução normal, o player atualiza o slider mas blockSignals
+        # impede que esse callback dispare.
+        if self._slider_dragging:
+            # Atualiza display de tempo enquanto arrasta (mas só commita no release)
+            self._time_label.setText(self._fmt(value))
+
+    # -----------------------------------------------------------------------
+    # Helpers
+    # -----------------------------------------------------------------------
+
+    @staticmethod
+    def _fmt(ms: int) -> str:
+        s = max(0, int(ms)) // 1000
+        return f"{s // 60:02d}:{s % 60:02d}"
+
+    def closeEvent(self, event):
+        """Para o player ao fechar o diálogo (X, Esc ou botão Fechar)."""
+        try:
+            self._player.stop()
+        except Exception:
+            pass
+        super().closeEvent(event)
+
+
+# ---------------------------------------------------------------------------
+# Dispatcher cross-thread para o card de teste de áudio
+#
+# Por que isso existe: `QTimer.singleShot(0, callable)` chamado de uma
+# `threading.Thread` Python NÃO dispara — não há event loop nessa thread,
+# então o timer fica órfão. A forma confiável de comunicar thread→GUI no
+# PyQt é via sinal num QObject criado no thread principal: o Qt usa
+# `QueuedConnection` automaticamente quando um sinal é emitido de outra
+# thread, garantindo que o slot rode no event loop principal.
+# ---------------------------------------------------------------------------
+class _AudioPreviewDispatcher(QObject):
+    """Bridge thread→GUI para os callbacks do AudioTestPresenter."""
+    log_received     = pyqtSignal(str)
+    progress_changed = pyqtSignal(float)
+    completed        = pyqtSignal(str)   # preview_path
+    cancelled        = pyqtSignal()
+    failed           = pyqtSignal(str)   # mensagem de erro
+
+
+# ---------------------------------------------------------------------------
+# Sub-aba "Edição de áudio" — embed dentro da página Configurações do App
+# ---------------------------------------------------------------------------
+class _AudioSettingsTab(QWidget):
+    """
+    Widget que renderiza a sub-aba "Edição de áudio" da página Configurações.
+
+    Carrega `audio_edit` do `config.json` no construtor (basenames persistidos
+    são expandidos para abs paths dentro de VINHETAS_DIR), constrói os 4 cards
+    funcionais (vinhetas, fade, EQ, redução de ruído) + card de teste de
+    configuração, e expõe `read_config_from_ui()` para o save unificado da
+    página principal — que persiste em uma única gravação as duas abas.
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        # QMediaPlayer para preview das vinhetas e do teste (lazy)
+        self._media_player = None
+        self._media_audio_output = None
+        self._currently_playing = None  # 'intro' | 'outro' | '_test_' | None
+        # Dispatcher criado na thread principal — sinais emitidos do worker
+        # são entregues via QueuedConnection automático.
+        self._dispatcher = _AudioPreviewDispatcher(self)
+        self._build_ui()
+        # Conexões dos sinais → slots (após o _build_ui criar os widgets alvo)
+        self._dispatcher.log_received.connect(self._set_test_status)
+        self._dispatcher.progress_changed.connect(self._test_progress.set)
+        self._dispatcher.completed.connect(self._on_test_done)
+        self._dispatcher.cancelled.connect(self._on_test_cancelled)
+        self._dispatcher.failed.connect(self._on_test_error)
+
+    # -----------------------------------------------------------------------
+    # API pública (chamada pelo App._cfg_save)
+    # -----------------------------------------------------------------------
+
+    def read_config_from_ui(self):
+        """Constrói um AudioEditConfig a partir do estado atual dos controles."""
+        return self._read_audio_config_from_ui()
+
+    # -----------------------------------------------------------------------
+    # Construção do conteúdo (4 cards + card de teste)
+    # -----------------------------------------------------------------------
+
+    def _build_ui(self):
+        from domain.entities import AudioEditConfig
+
+        # Carrega config atual (ou defaults). Expande basenames persistidos
+        # (ex.: "intro.mp3") em paths absolutos dentro de VINHETAS_DIR — caso
+        # contrário a UI exibiria só o nome do arquivo e o player não tocaria.
+        cfg = baixar_audio.load_config()
+        audio_dict = baixar_audio.audio_edit_resolve_paths(cfg.get("audio_edit") or {})
+        audio_cfg = AudioEditConfig.from_dict(audio_dict)
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        # Conteúdo dentro de QScrollArea (vários cards + card de teste podem
+        # passar da altura da janela em telas menores)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+
+        body = QWidget()
+        body.setObjectName("scroll_contents")
+        layout = QVBoxLayout(body)
+        layout.setContentsMargins(4, 14, 4, 4)
+        layout.setSpacing(12)
+
+        # ── Cards funcionais ──────────────────────────────────────────────
+        layout.addWidget(self._build_card_vinhetas(audio_cfg))
+        layout.addWidget(self._build_card_fade(audio_cfg))
+        layout.addWidget(self._build_card_eq(audio_cfg))
+        layout.addWidget(self._build_card_noise(audio_cfg))
+        layout.addWidget(self._build_card_test())
+
+        layout.addStretch()
+        scroll.setWidget(body)
+        outer.addWidget(scroll, stretch=1)
+
+    # -----------------------------------------------------------------------
+    # Cards da página de áudio
+    # -----------------------------------------------------------------------
+
+    def _build_card_vinhetas(self, audio_cfg) -> QFrame:
+        card = QFrame()
+        card.setObjectName("card")
+        v = QVBoxLayout(card)
+        v.setContentsMargins(16, 12, 16, 14)
+        v.setSpacing(10)
+
+        v.addWidget(self._section_label("Vinhetas"))
+
+        # Estado por vinheta — paths atuais
+        self._intro_path = audio_cfg.intro_path or ""
+        self._outro_path = audio_cfg.outro_path or ""
+
+        # ---- Intro ----
+        intro_block = self._build_vinheta_block(
+            label="Vinheta de entrada",
+            kind="intro",
+            initial_path=self._intro_path,
+            initial_overlap=audio_cfg.intro_overlap_secs,
+        )
+        v.addLayout(intro_block)
+
+        # Separador horizontal
+        sep = QFrame()
+        sep.setFrameShape(QFrame.Shape.HLine)
+        sep.setObjectName("section_sep")
+        sep.setFixedHeight(1)
+        v.addWidget(sep)
+
+        # ---- Outro ----
+        outro_block = self._build_vinheta_block(
+            label="Vinheta de saída",
+            kind="outro",
+            initial_path=self._outro_path,
+            initial_overlap=audio_cfg.outro_overlap_secs,
+        )
+        v.addLayout(outro_block)
+
+        return card
+
+    def _build_vinheta_block(self, label, kind, initial_path, initial_overlap):
+        """Bloco de uma vinheta (intro ou outro): label + path + ações + overlap."""
+        block = QVBoxLayout()
+        block.setSpacing(6)
+
+        lbl = QLabel(label)
+        lbl.setStyleSheet("font-size: 12px; font-weight: bold;")
+        block.addWidget(lbl)
+
+        row = QHBoxLayout()
+        row.setSpacing(6)
+
+        path_label = QLabel(self._truncate(initial_path) or "Nenhum arquivo selecionado")
+        path_label.setStyleSheet(f"color: {P.HINT}; font-size: 11px;")
+        path_label.setMinimumWidth(220)
+
+        btn_select = QPushButton("Selecionar")
+        btn_select.setObjectName("gray_btn")
+        btn_select.setFixedWidth(110)
+        btn_select.clicked.connect(lambda: self._select_vinheta(kind))
+
+        btn_play = QPushButton("▶ Tocar")
+        btn_play.setObjectName("gray_btn")
+        btn_play.setFixedWidth(90)
+        btn_play.clicked.connect(lambda: self._toggle_play_vinheta(kind))
+        btn_play.setEnabled(bool(initial_path))
+
+        btn_remove = QPushButton("Remover")
+        btn_remove.setObjectName("gray_btn")
+        btn_remove.setFixedWidth(90)
+        btn_remove.clicked.connect(lambda: self._remove_vinheta(kind))
+        btn_remove.setEnabled(bool(initial_path))
+
+        row.addWidget(path_label, stretch=1)
+        row.addWidget(btn_select)
+        row.addWidget(btn_play)
+        row.addWidget(btn_remove)
+        block.addLayout(row)
+
+        overlap_row = QHBoxLayout()
+        overlap_row.addWidget(QLabel("Sobreposição com áudio:"))
+        spin = QDoubleSpinBox()
+        spin.setRange(0.0, 10.0)
+        spin.setSingleStep(0.5)
+        spin.setDecimals(1)
+        spin.setSuffix(" s")
+        spin.setValue(float(initial_overlap or 0.0))
+        spin.setFixedWidth(90)
+        overlap_row.addWidget(spin)
+        overlap_row.addStretch()
+        block.addLayout(overlap_row)
+
+        # Salva referências para uso posterior
+        if kind == "intro":
+            self._intro_path_label   = path_label
+            self._intro_btn_select   = btn_select
+            self._intro_btn_play     = btn_play
+            self._intro_btn_remove   = btn_remove
+            self._intro_overlap_spin = spin
+        else:
+            self._outro_path_label   = path_label
+            self._outro_btn_select   = btn_select
+            self._outro_btn_play     = btn_play
+            self._outro_btn_remove   = btn_remove
+            self._outro_overlap_spin = spin
+
+        return block
+
+    def _build_card_fade(self, audio_cfg) -> QFrame:
+        card = QFrame()
+        card.setObjectName("card")
+        v = QVBoxLayout(card)
+        v.setContentsMargins(16, 12, 16, 14)
+        v.setSpacing(10)
+
+        v.addWidget(self._section_label("Fade"))
+
+        # Fade in
+        row_in = QHBoxLayout()
+        self._fade_in_check = QCheckBox("Fade in")
+        self._fade_in_check.setChecked(audio_cfg.fade_in_enabled)
+        row_in.addWidget(self._fade_in_check)
+        row_in.addSpacing(12)
+        row_in.addWidget(QLabel("Duração:"))
+        self._fade_in_spin = QDoubleSpinBox()
+        self._fade_in_spin.setRange(0.0, 10.0)
+        self._fade_in_spin.setSingleStep(0.5)
+        self._fade_in_spin.setDecimals(1)
+        self._fade_in_spin.setSuffix(" s")
+        self._fade_in_spin.setValue(float(audio_cfg.fade_in_secs))
+        self._fade_in_spin.setFixedWidth(90)
+        row_in.addWidget(self._fade_in_spin)
+        row_in.addStretch()
+        v.addLayout(row_in)
+
+        # Fade out
+        row_out = QHBoxLayout()
+        self._fade_out_check = QCheckBox("Fade out")
+        self._fade_out_check.setChecked(audio_cfg.fade_out_enabled)
+        row_out.addWidget(self._fade_out_check)
+        row_out.addSpacing(8)
+        row_out.addWidget(QLabel("Duração:"))
+        self._fade_out_spin = QDoubleSpinBox()
+        self._fade_out_spin.setRange(0.0, 10.0)
+        self._fade_out_spin.setSingleStep(0.5)
+        self._fade_out_spin.setDecimals(1)
+        self._fade_out_spin.setSuffix(" s")
+        self._fade_out_spin.setValue(float(audio_cfg.fade_out_secs))
+        self._fade_out_spin.setFixedWidth(90)
+        row_out.addWidget(self._fade_out_spin)
+        row_out.addStretch()
+        v.addLayout(row_out)
+
+        return card
+
+    def _build_card_eq(self, audio_cfg) -> QFrame:
+        from domain.audio_presets import (
+            EQ_FREQS, EQ_GAIN_MAX_DB, EQ_GAIN_MIN_DB,
+        )
+
+        card = QFrame()
+        card.setObjectName("card")
+        v = QVBoxLayout(card)
+        v.setContentsMargins(16, 12, 16, 14)
+        v.setSpacing(10)
+
+        # Header: section label + checkbox + preset combo
+        hdr = QHBoxLayout()
+        hdr.addWidget(self._section_label("Equalização"))
+        hdr.addStretch()
+
+        self._eq_check = QCheckBox("Aplicar EQ")
+        self._eq_check.setChecked(audio_cfg.eq_enabled)
+        hdr.addWidget(self._eq_check)
+
+        hdr.addSpacing(14)
+        hdr.addWidget(QLabel("Preset:"))
+        self._eq_preset_combo = QComboBox()
+        self._eq_preset_combo.addItems(["Voz Masculina", "Personalizado"])
+        self._eq_preset_combo.setFixedWidth(150)
+        # Inicialmente: se as bandas batem com o preset, seleciona "Voz Masculina"
+        from domain.audio_presets import EQ_PRESET_VOZ_MASCULINA
+        is_default = tuple(
+            (b.freq_hz, b.gain_db) for b in audio_cfg.eq_bands
+        ) == EQ_PRESET_VOZ_MASCULINA
+        self._eq_preset_combo.setCurrentIndex(0 if is_default else 1)
+        self._eq_preset_combo.currentIndexChanged.connect(self._on_preset_changed)
+        hdr.addWidget(self._eq_preset_combo)
+        v.addLayout(hdr)
+
+        # 5 sliders verticais
+        sliders_row = QHBoxLayout()
+        sliders_row.setSpacing(10)
+        self._eq_sliders = []
+        self._eq_value_labels = []
+
+        # Mapa freq → gain das bandas atuais
+        bands_by_freq = {b.freq_hz: b.gain_db for b in audio_cfg.eq_bands}
+
+        for freq in EQ_FREQS:
+            col = QVBoxLayout()
+            col.setSpacing(4)
+            col.setContentsMargins(0, 0, 0, 0)
+
+            value_lbl = QLabel(f"{bands_by_freq.get(freq, 0.0):+.1f} dB")
+            value_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            value_lbl.setStyleSheet("font-size: 10px;")
+
+            slider = QSlider(Qt.Orientation.Vertical)
+            slider.setRange(int(EQ_GAIN_MIN_DB * 10), int(EQ_GAIN_MAX_DB * 10))
+            slider.setValue(int(bands_by_freq.get(freq, 0.0) * 10))
+            slider.setFixedHeight(120)
+            slider.setTickPosition(QSlider.TickPosition.TicksBothSides)
+            slider.setTickInterval(30)  # tick a cada 3 dB
+
+            # Atualiza label e marca preset = "Personalizado"
+            slider.valueChanged.connect(
+                lambda val, lbl=value_lbl: lbl.setText(f"{val/10:+.1f} dB")
+            )
+            slider.valueChanged.connect(self._on_slider_moved)
+
+            freq_lbl = QLabel(self._fmt_freq(freq))
+            freq_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            freq_lbl.setStyleSheet(f"color: {P.HINT}; font-size: 10px;")
+
+            col.addWidget(value_lbl)
+            col.addWidget(slider, alignment=Qt.AlignmentFlag.AlignHCenter)
+            col.addWidget(freq_lbl)
+            sliders_row.addLayout(col)
+
+            self._eq_sliders.append((freq, slider))
+            self._eq_value_labels.append(value_lbl)
+
+        v.addLayout(sliders_row)
+
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+        btn_restore = QPushButton("Restaurar padrão Voz Masculina")
+        btn_restore.setObjectName("gray_btn")
+        btn_restore.clicked.connect(self._restore_eq_default)
+        btn_row.addWidget(btn_restore)
+        v.addLayout(btn_row)
+
+        # Flag para distinguir mudanças do usuário vs programáticas
+        self._eq_programmatic_change = False
+
+        return card
+
+    def _build_card_noise(self, audio_cfg) -> QFrame:
+        card = QFrame()
+        card.setObjectName("card")
+        v = QVBoxLayout(card)
+        v.setContentsMargins(16, 12, 16, 14)
+        v.setSpacing(10)
+
+        v.addWidget(self._section_label("Redução de ruído"))
+
+        self._noise_check = QCheckBox("Ativar")
+        self._noise_check.setChecked(audio_cfg.noise_reduction_enabled)
+        v.addWidget(self._noise_check)
+
+        intensity_row = QHBoxLayout()
+        intensity_row.addWidget(QLabel("Intensidade:"))
+        intensity_row.addSpacing(8)
+
+        self._noise_intensity_group = QButtonGroup(self)
+        self._noise_intensity_radios = {}
+        for i, label in enumerate(("baixa", "media", "alta")):
+            rb = QRadioButton(label.capitalize())
+            self._noise_intensity_group.addButton(rb, i)
+            self._noise_intensity_radios[label] = rb
+            intensity_row.addWidget(rb)
+
+        # Marca o radio correspondente à config carregada
+        current = audio_cfg.noise_reduction_intensity or "media"
+        if current in self._noise_intensity_radios:
+            self._noise_intensity_radios[current].setChecked(True)
+
+        intensity_row.addStretch()
+        v.addLayout(intensity_row)
+
+        return card
+
+    # -----------------------------------------------------------------------
+    # Card 5: Teste de configuração (PR 7)
+    # -----------------------------------------------------------------------
+
+    def _build_card_test(self) -> QFrame:
+        """Card para gerar e tocar um preview com a config atual da UI."""
+        card = QFrame()
+        card.setObjectName("card")
+        v = QVBoxLayout(card)
+        v.setContentsMargins(16, 12, 16, 14)
+        v.setSpacing(10)
+
+        v.addWidget(self._section_label("Teste de configuração"))
+
+        intro_text = QLabel(
+            "Aplique a configuração atual em um áudio de exemplo para conferir "
+            "o resultado antes de salvar e usar em produção."
+        )
+        intro_text.setWordWrap(True)
+        intro_text.setStyleSheet(f"color: {P.HINT}; font-size: 11px;")
+        v.addWidget(intro_text)
+
+        # ── Linha do arquivo de exemplo ────────────────────────────────────
+        sample_row = QHBoxLayout()
+        sample_row.setSpacing(6)
+
+        self._test_sample_path = ""
+        self._test_preview_path = ""
+        self._test_running = False
+        self._test_cancel_event = None
+        self._test_thread = None
+
+        self._test_sample_label = QLabel("Nenhum arquivo selecionado")
+        self._test_sample_label.setStyleSheet(f"color: {P.HINT}; font-size: 11px;")
+
+        btn_select_sample = QPushButton("Selecionar exemplo")
+        btn_select_sample.setObjectName("gray_btn")
+        btn_select_sample.setFixedWidth(150)
+        btn_select_sample.clicked.connect(self._select_test_sample)
+
+        sample_row.addWidget(self._test_sample_label, stretch=1)
+        sample_row.addWidget(btn_select_sample)
+        v.addLayout(sample_row)
+
+        # ── Linha de ações ─────────────────────────────────────────────────
+        actions_row = QHBoxLayout()
+        actions_row.setSpacing(6)
+
+        self._test_btn_generate = QPushButton("▷ Gerar preview")
+        self._test_btn_generate.setStyleSheet("font-weight: bold;")
+        self._test_btn_generate.setEnabled(False)
+        self._test_btn_generate.clicked.connect(self._generate_test_preview)
+
+        self._test_btn_play = QPushButton("▶ Tocar")
+        self._test_btn_play.setObjectName("gray_btn")
+        self._test_btn_play.setFixedWidth(110)
+        self._test_btn_play.setEnabled(False)
+        self._test_btn_play.clicked.connect(self._toggle_play_test_preview)
+
+        self._test_btn_clear = QPushButton("Limpar")
+        self._test_btn_clear.setObjectName("gray_btn")
+        self._test_btn_clear.setFixedWidth(90)
+        self._test_btn_clear.setEnabled(False)
+        self._test_btn_clear.clicked.connect(self._clear_test_preview)
+
+        self._test_btn_cancel = QPushButton("Cancelar")
+        self._test_btn_cancel.setObjectName("red_btn")
+        self._test_btn_cancel.setFixedWidth(100)
+        self._test_btn_cancel.setVisible(False)
+        self._test_btn_cancel.clicked.connect(self._cancel_test_preview)
+
+        actions_row.addWidget(self._test_btn_generate)
+        actions_row.addWidget(self._test_btn_play)
+        actions_row.addWidget(self._test_btn_clear)
+        actions_row.addWidget(self._test_btn_cancel)
+        actions_row.addStretch()
+        v.addLayout(actions_row)
+
+        # ── Barra de progresso + status (interna ao card) ──────────────────
+        self._test_progress = _ProgressBar()
+        self._test_progress.setVisible(False)
+        v.addWidget(self._test_progress)
+
+        self._test_status_label = QLabel("")
+        self._test_status_label.setStyleSheet(f"color: {P.HINT}; font-size: 11px;")
+        self._test_status_label.setWordWrap(True)
+        v.addWidget(self._test_status_label)
+
+        return card
+
+    # -----------------------------------------------------------------------
+    # Ações do card de teste
+    # -----------------------------------------------------------------------
+
+    def _select_test_sample(self):
+        """Abre QFileDialog para escolher o arquivo de exemplo."""
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Selecionar arquivo de exemplo para teste",
+            "",
+            "Arquivos de áudio (*.mp3 *.m4a *.wav *.ogg *.flac);;Todos (*.*)",
+        )
+        if not path:
+            return
+        self._test_sample_path = path
+        self._test_sample_label.setText(self._truncate(path))
+        self._test_btn_generate.setEnabled(True)
+
+    def _generate_test_preview(self):
+        """Roda o pipeline de edição em uma thread, atualizando a UI."""
+        import threading
+
+        if self._test_running:
+            return
+        if not self._test_sample_path:
+            self._set_test_status("Selecione um arquivo de exemplo primeiro.",
+                                  is_error=True)
+            return
+
+        # Para qualquer player tocando antes de regenerar
+        if self._currently_playing == "_test_":
+            self._stop_playback()
+
+        self._test_running = True
+        self._test_cancel_event = threading.Event()
+        self._set_test_running_ui(True)
+        self._test_progress.set(0.0)
+        self._set_test_status("Iniciando edição...")
+
+        # Constrói config a partir do estado ATUAL da UI (não do config.json)
+        config = self._read_audio_config_from_ui()
+
+        # Caminho do preview no diretório de downloads (cleanup_downloads
+        # remove tudo *.mp3 — vira limpeza automática no próximo processamento)
+        preview_path = os.path.join(
+            baixar_audio.DOWNLOAD_DIR, "_test_preview.mp3"
+        )
+
+        cancel_event = self._test_cancel_event
+        sample_path  = self._test_sample_path
+
+        # Prints diretos no terminal — ajudam no debug quando o preview trava.
+        # `_log.info(...)` em audio_test_presenter já escreve em logs/, mas
+        # estes prints garantem visibilidade IMEDIATA no console do dev.
+        print(f"[PREVIEW] sample={sample_path}", flush=True)
+        print(f"[PREVIEW] preview_path={preview_path}", flush=True)
+        print(f"[PREVIEW] config.has_any_filter_enabled={config.has_any_filter_enabled}",
+              flush=True)
+        print(f"[PREVIEW] iniciando thread de edição...", flush=True)
+
+        dispatcher = self._dispatcher
+
+        def _worker():
+            print("[PREVIEW worker] thread iniciada", flush=True)
+            from composition_root import build_audio_test_presenter
+            try:
+                presenter = build_audio_test_presenter()
+                print("[PREVIEW worker] presenter pronto, chamando execute()...",
+                      flush=True)
+                presenter.execute(
+                    sample_path,
+                    preview_path,
+                    config,
+                    cancel_event=cancel_event,
+                    on_log=self._on_test_log,
+                    on_progress=self._on_test_progress,
+                )
+                print(f"[PREVIEW worker] execute() concluído — emitindo completed",
+                      flush=True)
+                dispatcher.completed.emit(preview_path)
+            except baixar_audio.OperacaoCancelada:
+                print("[PREVIEW worker] cancelado pelo usuário", flush=True)
+                dispatcher.cancelled.emit()
+            except Exception as e:
+                msg = str(e)
+                print(f"[PREVIEW worker] ERRO: {msg}", flush=True)
+                dispatcher.failed.emit(msg)
+
+        self._test_thread = threading.Thread(target=_worker, daemon=True)
+        self._test_thread.start()
+
+    def _cancel_test_preview(self):
+        """Sinaliza cancelamento para a thread de geração de preview."""
+        if self._test_cancel_event is not None:
+            self._test_cancel_event.set()
+        self._set_test_status("Cancelando...")
+
+    def _clear_test_preview(self):
+        """Apaga o preview gerado e limpa o arquivo de exemplo selecionado."""
+        # Para o player se estava tocando
+        if self._currently_playing == "_test_":
+            self._stop_playback()
+
+        # Apaga o preview do disco
+        if self._test_preview_path and os.path.exists(self._test_preview_path):
+            try:
+                os.remove(self._test_preview_path)
+            except OSError:
+                pass
+
+        self._test_preview_path = ""
+        self._test_sample_path  = ""
+        self._test_sample_label.setText("Nenhum arquivo selecionado")
+        self._test_progress.set(0.0)
+        self._test_progress.setVisible(False)
+        self._set_test_status("")
+        self._test_btn_generate.setEnabled(False)
+        self._test_btn_play.setEnabled(False)
+        self._test_btn_clear.setEnabled(False)
+
+    # -----------------------------------------------------------------------
+    # Player do preview — abre _AudioPlayerDialog modal com controles completos
+    # -----------------------------------------------------------------------
+
+    def _toggle_play_test_preview(self):
+        """
+        Abre um diálogo modal com player completo (slider de posição,
+        play/pause, skip ±10s). O preview persiste no disco mesmo após
+        fechar — o usuário pode tocar várias vezes ou ajustar a config e
+        gerar novo preview.
+        """
+        if not self._test_preview_path:
+            return
+        if not os.path.exists(self._test_preview_path):
+            self._set_test_status(
+                "Arquivo de preview não encontrado — gere novamente.",
+                is_error=True,
+            )
+            self._test_btn_play.setEnabled(False)
+            return
+
+        # Para qualquer reprodução de vinheta em andamento antes de abrir
+        # o player modal (evita dois áudios tocando ao mesmo tempo).
+        if self._currently_playing is not None:
+            self._stop_playback()
+
+        dlg = _AudioPlayerDialog(self._test_preview_path, parent=self)
+        dlg.exec()
+
+    def _update_test_play_button(self):
+        """
+        Mantido por compatibilidade com `_update_play_buttons` (chamado pelo
+        callback de mudança de estado do QMediaPlayer das vinhetas).
+        O botão do preview agora abre um diálogo — não toggle entre Play/Stop.
+        """
+        self._test_btn_play.setText("▶ Tocar")
+
+    # -----------------------------------------------------------------------
+    # Callbacks da thread de preview (chamados via QTimer.singleShot)
+    # -----------------------------------------------------------------------
+
+    def _on_test_log(self, msg: str):
+        """
+        Callback do presenter/editor (chamado da worker thread).
+        Emite o sinal — o slot `_set_test_status` roda na thread principal
+        via QueuedConnection automático do Qt.
+        """
+        print(f"[PREVIEW log] {msg}", flush=True)
+        self._dispatcher.log_received.emit(msg)
+
+    def _on_test_progress(self, p: float):
+        """Callback de progresso (worker thread → sinal → barra)."""
+        if int(p * 100) % 10 == 0:
+            print(f"[PREVIEW progress] {p * 100:.0f}%", flush=True)
+        self._dispatcher.progress_changed.emit(float(p))
+
+    def _on_test_done(self, preview_path: str):
+        self._test_preview_path = preview_path
+        self._test_progress.set(1.0)
+        self._set_test_status(f"✓ Preview gerado: {os.path.basename(preview_path)}",
+                              ok=True)
+        self._set_test_running_ui(False)
+        self._test_running = False
+        self._test_cancel_event = None
+        self._test_btn_play.setEnabled(True)
+        self._test_btn_clear.setEnabled(True)
+
+    def _on_test_cancelled(self):
+        self._set_test_status("Geração cancelada.")
+        self._test_progress.setVisible(False)
+        self._set_test_running_ui(False)
+        self._test_running = False
+        self._test_cancel_event = None
+
+    def _on_test_error(self, msg: str):
+        self._set_test_status(f"Erro: {msg}", is_error=True)
+        self._test_progress.setVisible(False)
+        self._set_test_running_ui(False)
+        self._test_running = False
+        self._test_cancel_event = None
+
+    # -----------------------------------------------------------------------
+    # Estado visual do card de teste
+    # -----------------------------------------------------------------------
+
+    def _set_test_running_ui(self, running: bool):
+        """Mostra/esconde botão Cancelar e desabilita os outros enquanto roda."""
+        self._test_btn_generate.setEnabled(not running)
+        self._test_btn_clear.setEnabled(not running and bool(self._test_preview_path))
+        self._test_btn_play.setEnabled(not running and bool(self._test_preview_path))
+        self._test_btn_cancel.setVisible(running)
+        self._test_progress.setVisible(running or bool(self._test_preview_path))
+
+    def _set_test_status(self, text: str, *, is_error: bool = False, ok: bool = False):
+        if is_error:
+            color = P.ERROR
+        elif ok:
+            color = P.GREEN
+        else:
+            color = P.HINT
+        self._test_status_label.setText(text)
+        self._test_status_label.setStyleSheet(f"color: {color}; font-size: 11px;")
+
+    # -----------------------------------------------------------------------
+    # Helpers da página de áudio
+    # -----------------------------------------------------------------------
+
+    @staticmethod
+    def _fmt_freq(hz: int) -> str:
+        return f"{hz} Hz" if hz < 1000 else f"{hz // 1000} kHz"
+
+    @staticmethod
+    def _truncate(path: str, maxlen: int = 42) -> str:
+        if not path:
+            return ""
+        if len(path) <= maxlen:
+            return path
+        return "..." + path[-(maxlen - 3):]
+
+    def _select_vinheta(self, kind: str):
+        """
+        Abre QFileDialog, copia o arquivo selecionado para `assets/vinhetas/`
+        e persiste o caminho final.
+
+        Estratégia:
+          1. Apaga qualquer vinheta anterior do mesmo tipo (intro/outro) —
+             garante que não acumule arquivos órfãos com extensões antigas.
+          2. Copia o arquivo escolhido para `VINHETAS_DIR/{kind}.{ext}` (a
+             extensão original é preservada — ffmpeg lê tudo).
+          3. Atualiza o estado da UI com o NOVO caminho (dentro do app).
+        """
+        import shutil
+
+        src, _ = QFileDialog.getOpenFileName(
+            self,
+            "Selecionar vinheta de " + ("entrada" if kind == "intro" else "saída"),
+            "",
+            "Arquivos de áudio (*.mp3 *.m4a *.wav *.ogg *.flac);;Todos (*.*)",
+        )
+        if not src:
+            return
+
+        try:
+            # Garante a pasta de assets
+            os.makedirs(baixar_audio.VINHETAS_DIR, exist_ok=True)
+
+            # Apaga qualquer vinheta anterior do mesmo tipo (qualquer extensão)
+            self._delete_existing_vinheta_files(kind)
+
+            ext = os.path.splitext(src)[1].lower() or ".mp3"
+            dest = os.path.join(baixar_audio.VINHETAS_DIR, f"{kind}{ext}")
+
+            # shutil.copy2 preserva metadados; resolve overwrite atômico via
+            # remove+copy se já existir (já tratamos acima).
+            shutil.copy2(src, dest)
+        except Exception as e:
+            # Em caso de erro de I/O na cópia, mostra a mensagem no label do
+            # path da vinheta (não temos um label de feedback dedicado nesta
+            # sub-aba — o feedback global de save é da página principal).
+            target_label = (
+                self._intro_path_label if kind == "intro" else self._outro_path_label
+            )
+            target_label.setText(f"⚠ Erro ao copiar: {e}")
+            target_label.setStyleSheet(f"color: {P.ERROR}; font-size: 11px;")
+            return
+
+        # Atualiza estado da UI com o caminho INTERNO (dentro do app)
+        if kind == "intro":
+            self._intro_path = dest
+            self._intro_path_label.setText(self._truncate(dest))
+            self._intro_btn_play.setEnabled(True)
+            self._intro_btn_remove.setEnabled(True)
+        else:
+            self._outro_path = dest
+            self._outro_path_label.setText(self._truncate(dest))
+            self._outro_btn_play.setEnabled(True)
+            self._outro_btn_remove.setEnabled(True)
+
+    def _remove_vinheta(self, kind: str):
+        """
+        Limpa a vinheta selecionada e apaga o arquivo correspondente em
+        `assets/vinhetas/` (best-effort — falhas de I/O não interrompem).
+        """
+        # Para o player se estava tocando esta vinheta
+        if self._currently_playing == kind:
+            self._stop_playback()
+
+        # Remove o arquivo físico
+        self._delete_existing_vinheta_files(kind)
+
+        if kind == "intro":
+            self._intro_path = ""
+            self._intro_path_label.setText("Nenhum arquivo selecionado")
+            self._intro_btn_play.setEnabled(False)
+            self._intro_btn_remove.setEnabled(False)
+        else:
+            self._outro_path = ""
+            self._outro_path_label.setText("Nenhum arquivo selecionado")
+            self._outro_btn_play.setEnabled(False)
+            self._outro_btn_remove.setEnabled(False)
+
+    @staticmethod
+    def _delete_existing_vinheta_files(kind: str):
+        """
+        Remove todos os arquivos `{kind}.*` existentes em VINHETAS_DIR.
+
+        Best-effort: erros de I/O são silenciados — não devem interromper o
+        fluxo principal (a substituição/limpeza pode ser tentada de novo).
+        """
+        import glob
+        try:
+            pattern = os.path.join(baixar_audio.VINHETAS_DIR, f"{kind}.*")
+            for f in glob.glob(pattern):
+                try:
+                    os.remove(f)
+                except OSError:
+                    pass
+        except Exception:
+            pass
+
+    # -----------------------------------------------------------------------
+    # Preview da vinheta via QMediaPlayer
+    # -----------------------------------------------------------------------
+
+    def _ensure_media_player(self):
+        if self._media_player is None:
+            from PyQt6.QtMultimedia import QAudioOutput, QMediaPlayer
+            self._media_audio_output = QAudioOutput()
+            self._media_player = QMediaPlayer()
+            self._media_player.setAudioOutput(self._media_audio_output)
+            self._media_player.playbackStateChanged.connect(
+                self._on_playback_state_changed
+            )
+
+    def _toggle_play_vinheta(self, kind: str):
+        from PyQt6.QtCore import QUrl
+        path = self._intro_path if kind == "intro" else self._outro_path
+        if not path:
+            return
+
+        # Se já estava tocando esta mesma vinheta — para
+        if self._currently_playing == kind:
+            self._stop_playback()
+            return
+
+        # Se estava tocando OUTRA vinheta — para a anterior antes
+        if self._currently_playing is not None:
+            self._stop_playback()
+
+        self._ensure_media_player()
+        self._media_player.setSource(QUrl.fromLocalFile(path))
+        self._media_player.play()
+        self._currently_playing = kind
+        self._update_play_buttons()
+
+    def _stop_playback(self):
+        if self._media_player is not None:
+            try:
+                self._media_player.stop()
+            except Exception:
+                pass
+        self._currently_playing = None
+        self._update_play_buttons()
+
+    def _on_playback_state_changed(self, state):
+        # Quando o áudio termina sozinho, atualiza o botão
+        try:
+            from PyQt6.QtMultimedia import QMediaPlayer
+            if state == QMediaPlayer.PlaybackState.StoppedState:
+                self._currently_playing = None
+                self._update_play_buttons()
+        except Exception:
+            pass
+
+    def _update_play_buttons(self):
+        intro_text = "■ Parar" if self._currently_playing == "intro" else "▶ Tocar"
+        outro_text = "■ Parar" if self._currently_playing == "outro" else "▶ Tocar"
+        self._intro_btn_play.setText(intro_text)
+        self._outro_btn_play.setText(outro_text)
+        # O card de teste só existe quando _build_card_test foi chamado
+        if hasattr(self, "_test_btn_play"):
+            self._update_test_play_button()
+
+    # -----------------------------------------------------------------------
+    # EQ helpers
+    # -----------------------------------------------------------------------
+
+    def _on_slider_moved(self, _value):
+        """Mexer manual em qualquer slider muda o preset para 'Personalizado'."""
+        if self._eq_programmatic_change:
+            return
+        if self._eq_preset_combo.currentIndex() != 1:
+            self._eq_preset_combo.blockSignals(True)
+            self._eq_preset_combo.setCurrentIndex(1)
+            self._eq_preset_combo.blockSignals(False)
+
+    def _on_preset_changed(self, idx: int):
+        """Trocar combo Preset para 'Voz Masculina' restaura os sliders."""
+        if idx == 0:
+            self._restore_eq_default(_keep_combo=True)
+
+    def _restore_eq_default(self, _keep_combo: bool = False):
+        """Reseta sliders para o preset Voz Masculina."""
+        from domain.audio_presets import EQ_PRESET_VOZ_MASCULINA
+        self._eq_programmatic_change = True
+        try:
+            preset = dict(EQ_PRESET_VOZ_MASCULINA)
+            for (freq, slider), value_lbl in zip(self._eq_sliders, self._eq_value_labels):
+                gain = preset.get(freq, 0.0)
+                slider.setValue(int(gain * 10))
+                value_lbl.setText(f"{gain:+.1f} dB")
+        finally:
+            self._eq_programmatic_change = False
+        if not _keep_combo:
+            self._eq_preset_combo.blockSignals(True)
+            self._eq_preset_combo.setCurrentIndex(0)
+            self._eq_preset_combo.blockSignals(False)
+
+    # -----------------------------------------------------------------------
+    # Leitura do estado da UI → AudioEditConfig + persistência
+    # -----------------------------------------------------------------------
+
+    def _read_audio_config_from_ui(self):
+        """Constrói um AudioEditConfig a partir do estado atual dos controles."""
+        from domain.entities import AudioEditConfig, EqBand
+
+        bands = tuple(
+            EqBand(freq_hz=freq, gain_db=slider.value() / 10.0)
+            for freq, slider in self._eq_sliders
+        )
+
+        # Intensidade selecionada (radio)
+        intensity = "media"
+        for label, rb in self._noise_intensity_radios.items():
+            if rb.isChecked():
+                intensity = label
+                break
+
+        return AudioEditConfig(
+            intro_path                = self._intro_path or None,
+            outro_path                = self._outro_path or None,
+            intro_overlap_secs        = float(self._intro_overlap_spin.value()),
+            outro_overlap_secs        = float(self._outro_overlap_spin.value()),
+            fade_in_enabled           = bool(self._fade_in_check.isChecked()),
+            fade_in_secs              = float(self._fade_in_spin.value()),
+            fade_out_enabled          = bool(self._fade_out_check.isChecked()),
+            fade_out_secs             = float(self._fade_out_spin.value()),
+            eq_enabled                = bool(self._eq_check.isChecked()),
+            eq_bands                  = bands,
+            noise_reduction_enabled   = bool(self._noise_check.isChecked()),
+            noise_reduction_intensity = intensity,
+        )
 
     def _section_label(self, text: str) -> QLabel:
         lbl = QLabel(text)
         lbl.setStyleSheet("font-size: 13px; font-weight: bold;")
         return lbl
 
-    def _refresh_auth_status(self):
-        if baixar_audio.check_auth_status():
-            self._auth_status_label.setText("✓  Autorizado")
-            self._auth_status_label.setStyleSheet(f"color: {P.GREEN};")
-            self._auth_action_btn.setText("Logout")
-            self._auth_action_btn.setStyleSheet(
-                f"background: {P.RED}; border-radius: 4px;"
-            )
-        else:
-            self._auth_status_label.setText("✗  Não autorizado")
-            self._auth_status_label.setStyleSheet(f"color: {P.ERROR};")
-            self._auth_action_btn.setText("Autorizar")
-            self._auth_action_btn.setStyleSheet(
-                f"background: {P.GREEN}; border-radius: 4px;"
-            )
-
-    def _toggle_auth(self):
-        if baixar_audio.check_auth_status():
-            self._do_logout()
-        else:
-            self._do_authorize()
-
-    def _do_logout(self):
-        baixar_audio.logout_drive()
-        self._refresh_auth_status()
-        self._feedback_label.setText(
-            "Logout realizado. Autorize novamente antes de processar."
-        )
-        self._feedback_label.setStyleSheet(f"color: {P.WARN}; font-size: 11px;")
-
-    def _do_authorize(self):
-        if self._auth_running:
-            return
-        self._auth_running = True
-        self._auth_action_btn.setEnabled(False)
-        self._auth_action_btn.setText("Autorizando...")
-        threading.Thread(target=self._auth_worker, daemon=True).start()
-
-    def _auth_worker(self):
+    def hideEvent(self, event):
+        """
+        Para o player de preview se estiver tocando quando a aba é trocada
+        (o usuário clica em outra sub-aba ou em outra página do app).
+        """
         try:
-            baixar_audio.run_auth()
-            QTimer.singleShot(0, self._on_auth_done)
-        except Exception as e:
-            QTimer.singleShot(0, lambda: self._on_auth_error(str(e)))
-
-    def _on_auth_done(self):
-        self._auth_running = False
-        self._auth_action_btn.setEnabled(True)
-        self._refresh_auth_status()
-        self._feedback_label.setText("Google Drive autorizado com sucesso!")
-        self._feedback_label.setStyleSheet(f"color: {P.GREEN}; font-size: 11px;")
-
-    def _on_auth_error(self, msg: str):
-        self._auth_running = False
-        self._auth_action_btn.setEnabled(True)
-        self._refresh_auth_status()
-        self._feedback_label.setText(f"Erro na autorização: {msg}")
-        self._feedback_label.setStyleSheet(f"color: {P.ERROR}; font-size: 11px;")
-
-    def _save(self):
-        channel = self._channel_entry.text().strip()
-        folder  = self._folder_entry.text().strip()
-        if not channel:
-            self._feedback_label.setText("URL do canal não pode estar vazia.")
-            self._feedback_label.setStyleSheet(f"color: {P.ERROR}; font-size: 11px;")
-            return
-        if not folder:
-            self._feedback_label.setText("ID da pasta não pode estar vazio.")
-            self._feedback_label.setStyleSheet(f"color: {P.ERROR}; font-size: 11px;")
-            return
-        baixar_audio.save_config(channel_url=channel, drive_folder_id=folder)
-        self._feedback_label.setText("Configurações salvas com sucesso!")
-        self._feedback_label.setStyleSheet(f"color: {P.GREEN}; font-size: 11px;")
+            if self._media_player is not None:
+                self._media_player.stop()
+        except Exception:
+            pass
+        super().hideEvent(event)
 
 
 # ---------------------------------------------------------------------------

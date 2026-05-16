@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from typing import Callable, List, Optional, Protocol, runtime_checkable
 
-from domain.entities import AudioFile, ProcessingResult, Segment, Video
+from domain.entities import AudioEditConfig, AudioFile, ProcessingResult, Segment, Video
 
 
 # ---------------------------------------------------------------------------
@@ -209,4 +209,56 @@ class INotifier(Protocol):
         timeout: int = 8,
     ) -> None:
         """Exibe uma notificação desktop (best-effort; ignora erros silenciosamente)."""
+        ...
+
+
+# ---------------------------------------------------------------------------
+# Editor de áudio (pós-processamento: vinhetas, fade, EQ, denoise)
+# ---------------------------------------------------------------------------
+
+@runtime_checkable
+class IAudioEditor(Protocol):
+    """
+    Aplica filtros de pós-processamento em um AudioFile baixado, gerando o
+    arquivo final pronto para upload.
+
+    Pipeline (na ordem): redução de ruído → equalização → fade in/out →
+    concatenação com vinhetas. Quando `config.has_any_filter_enabled` é
+    False, o editor retorna o AudioFile de entrada sem modificação (no-op).
+
+    Implementações: FfmpegAudioEditor (infraestrutura/audio) — futuro PR
+    """
+
+    def process(
+        self,
+        audio: AudioFile,
+        config: AudioEditConfig,
+        *,
+        cancel_event=None,
+        on_log: Optional[Callable[[str], None]] = None,
+        on_progress: Optional[Callable[[float], None]] = None,
+    ) -> AudioFile:
+        """
+        Processa o áudio aplicando o pipeline configurado.
+
+        Parameters
+        ----------
+        audio:
+            AudioFile de entrada (caminho local de um MP3 já baixado).
+        config:
+            Configuração do pipeline (vinhetas, fade, EQ, denoise).
+        cancel_event:
+            threading.Event opcional — lança OperacaoCancelada se sinalizado.
+        on_log:
+            Callback chamado uma vez por etapa do pipeline (ex.:
+            "Aplicando equalização (5 bandas)...").
+        on_progress:
+            Callback chamado com progresso normalizado em [0.0, 1.0].
+
+        Returns
+        -------
+        AudioFile
+            Arquivo final. Substitui o original no caminho de entrada
+            (mesmo `path` do AudioFile recebido).
+        """
         ...

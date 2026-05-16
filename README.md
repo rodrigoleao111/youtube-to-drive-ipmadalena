@@ -2,6 +2,8 @@
 
 Automatiza o download do áudio dos cultos do canal [@IPMadalena](https://www.youtube.com/@IPMadalena/streams) no YouTube e o upload para o Google Drive, organizando os arquivos por pasta de mês.
 
+A partir da v3.0.0, oferece também um **pipeline de edição de áudio** opcional (vinhetas de entrada/saída, fade in/out, equalização de 5 bandas e redução de ruído) — produz arquivos prontos para uso como podcast.
+
 ---
 
 ## Instalação
@@ -29,7 +31,7 @@ Existem duas formas de instalar o app. Escolha a que melhor se encaixa no seu pe
 ### Opção 3 — Instalação manual (desenvolvedores)
 
 ```bash
-pip install yt-dlp google-api-python-client google-auth-oauthlib customtkinter tkcalendar plyer pywebview
+pip install PyQt6 yt-dlp google-api-python-client google-auth-oauthlib plyer
 ```
 
 Instale o ffmpeg em `ffmpeg/bin/ffmpeg.exe` e execute:
@@ -68,8 +70,22 @@ python app.py
 3. Selecione os vídeos desejados no popup e clique em **Prosseguir**
 4. O **player** abre com o vídeo no YouTube — assista e clique **⏱ Marcar** para capturar o tempo de início e fim da pregação
 5. Clique em **Confirmar trecho** (ou **Usar vídeo completo** para enviar sem corte)
-6. Acompanhe o progresso pelas barras de **Download**, **Conversão** e **Upload**
+6. Acompanhe o progresso pelas barras de **Download**, **Conversão** (edição de áudio) e **Upload**
 7. Uma notificação desktop é exibida ao concluir
+
+### Edição de áudio (opcional, novidade da v3.0.0)
+
+Em **Configurações → Edição de áudio**, você pode habilitar um pipeline completo de pós-processamento que gera arquivos prontos para uso como podcast:
+
+- **Vinhetas de entrada/saída** — faça upload de arquivos de áudio (mp3/wav/m4a/ogg/flac); ficam em `assets/vinhetas/` dentro do app, com sobreposição em segundos configurável
+- **Fade in / fade out** — duração configurável (0–10 s)
+- **Equalização paramétrica de 5 bandas** (80 / 250 / 1k / 4k / 10k Hz, -12 a +12 dB) com preset padrão **"Voz Masculina"** otimizado para clareza em pregações
+- **Redução de ruído** com 3 níveis (baixa / média / alta)
+- **Teste de configuração** — selecione um arquivo de exemplo, clique em **Gerar preview** e ouça o resultado no player popup integrado (com slider de posição, play/pause e skip ±10s) antes de salvar e processar um culto inteiro
+
+A edição é aplicada automaticamente entre o download do trecho e o upload — sem etapas manuais. A barra de **Conversão** na tela principal exibe progresso real da edição enquanto roda.
+
+Toda a config fica em `config.json` e é portátil entre instalações (paths das vinhetas são gravados como basename, não absolutos — mover a pasta do app não quebra a referência).
 
 ### Linha de comando
 

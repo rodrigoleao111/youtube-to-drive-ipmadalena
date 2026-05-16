@@ -22,9 +22,11 @@ import sys
 import baixar_audio
 from application.use_cases import (
     DownloadSegmentsUseCase,
+    EditAudioUseCase,
     ListVideosUseCase,
     UploadAudioUseCase,
 )
+from infrastructure.audio.ffmpeg_editor import FfmpegAudioEditor
 from infrastructure.drive.gdrive_storage import GoogleDriveStorage
 from infrastructure.notification.plyer_notifier import PlyerNotifier
 from infrastructure.persistence.json_repositories import JsonHistoryRepository
@@ -32,6 +34,7 @@ from infrastructure.youtube.ytdlp_source import (
     YtDlpAudioDownloader,
     YtDlpVideoSource,
 )
+from presentation.audio_test_presenter import AudioTestPresenter
 from presentation.processing_presenter import ProcessingPresenter
 
 
@@ -42,7 +45,8 @@ def build_processing_presenter() -> ProcessingPresenter:
     GoogleDriveStorage lê drive_folder_id no construtor; chamar este builder
     a cada operação garante que mudanças nas configurações sejam refletidas.
     """
-    cfg = baixar_audio.load_config()
+    cfg          = baixar_audio.load_config()
+    config_repo  = baixar_audio.config_repo()
 
     storage = GoogleDriveStorage(
         token_file          = baixar_audio.TOKEN_FILE,
@@ -56,6 +60,13 @@ def build_processing_presenter() -> ProcessingPresenter:
     return ProcessingPresenter(
         list_videos_uc = ListVideosUseCase(source=YtDlpVideoSource()),
         download_uc    = DownloadSegmentsUseCase(downloader=YtDlpAudioDownloader()),
+        edit_uc        = EditAudioUseCase(
+            editor        = FfmpegAudioEditor(),
+            config_repo   = config_repo,
+            # Expande basenames persistidos no config.json → paths absolutos
+            # dentro de VINHETAS_DIR (portabilidade entre instalações).
+            path_resolver = baixar_audio.audio_edit_resolve_paths,
+        ),
         upload_uc      = UploadAudioUseCase(storage=storage, history=history),
         channel_url    = cfg["channel_url"],
         download_dir   = baixar_audio.DOWNLOAD_DIR,
@@ -65,3 +76,16 @@ def build_processing_presenter() -> ProcessingPresenter:
 def build_notifier() -> PlyerNotifier:
     """Constrói o adaptador de notificações desktop (implementa INotifier)."""
     return PlyerNotifier()
+
+
+def build_audio_test_presenter() -> AudioTestPresenter:
+    """
+    Constrói um presenter para o teste de configuração de áudio.
+
+    Usado pela página "Configurações de Áudio" (SettingsDialog) para gerar
+    previews a partir de um arquivo de exemplo do usuário, aplicando a
+    configuração que está na tela (sem precisar salvar antes).
+
+    Reaproveita o mesmo `FfmpegAudioEditor` do pipeline de produção.
+    """
+    return AudioTestPresenter(editor=FfmpegAudioEditor())

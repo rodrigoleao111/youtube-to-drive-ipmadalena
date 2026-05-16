@@ -4,7 +4,7 @@
 
 #define AppName      "IPMadalena — Cultos para o Drive"
 #define AppShortName "IPMadalena"
-#define AppVersion   "2.1.2"
+#define AppVersion   "3.0.0"
 #define AppPublisher "Igreja Presbiteriana de Madalena"
 #define AppExeName   "IPMadalena.exe"
 
@@ -61,13 +61,14 @@ Type: filesandordirs; Name: "{app}\logs"
 Type: filesandordirs; Name: "{app}\__pycache__"
 
 [Code]
-// Avisa o usuário que credentials/ não são removidas na desinstalação
+// Avisa o usuário que credentials/ e assets/vinhetas/ não são removidas na desinstalação
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 begin
   if CurUninstallStep = usPostUninstall then begin
     MsgBox(
       'Desinstalação concluída.' + #13#10 + #13#10 +
-      'As suas credenciais Google (pasta "credentials") foram mantidas.' + #13#10 +
+      'As suas credenciais Google (pasta "credentials") e as vinhetas' + #13#10 +
+      'salvas (pasta "assets\vinhetas") foram mantidas.' + #13#10 +
       'Remova-as manualmente se desejar.',
       mbInformation, MB_OK
     );
