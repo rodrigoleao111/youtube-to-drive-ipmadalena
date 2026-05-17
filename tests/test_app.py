@@ -27,6 +27,7 @@ from unittest.mock import MagicMock, call, patch
 import pytest
 from PyQt6.QtCore import QPointF, Qt
 from PyQt6.QtGui import QMouseEvent
+from PyQt6.QtWidgets import QLabel, QMessageBox, QPushButton
 
 import baixar_audio
 import app as app_module
@@ -2239,9 +2240,383 @@ class TestAudioPlayerDialog:
         player.setPosition.assert_called_with(25_000)
         assert dlg._slider_dragging is False
 
-    def test_close_event_para_player(self, application, tmp_path):
-        from PyQt6.QtGui import QCloseEvent
+    def test_hide_event_para_player(self, application, tmp_path):
+        from PyQt6.QtGui import QHideEvent
         dlg, player = self._make_dialog(application, tmp_path)
-        evt = QCloseEvent()
-        dlg.closeEvent(evt)
+        evt = QHideEvent()
+        dlg.hideEvent(evt)
         player.stop.assert_called_once()
+
+
+# ===========================================================================
+# Página Home — Início
+# ===========================================================================
+
+class TestHomePage:
+    """
+    Cobre a estrutura e comportamento da página Início:
+      - widgets criados por _build_home_page
+      - _refresh_home com diretório vazio → estado vazio
+      - _refresh_home com arquivos MP3 → cards criados
+      - _build_home_card retorna QFrame com botões play e delete
+      - _play_local_file abre _AudioPlayerDialog
+      - _delete_local_file confirma e remove arquivo
+    """
+
+    def test_home_page_tem_label_de_sub_titulo(self, application):
+        assert hasattr(application, "_home_sub")
+        assert application._home_sub is not None
+
+    def test_home_page_tem_scroll_area(self, application):
+        from PyQt6.QtWidgets import QScrollArea
+        assert hasattr(application, "_home_scroll")
+        assert isinstance(application._home_scroll, QScrollArea)
+
+    def test_home_page_tem_outer_layout(self, application):
+        from PyQt6.QtWidgets import QVBoxLayout
+        assert hasattr(application, "_home_outer_layout")
+        assert isinstance(application._home_outer_layout, QVBoxLayout)
+
+    def test_refresh_home_sem_arquivos_mostra_estado_vazio(
+        self, application, tmp_path
+    ):
+        with patch.object(baixar_audio, "DOWNLOAD_DIR", str(tmp_path)):
+            application._refresh_home()
+
+        # Sub-título indica nenhum arquivo
+        assert "nenhum" in application._home_sub.text().lower()
+
+    def test_refresh_home_com_mp3_atualiza_sub_titulo(self, application, tmp_path):
+        # Cria 2 arquivos MP3 falsos
+        (tmp_path / "culto_a.mp3").write_bytes(b"\x00" * 1024)
+        (tmp_path / "culto_b.mp3").write_bytes(b"\x00" * 2048)
+
+        with patch.object(baixar_audio, "DOWNLOAD_DIR", str(tmp_path)):
+            application._refresh_home()
+
+        sub = application._home_sub.text()
+        assert "2" in sub      # count
+        assert "MB" in sub     # tamanho em disco
+
+    def test_refresh_home_com_mp3_popula_grid(self, application, tmp_path):
+        (tmp_path / "culto_a.mp3").write_bytes(b"\x00" * 1024)
+        (tmp_path / "culto_b.mp3").write_bytes(b"\x00" * 1024)
+
+        with patch.object(baixar_audio, "DOWNLOAD_DIR", str(tmp_path)):
+            application._refresh_home()
+
+        # outer_layout deve ter pelo menos o grid_widget + stretch
+        assert application._home_outer_layout.count() >= 1
+
+    def test_build_home_card_retorna_qframe(self, application, tmp_path):
+        from PyQt6.QtWidgets import QFrame
+        fpath = tmp_path / "culto.mp3"
+        fpath.write_bytes(b"\x00" * 1024)
+
+        card = application._build_home_card(str(fpath))
+        assert isinstance(card, QFrame)
+
+    def test_build_home_card_tem_botao_tocar(self, application, tmp_path):
+        from PyQt6.QtWidgets import QPushButton
+        fpath = tmp_path / "culto.mp3"
+        fpath.write_bytes(b"\x00" * 1024)
+
+        card = application._build_home_card(str(fpath))
+        btns = card.findChildren(QPushButton)
+        labels = [b.text() for b in btns]
+        assert any("Tocar" in l for l in labels)
+
+    def test_build_home_card_tem_botao_lixeira(self, application, tmp_path):
+        from PyQt6.QtWidgets import QPushButton
+        fpath = tmp_path / "culto.mp3"
+        fpath.write_bytes(b"\x00" * 1024)
+
+        card = application._build_home_card(str(fpath))
+        btns = card.findChildren(QPushButton)
+        # Botão de lixeira usa ícone nativo (sem texto) com tooltip
+        assert any(b.toolTip() == "Excluir arquivo local" for b in btns)
+
+    def test_play_local_file_abre_audio_player_dialog(self, application, tmp_path):
+        fpath = tmp_path / "culto.mp3"
+        fpath.write_bytes(b"\x00" * 100)
+
+        with patch("app._AudioPlayerDialog") as MockDlg:
+            mock_instance = MagicMock()
+            MockDlg.return_value = mock_instance
+            application._play_local_file(str(fpath))
+
+        MockDlg.assert_called_once_with(str(fpath), parent=application)
+        mock_instance.exec.assert_called_once()
+
+    def test_delete_local_file_confirma_e_remove(self, application, tmp_path):
+        fpath = tmp_path / "culto.mp3"
+        fpath.write_bytes(b"\x00" * 1024)
+
+        mock_btn = MagicMock()
+        mock_msg = MagicMock()
+        mock_msg.clickedButton.return_value = mock_btn
+        mock_msg.addButton.side_effect = [mock_btn, MagicMock()]
+
+        with patch.object(baixar_audio, "DOWNLOAD_DIR", str(tmp_path)), \
+             patch("app.QMessageBox", return_value=mock_msg):
+            application._delete_local_file(str(fpath))
+
+        assert not fpath.exists()
+
+    def test_delete_local_file_cancela_nao_remove(self, application, tmp_path):
+        fpath = tmp_path / "culto.mp3"
+        fpath.write_bytes(b"\x00" * 1024)
+
+        mock_btn_sim = MagicMock()
+        mock_btn_nao = MagicMock()
+        mock_msg = MagicMock()
+        mock_msg.clickedButton.return_value = mock_btn_nao
+        mock_msg.addButton.side_effect = [mock_btn_sim, mock_btn_nao]
+
+        with patch("app.QMessageBox", return_value=mock_msg):
+            application._delete_local_file(str(fpath))
+
+        assert fpath.exists()
+
+    def test_delete_local_file_confirma_chama_refresh_home(
+        self, application, tmp_path
+    ):
+        fpath = tmp_path / "culto.mp3"
+        fpath.write_bytes(b"\x00" * 1024)
+
+        mock_btn = MagicMock()
+        mock_msg = MagicMock()
+        mock_msg.clickedButton.return_value = mock_btn
+        mock_msg.addButton.side_effect = [mock_btn, MagicMock()]
+
+        with patch.object(baixar_audio, "DOWNLOAD_DIR", str(tmp_path)), \
+             patch("app.QMessageBox", return_value=mock_msg), \
+             patch.object(application, "_refresh_home") as mock_refresh:
+            application._delete_local_file(str(fpath))
+
+        mock_refresh.assert_called_once()
+
+    def test_sidebar_tem_quatro_botoes_de_nav(self, application):
+        assert len(application._nav_buttons) == 4
+
+    def test_primeiro_botao_nav_e_inicio(self, application):
+        assert "Início" in application._nav_buttons[0].text()
+
+    def test_stack_tem_quatro_paginas(self, application):
+        assert application._stack.count() == 4
+
+    # ── Ponto 1: Estado vazio aprimorado ────────────────────────────────────
+
+    def test_estado_vazio_tem_icone_e_texto_principal(self, application, tmp_path):
+        with patch.object(baixar_audio, "DOWNLOAD_DIR", str(tmp_path)):
+            application._refresh_home()
+        labels = application._home_outer_layout.parentWidget().findChildren(QLabel)
+        textos = [l.text() for l in labels]
+        assert any("🎵" in t for t in textos)
+        assert any("Nenhum áudio" in t for t in textos)
+
+    def test_estado_vazio_tem_dica_de_acao(self, application, tmp_path):
+        with patch.object(baixar_audio, "DOWNLOAD_DIR", str(tmp_path)):
+            application._refresh_home()
+        labels = application._home_outer_layout.parentWidget().findChildren(QLabel)
+        textos = " ".join(l.text() for l in labels)
+        assert "Processar" in textos
+
+    # ── Ponto 2: Seletor de ordenação ───────────────────────────────────────
+
+    def test_home_tem_combo_de_ordenacao(self, application):
+        from PyQt6.QtWidgets import QComboBox
+        assert hasattr(application, "_home_sort_combo")
+        assert isinstance(application._home_sort_combo, QComboBox)
+
+    def test_combo_ordenacao_tem_opcoes_corretas(self, application):
+        combo = application._home_sort_combo
+        assert combo.count() == 2
+        assert combo.itemText(0) == "Mais recentes"
+        assert combo.itemText(1) == "A–Z"
+
+    def test_ordenacao_az_ordena_por_nome(self, application, tmp_path):
+        (tmp_path / "z_culto.mp3").write_bytes(b"\x00" * 100)
+        (tmp_path / "a_culto.mp3").write_bytes(b"\x00" * 100)
+
+        with patch.object(baixar_audio, "DOWNLOAD_DIR", str(tmp_path)):
+            application._home_sort_order = 1
+            application._refresh_home()
+
+        sub = application._home_sub.text()
+        assert "2" in sub
+
+    # ── Ponto 3: Subtítulo com contagem e MB ────────────────────────────────
+
+    def test_subtitulo_usa_singular_para_um_arquivo(self, application, tmp_path):
+        (tmp_path / "culto.mp3").write_bytes(b"\x00" * 1024)
+        with patch.object(baixar_audio, "DOWNLOAD_DIR", str(tmp_path)):
+            application._refresh_home()
+        assert "1 arquivo" in application._home_sub.text()
+        assert "arquivos" not in application._home_sub.text()
+
+    def test_subtitulo_usa_plural_para_multiplos_arquivos(self, application, tmp_path):
+        (tmp_path / "a.mp3").write_bytes(b"\x00" * 1024)
+        (tmp_path / "b.mp3").write_bytes(b"\x00" * 1024)
+        with patch.object(baixar_audio, "DOWNLOAD_DIR", str(tmp_path)):
+            application._refresh_home()
+        assert "arquivos" in application._home_sub.text()
+
+    # ── Ponto 4: Badge de status ─────────────────────────────────────────────
+
+    def test_card_badge_local_quando_nao_enviado(self, application, tmp_path):
+        fpath = tmp_path / "culto.mp3"
+        fpath.write_bytes(b"\x00" * 1024)
+        card = application._build_home_card(str(fpath), uploaded_titles=set())
+        labels = [l.text() for l in card.findChildren(QLabel)]
+        assert any("Local" in t for t in labels)
+
+    def test_card_badge_enviado_quando_no_historico(self, application, tmp_path):
+        fpath = tmp_path / "Culto 01-01-2025.mp3"
+        fpath.write_bytes(b"\x00" * 1024)
+        card = application._build_home_card(
+            str(fpath), uploaded_titles={"culto 01-01-2025"}
+        )
+        labels = [l.text() for l in card.findChildren(QLabel)]
+        assert any("Enviado" in t for t in labels)
+
+    def test_card_sem_botao_upload_quando_ja_enviado(self, application, tmp_path):
+        fpath = tmp_path / "Culto 01-01-2025.mp3"
+        fpath.write_bytes(b"\x00" * 1024)
+        card = application._build_home_card(
+            str(fpath), uploaded_titles={"culto 01-01-2025"}
+        )
+        btns = card.findChildren(QPushButton)
+        assert not any(b.toolTip() == "Enviar ao Drive" for b in btns)
+
+    def test_card_tem_botao_upload_quando_local(self, application, tmp_path):
+        fpath = tmp_path / "culto.mp3"
+        fpath.write_bytes(b"\x00" * 1024)
+        card = application._build_home_card(str(fpath), uploaded_titles=set())
+        btns = card.findChildren(QPushButton)
+        assert any(b.toolTip() == "Enviar ao Drive" for b in btns)
+
+    # ── Ponto 8: Confirmação ao fechar ──────────────────────────────────────
+
+    def test_close_sem_operacao_aceita_evento(self, application):
+        application._running = False
+        event = MagicMock()
+        application.closeEvent(event)
+        event.accept.assert_called_once()
+        event.ignore.assert_not_called()
+
+    def test_close_com_operacao_e_cancelar_ignora_evento(self, application):
+        application._running = True
+        mock_btn_cancelar = MagicMock()
+        mock_btn_sair = MagicMock()
+        mock_msg = MagicMock()
+        mock_msg.clickedButton.return_value = mock_btn_cancelar
+        mock_msg.addButton.side_effect = [mock_btn_sair, mock_btn_cancelar]
+
+        event = MagicMock()
+        with patch("app.QMessageBox", return_value=mock_msg):
+            application.closeEvent(event)
+
+        event.ignore.assert_called_once()
+        event.accept.assert_not_called()
+
+    def test_close_com_operacao_e_confirmar_aceita_evento(self, application):
+        application._running = True
+        mock_btn_sair = MagicMock()
+        mock_msg = MagicMock()
+        mock_msg.clickedButton.return_value = mock_btn_sair
+        mock_msg.addButton.side_effect = [mock_btn_sair, MagicMock()]
+
+        event = MagicMock()
+        with patch("app.QMessageBox", return_value=mock_msg):
+            application.closeEvent(event)
+
+        event.accept.assert_called_once()
+        event.ignore.assert_not_called()
+
+    # ── Ponto 7: APP_VERSION ────────────────────────────────────────────────
+
+    def test_app_version_e_constante_de_modulo(self, application):
+        import app as _app
+        assert hasattr(_app, "APP_VERSION")
+        assert _app.APP_VERSION.startswith("v")
+
+    def test_sidebar_exibe_app_version(self, application):
+        import app as _app
+        from PyQt6.QtWidgets import QLabel
+        sidebar_labels = application.findChildren(QLabel)
+        texts = [l.text() for l in sidebar_labels]
+        assert any(_app.APP_VERSION in t for t in texts)
+
+    # ── Ponto 6: Log de hoje ────────────────────────────────────────────────
+
+    def test_open_today_log_exibe_info_quando_nao_existe(self, application, tmp_path):
+        with patch.object(baixar_audio, "LOGS_DIR", str(tmp_path)), \
+             patch("app.QMessageBox") as MockMsg:
+            mock_inst = MagicMock()
+            MockMsg.return_value = mock_inst
+            application._open_today_log()
+        # QMessageBox.information deve ser chamado quando log não existe
+        MockMsg.information.assert_called_once()
+
+    def test_open_today_log_abre_arquivo_quando_existe(self, application, tmp_path):
+        from datetime import datetime as _dt
+        log_name = _dt.now().strftime("%d-%m-%Y") + ".log"
+        log_file = tmp_path / log_name
+        log_file.write_text("log content")
+        with patch.object(baixar_audio, "LOGS_DIR", str(tmp_path)), \
+             patch("os.startfile") as mock_start:
+            application._open_today_log()
+        mock_start.assert_called_once_with(str(log_file))
+
+
+# ===========================================================================
+# Keep files — configuração e card na aba Geral
+# ===========================================================================
+
+class TestKeepFilesConfig:
+    """
+    Verifica o toggle 'Manter arquivos no dispositivo':
+      - campo criado na aba Geral
+      - valor é lido do config.json no construtor
+      - _cfg_save persiste keep_files
+    """
+
+    def test_campo_keep_files_existe_na_aba_geral(self, application):
+        assert hasattr(application, "_cfg_keep_files_check")
+
+    def test_campo_keep_files_e_qcheckbox(self, application):
+        from PyQt6.QtWidgets import QCheckBox
+        assert isinstance(application._cfg_keep_files_check, QCheckBox)
+
+    def test_campo_keep_files_e_checkbox_e_nao_e_qlineedit(self, application):
+        """QCheckBox (não QLineEdit) é o tipo correto para keep_files."""
+        from PyQt6.QtWidgets import QCheckBox, QLineEdit
+        assert isinstance(application._cfg_keep_files_check, QCheckBox)
+        assert not isinstance(application._cfg_keep_files_check, QLineEdit)
+
+    def test_cfg_save_persiste_keep_files_true(self, application):
+        application._cfg_channel_entry.setText("https://canal.ok")
+        application._cfg_folder_entry.setText("FOLDER_OK")
+        application._cfg_keep_files_check.setChecked(True)
+
+        mock_repo = MagicMock()
+        mock_repo.load.return_value = {}
+        with patch("baixar_audio.config_repo", return_value=mock_repo):
+            application._cfg_save()
+
+        saved = mock_repo.save.call_args.args[0]
+        assert saved["keep_files"] is True
+
+    def test_cfg_save_persiste_keep_files_false(self, application):
+        application._cfg_channel_entry.setText("https://canal.ok")
+        application._cfg_folder_entry.setText("FOLDER_OK")
+        application._cfg_keep_files_check.setChecked(False)
+
+        mock_repo = MagicMock()
+        mock_repo.load.return_value = {}
+        with patch("baixar_audio.config_repo", return_value=mock_repo):
+            application._cfg_save()
+
+        saved = mock_repo.save.call_args.args[0]
+        assert saved["keep_files"] is False

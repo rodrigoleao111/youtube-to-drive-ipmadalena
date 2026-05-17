@@ -20,6 +20,7 @@ import baixar_audio
 from application.use_cases import (
     DownloadSegmentsUseCase,
     EditAudioUseCase,
+    GetChaptersUseCase,
     ListVideosUseCase,
     UploadAudioUseCase,
 )
@@ -66,6 +67,21 @@ class TestBuildProcessingPresenter:
         assert isinstance(p.download_uc,    DownloadSegmentsUseCase)
         assert isinstance(p.edit_uc,        EditAudioUseCase)
         assert isinstance(p.upload_uc,      UploadAudioUseCase)
+        assert isinstance(p.chapters_uc,    GetChaptersUseCase)
+
+    def test_chapters_uc_usa_yt_dlp_video_source(self):
+        with patch("baixar_audio.load_config", return_value={
+            "channel_url": "x", "drive_folder_id": "y",
+        }):
+            p = build_processing_presenter()
+        assert isinstance(p.chapters_uc.source, YtDlpVideoSource)
+
+    def test_list_videos_uc_e_chapters_uc_compartilham_mesmo_source(self):
+        with patch("baixar_audio.load_config", return_value={
+            "channel_url": "x", "drive_folder_id": "y",
+        }):
+            p = build_processing_presenter()
+        assert p.list_videos_uc.source is p.chapters_uc.source
 
     def test_edit_uc_usa_ffmpeg_editor_e_json_config_repo(self):
         with patch("baixar_audio.load_config", return_value={
@@ -137,6 +153,22 @@ class TestBuildProcessingPresenter:
     def test_modo_frozen_seta_delete_after_upload_true(self):
         with patch("baixar_audio.load_config", return_value={
             "channel_url": "x", "drive_folder_id": "y",
+        }), patch.object(sys, "frozen", True, create=True):
+            p = build_processing_presenter()
+        assert p.upload_uc.storage._delete_after_upload is True
+
+    def test_keep_files_true_suprime_delete_mesmo_frozen(self):
+        """keep_files=True impede deleção mesmo no modo frozen (exe)."""
+        with patch("baixar_audio.load_config", return_value={
+            "channel_url": "x", "drive_folder_id": "y", "keep_files": True,
+        }), patch.object(sys, "frozen", True, create=True):
+            p = build_processing_presenter()
+        assert p.upload_uc.storage._delete_after_upload is False
+
+    def test_keep_files_false_mantem_comportamento_frozen(self):
+        """keep_files=False (default) — frozen continua deletando."""
+        with patch("baixar_audio.load_config", return_value={
+            "channel_url": "x", "drive_folder_id": "y", "keep_files": False,
         }), patch.object(sys, "frozen", True, create=True):
             p = build_processing_presenter()
         assert p.upload_uc.storage._delete_after_upload is True

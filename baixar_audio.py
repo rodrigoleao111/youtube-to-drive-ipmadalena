@@ -98,6 +98,8 @@ def config_repo():
             "channel_url":     _DEFAULT_CHANNEL_URL,
             "drive_folder_id": _DEFAULT_DRIVE_FOLDER_ID,
             "audio_edit":      AudioEditConfig().to_dict(),
+            "chapter_name":    "",
+            "keep_files":      False,
         },
     )
 

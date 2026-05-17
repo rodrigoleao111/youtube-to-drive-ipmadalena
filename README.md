@@ -4,6 +4,8 @@ Automatiza o download do áudio dos cultos do canal [@IPMadalena](https://www.yo
 
 A partir da v3.0.0, oferece também um **pipeline de edição de áudio** opcional (vinhetas de entrada/saída, fade in/out, equalização de 5 bandas e redução de ruído) — produz arquivos prontos para uso como podcast.
 
+A v3.2.0 introduz a **tela Início**: biblioteca local de áudios baixados com cards, badge de status de envio ao Drive, re-upload individual, ordenação e confirmação ao fechar durante operações em curso.
+
 ---
 
 ## Instalação
@@ -100,6 +102,20 @@ python baixar_audio.py 19/04/2026
 
 ---
 
+## Tela Início
+
+A primeira página do app exibe os arquivos MP3 em `downloads/` como cards com:
+
+- **Badge de status** — "✓ Enviado ao Drive" (verde) quando o arquivo já consta no histórico, ou "● Local" (cinza) caso ainda não tenha sido enviado
+- **Botão ↑** — re-envia o arquivo ao Drive sem precisar reprocessar o vídeo (aparece apenas em arquivos "Local")
+- **Botão lixeira** — exclui o arquivo local com confirmação em português
+- **Ordenação** — "Mais recentes" (padrão) ou "A–Z" via combo na topbar
+- **Subtítulo** — mostra total de arquivos e espaço ocupado em disco
+
+Para que os arquivos apareçam aqui, ative **Manter arquivos no dispositivo** em Configurações → Geral.
+
+---
+
 ## Configurações
 
 Clique no ícone ⚙ no canto superior direito para acessar a tela de configurações:
@@ -107,6 +123,8 @@ Clique no ícone ⚙ no canto superior direito para acessar a tela de configura�
 - **Autorização Google Drive** — autorizar ou revogar acesso
 - **Canal YouTube** — alterar a URL do canal monitorado
 - **Pasta do Drive** — alterar o ID da pasta raiz de destino
+- **Manter arquivos no dispositivo** — mantém os MP3s em `downloads/` após o upload (necessário para a tela Início)
+- **Abrir log de hoje** — abre o arquivo de log do dia corrente no bloco de notas
 
 ---
 
@@ -122,7 +140,7 @@ Clique no ícone ⚙ no canto superior direito para acessar a tela de configura�
 8. Baixa apenas o trecho selecionado e converte para MP3
 9. Localiza a pasta do mês no Drive (ou cria se não existir)
 10. Faz o upload com progresso em tempo real
-11. Remove os arquivos locais após o upload
+11. Remove os arquivos locais após o upload (a menos que "Manter arquivos no dispositivo" esteja ativo)
 12. Salva histórico local e exibe notificação desktop
 
 > **Transmissões ao vivo:** o YouTube pode registrar a data de publicação como o dia seguinte ao culto. O script lida com isso automaticamente.
@@ -155,11 +173,11 @@ youtube_to_drive/
 │
 ├── composition_root.py             ← fábrica única do presenter (DI)
 │
-├── app.py                          ← interface gráfica (customtkinter)
+├── app.py                          ← interface gráfica (PyQt6)
 ├── baixar_audio.py                 ← constantes, utilidades de SO, CLI
 ├── setup_wizard.py                 ← wizard de primeira execução
-├── player_window.py                ← painel de controles de trecho
-├── player_subprocess.py            ← subprocesso do player YouTube (WebView2)
+├── player_window_qt.py             ← launcher do player Qt (subprocess)
+├── player_subprocess_qt.py         ← subprocesso do player YouTube (QWebEngine)
 │
 ├── tests/                          ← suíte completa (pytest + mocks)
 │
@@ -223,7 +241,7 @@ Detalhes técnicos completos (port-by-port, decisões de design, problemas conhe
 
 ## Testes
 
-Suíte com **331 testes** usando apenas `pytest` e `unittest.mock` — sem dependências adicionais:
+Suíte com **673 testes** usando apenas `pytest` e `unittest.mock` — sem dependências adicionais:
 
 ```bash
 python -m pytest tests/
@@ -239,17 +257,20 @@ Distribuição por camada:
 
 | Arquivo | Testes | Cobertura |
 |---|---:|---|
-| `test_domain.py` | 42 | Entidades, exceções, Protocols (puro) |
-| `test_ytdlp_source.py` | 29 | Adaptadores yt-dlp (subprocess mockado) |
+| `test_domain.py` | 87 | Entidades, exceções, Protocols (puro) |
+| `test_ffmpeg_editor.py` | 43 | FfmpegAudioEditor (subprocess mockado) |
+| `test_ytdlp_source.py` | 41 | Adaptadores yt-dlp (subprocess mockado) |
 | `test_gdrive_storage.py` | 38 | Drive OAuth + upload (HTTP/Drive API mockados) |
-| `test_persistence.py` | 29 | Repositórios JSON (I/O real em `tmp_path`) |
+| `test_use_cases.py` | 50 | Use cases da camada application (ports mockados) |
+| `test_persistence.py` | 33 | Repositórios JSON (I/O real em `tmp_path`) |
+| `test_app.py` | 201 | Integração da GUI (Home, Processar, Config, Player) |
+| `test_baixar_audio.py` | 38 | Utilidades + CLI + auth wrappers |
+| `test_presenter.py` | 30 | ProcessingPresenter (use cases mockados) |
+| `test_player_window_qt.py` | 29 | PlayerWindowQt |
+| `test_composition_root.py` | 22 | Wiring/DI |
+| `test_audio_test_presenter.py` | 17 | AudioTestPresenter |
+| `test_player_window.py` | 34 | PlayerWindow + utilitários de tempo |
 | `test_plyer_notifier.py` | 10 | PlyerNotifier (plyer mockado) |
-| `test_use_cases.py` | 31 | Use cases da camada application (ports mockados) |
-| `test_presenter.py` | 19 | ProcessingPresenter (use cases mockados) |
-| `test_composition_root.py` | 14 | Wiring/DI |
-| `test_baixar_audio.py` | 27 | Utilidades + CLI + auth wrappers |
-| `test_app.py` | 58 | Integração da GUI |
-| `test_player_window.py` | 33 | Player + utilitários de tempo |
 
 **Não testado automaticamente** (requer execução manual com rede e credenciais ativas):
 fluxo real com YouTube, popup de seleção (interação humana), upload real para Drive, notificação desktop visível, player webview abrindo a página do YouTube.

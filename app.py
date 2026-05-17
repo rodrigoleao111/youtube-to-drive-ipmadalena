@@ -30,13 +30,15 @@ from PyQt6.QtWidgets import (
     QFileDialog, QFrame, QGridLayout, QHBoxLayout,
     QLabel, QLineEdit, QMainWindow, QMessageBox, QPlainTextEdit,
     QProgressBar, QPushButton, QRadioButton, QScrollArea, QSlider,
-    QStackedWidget, QTabWidget, QVBoxLayout, QWidget,
+    QStackedWidget, QStyle, QTabWidget, QVBoxLayout, QWidget,
 )
 
 import baixar_audio
 from setup_wizard import SetupWizard
 from player_window_qt import PlayerWindowQt as PlayerWindow
 
+
+APP_VERSION = "v3.2.0"
 
 # ---------------------------------------------------------------------------
 # Instância única — impede abrir dois apps ao mesmo tempo
@@ -734,6 +736,38 @@ def _try_ytdlp_thumbnail(video_id: str):
 
 
 # ---------------------------------------------------------------------------
+# Helpers de UI
+# ---------------------------------------------------------------------------
+
+def _wrap_elide(text: str, fm, max_width: int, max_lines: int) -> str:
+    """Quebra `text` em até `max_lines` linhas de `max_width` px; última com '…'."""
+    from PyQt6.QtCore import Qt
+    words = text.split()
+    lines: list[str] = []
+    current = ""
+    i = 0
+    while i < len(words):
+        word = words[i]
+        candidate = (current + " " + word).strip() if current else word
+        if fm.horizontalAdvance(candidate) <= max_width:
+            current = candidate
+            i += 1
+        else:
+            if not current:          # palavra única mais larga que a coluna
+                current = word
+                i += 1
+            lines.append(current)
+            current = ""
+            if len(lines) == max_lines - 1:
+                remaining = " ".join(words[i:])
+                lines.append(fm.elidedText(remaining, Qt.TextElideMode.ElideRight, max_width))
+                return "\n".join(lines)
+    if current:
+        lines.append(current)
+    return "\n".join(lines[:max_lines])
+
+
+# ---------------------------------------------------------------------------
 # Janela principal
 # ---------------------------------------------------------------------------
 class App(QMainWindow):
@@ -799,9 +833,10 @@ class App(QMainWindow):
         self._stack = QStackedWidget()
         root.addWidget(self._stack, stretch=1)
 
-        self._stack.addWidget(self._build_processar_page())   # 0
-        self._stack.addWidget(self._build_historico_page())   # 1
-        self._stack.addWidget(self._build_config_page())      # 2
+        self._stack.addWidget(self._build_home_page())         # 0
+        self._stack.addWidget(self._build_processar_page())   # 1
+        self._stack.addWidget(self._build_historico_page())   # 2
+        self._stack.addWidget(self._build_config_page())      # 3
 
         self._switch_page(0)
 
@@ -857,6 +892,7 @@ class App(QMainWindow):
         # ── Navegação ───────────────────────────────────────────────────────
         self._nav_buttons = []
         nav_items = [
+            ("🏠", "Início"),
             ("▶", "Processar"),
             ("⏱", "Histórico"),
             ("⚙", "Configurações"),
@@ -890,7 +926,7 @@ class App(QMainWindow):
         layout.addLayout(theme_row)
 
         # Versão
-        ver = QLabel("v3.0.0")
+        ver = QLabel(APP_VERSION)
         ver.setContentsMargins(16, 2, 0, 10)
         ver.setAlignment(Qt.AlignmentFlag.AlignLeft)
         ver.setStyleSheet(
@@ -908,9 +944,11 @@ class App(QMainWindow):
             btn.setStyleSheet(active if i == idx else idle)
         self._current_page = idx
 
-        if idx == 1:
-            self._refresh_history()
+        if idx == 0:
+            self._refresh_home()
         elif idx == 2:
+            self._refresh_history()
+        elif idx == 3:
             self._refresh_config_auth()
 
     def _toggle_theme(self):
@@ -933,7 +971,303 @@ class App(QMainWindow):
         self._switch_page(page)
 
     # -----------------------------------------------------------------------
-    # Página 0 — Processar
+    # Página 0 — Início (Home)
+    # -----------------------------------------------------------------------
+    def _build_home_page(self) -> QWidget:
+        PAD = 26
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(PAD, 22, PAD, 22)
+        layout.setSpacing(0)
+
+        # ── Topbar ──────────────────────────────────────────────────────────
+        self._home_sort_order = 0   # 0 = Mais recentes, 1 = A–Z
+        hdr = QHBoxLayout()
+        title = QLabel("Arquivos baixados")
+        title.setStyleSheet("font-size: 19px; font-weight: bold;")
+        hdr.addWidget(title)
+        hdr.addStretch()
+
+        sort_combo = QComboBox()
+        sort_combo.addItems(["Mais recentes", "A–Z"])
+        sort_combo.setFixedWidth(130)
+        sort_combo.currentIndexChanged.connect(self._on_home_sort_changed)
+        self._home_sort_combo = sort_combo
+        hdr.addWidget(sort_combo)
+
+        layout.addLayout(hdr)
+        layout.addSpacing(2)
+
+        self._home_sub = QLabel("Carregando...")
+        self._home_sub.setStyleSheet(f"color: {P.HINT}; font-size: 12px;")
+        layout.addWidget(self._home_sub)
+        layout.addSpacing(14)
+
+        sep = QFrame()
+        sep.setObjectName("section_sep")
+        sep.setFrameShape(QFrame.Shape.HLine)
+        sep.setFixedHeight(1)
+        layout.addWidget(sep)
+        layout.addSpacing(10)
+
+        # ── Área de scroll + grid de cards ──────────────────────────────────
+        self._home_scroll = QScrollArea()
+        self._home_scroll.setWidgetResizable(True)
+        self._home_container = QWidget()
+        self._home_container.setObjectName("scroll_contents")
+        self._home_outer_layout = QVBoxLayout(self._home_container)
+        self._home_outer_layout.setContentsMargins(0, 4, 8, 4)
+        self._home_outer_layout.setSpacing(0)
+        self._home_scroll.setWidget(self._home_container)
+        layout.addWidget(self._home_scroll, stretch=1)
+
+        return page
+
+    def _refresh_home(self):
+        import glob as _glob
+
+        # Remove widgets anteriores
+        while self._home_outer_layout.count():
+            item = self._home_outer_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+        # Busca arquivos MP3 em DOWNLOAD_DIR
+        os.makedirs(baixar_audio.DOWNLOAD_DIR, exist_ok=True)
+        all_files = _glob.glob(os.path.join(baixar_audio.DOWNLOAD_DIR, "*.mp3"))
+        sort_idx = getattr(self, "_home_sort_order", 0)
+        if sort_idx == 1:
+            mp3_files = sorted(all_files, key=lambda f: os.path.basename(f).lower())
+        else:
+            mp3_files = sorted(all_files, key=os.path.getmtime, reverse=True)
+
+        if not mp3_files:
+            empty_w = QWidget()
+            ev = QVBoxLayout(empty_w)
+            ev.setContentsMargins(20, 60, 20, 20)
+            ev.setSpacing(10)
+            ev.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+
+            icon_lbl = QLabel("🎵")
+            icon_lbl.setStyleSheet("font-size: 48px;")
+            icon_lbl.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+            ev.addWidget(icon_lbl)
+
+            main_lbl = QLabel("Nenhum áudio baixado")
+            main_lbl.setStyleSheet("font-size: 15px; font-weight: bold;")
+            main_lbl.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+            ev.addWidget(main_lbl)
+
+            hint_lbl = QLabel(
+                "Ative 'Manter arquivos no dispositivo' em Configurações → Geral\n"
+                "e vá em Processar para baixar o primeiro culto."
+            )
+            hint_lbl.setStyleSheet(f"color: {P.HINT}; font-size: 12px;")
+            hint_lbl.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+            hint_lbl.setWordWrap(True)
+            ev.addWidget(hint_lbl)
+
+            self._home_outer_layout.addWidget(empty_w)
+            self._home_sub.setText("Nenhum arquivo encontrado")
+            return
+
+        n = len(mp3_files)
+        total_mb = sum(os.path.getsize(f) for f in mp3_files) / (1024 * 1024)
+        arq = "arquivo" if n == 1 else "arquivos"
+        self._home_sub.setText(f"{n} {arq}  ·  {total_mb:.1f} MB no disco")
+
+        # Grid 3 colunas
+        COLS = 3
+        grid_widget = QWidget()
+        grid_widget.setObjectName("scroll_contents")
+        grid = QGridLayout(grid_widget)
+        grid.setSpacing(12)
+        grid.setContentsMargins(0, 0, 0, 0)
+
+        history = baixar_audio.load_history()
+        uploaded_titles = {
+            t.lower()
+            for entry in history.values()
+            for t in entry.get("videos", [])
+        }
+
+        for i, fpath in enumerate(mp3_files):
+            row, col = divmod(i, COLS)
+            grid.addWidget(self._build_home_card(fpath, uploaded_titles), row, col)
+
+        # Preenchimento de colunas restantes na última linha
+        remainder = len(mp3_files) % COLS
+        if remainder:
+            for col in range(remainder, COLS):
+                placeholder = QWidget()
+                grid.addWidget(placeholder, len(mp3_files) // COLS, col)
+
+        self._home_outer_layout.addWidget(grid_widget)
+        self._home_outer_layout.addStretch()
+
+    def _build_home_card(self, fpath: str, uploaded_titles: set | None = None) -> QFrame:
+        card = QFrame()
+        card.setObjectName("card")
+        card.setFixedSize(220, 262)
+        v = QVBoxLayout(card)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(0)
+
+        # Thumbnail (16:9 — fallback emoji)
+        thumb = QLabel("🎵")
+        thumb.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        thumb.setFixedHeight(118)
+        bg = P.D_THUMB if self._dark_mode else P.L_THUMB
+        thumb.setStyleSheet(
+            f"font-size: 36px; background: {bg};"
+            f"border-top-left-radius: 8px; border-top-right-radius: 8px;"
+        )
+        v.addWidget(thumb)
+
+        # Body
+        body = QWidget()
+        bl = QVBoxLayout(body)
+        bl.setContentsMargins(12, 10, 12, 10)
+        bl.setSpacing(4)
+
+        # Título (basename sem extensão, máx 3 linhas com reticências)
+        title_text = os.path.splitext(os.path.basename(fpath))[0]
+        title_lbl = QLabel()
+        title_lbl.setStyleSheet("font-size: 12px; font-weight: bold;")
+        from PyQt6.QtGui import QFont, QFontMetrics
+        _font = QFont()
+        _font.setPixelSize(12)
+        _font.setBold(True)
+        _fm = QFontMetrics(_font)
+        _text_w = 220 - 12 - 12   # largura do card menos margens horizontais
+        title_lbl.setText(_wrap_elide(title_text, _fm, _text_w, 3))
+        title_lbl.setFixedHeight(_fm.lineSpacing() * 3 + 2)
+        bl.addWidget(title_lbl)
+
+        # Meta: data + tamanho
+        try:
+            size_mb = os.path.getsize(fpath) / (1024 * 1024)
+            mtime = datetime.fromtimestamp(os.path.getmtime(fpath))
+            meta_text = f"{mtime.strftime('%d/%m/%Y')}  ·  {size_mb:.1f} MB"
+        except Exception:
+            meta_text = ""
+        meta_lbl = QLabel(meta_text)
+        meta_lbl.setStyleSheet(f"color: {P.HINT}; font-size: 11px;")
+        bl.addWidget(meta_lbl)
+
+        # Badge de status (Enviado/Local)
+        title_key = title_text.lower()
+        uploaded = uploaded_titles is not None and title_key in uploaded_titles
+        badge = QLabel("✓ Enviado ao Drive" if uploaded else "● Local")
+        badge_color = P.GREEN if uploaded else P.HINT
+        badge.setStyleSheet(f"color: {badge_color}; font-size: 10px;")
+        bl.addWidget(badge)
+
+        # Botões
+        acts = QHBoxLayout()
+        acts.setSpacing(6)
+        acts.setContentsMargins(0, 6, 0, 0)
+
+        _fp = fpath
+        btn_play = QPushButton("▶  Tocar")
+        btn_play.setStyleSheet("font-weight: bold; padding: 6px 0;")
+        btn_play.clicked.connect(lambda: self._play_local_file(_fp))
+        acts.addWidget(btn_play, stretch=1)
+
+        if not uploaded:
+            btn_upload = QPushButton()
+            btn_upload.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_ArrowUp))
+            btn_upload.setObjectName("gray_btn")
+            btn_upload.setFixedWidth(32)
+            btn_upload.setToolTip("Enviar ao Drive")
+            btn_upload.clicked.connect(lambda: self._reupload_file(_fp, btn_upload))
+            acts.addWidget(btn_upload)
+
+        btn_del = QPushButton()
+        btn_del.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_TrashIcon))
+        btn_del.setObjectName("gray_btn")
+        btn_del.setFixedWidth(38)
+        btn_del.setToolTip("Excluir arquivo local")
+        btn_del.clicked.connect(lambda: self._delete_local_file(_fp))
+        acts.addWidget(btn_del)
+
+        bl.addLayout(acts)
+        v.addWidget(body)
+        return card
+
+    def _on_home_sort_changed(self, idx: int):
+        self._home_sort_order = idx
+        self._refresh_home()
+
+    def _play_local_file(self, fpath: str):
+        dlg = _AudioPlayerDialog(fpath, parent=self)
+        dlg.exec()
+
+    def _delete_local_file(self, fpath: str):
+        fname = os.path.basename(fpath)
+        msg = QMessageBox(self)
+        msg.setWindowTitle("Excluir arquivo")
+        msg.setText(f"Deseja excluir '{fname}'?\nEsta ação não pode ser desfeita.")
+        msg.setIcon(QMessageBox.Icon.Question)
+        btn_sim = msg.addButton("Sim", QMessageBox.ButtonRole.YesRole)
+        msg.addButton("Não", QMessageBox.ButtonRole.NoRole)
+        msg.exec()
+        if msg.clickedButton() is btn_sim:
+            try:
+                os.remove(fpath)
+                self._refresh_home()
+            except Exception as e:
+                QMessageBox.critical(
+                    self, "Erro", f"Não foi possível excluir o arquivo:\n{e}"
+                )
+
+    def _reupload_file(self, fpath: str, btn: QPushButton):
+        fname = os.path.basename(fpath)
+        msg = QMessageBox(self)
+        msg.setWindowTitle("Enviar ao Drive")
+        msg.setText(f"Deseja enviar '{fname}' ao Google Drive?")
+        msg.setIcon(QMessageBox.Icon.Question)
+        btn_sim = msg.addButton("Enviar", QMessageBox.ButtonRole.YesRole)
+        msg.addButton("Cancelar", QMessageBox.ButtonRole.NoRole)
+        msg.exec()
+        if msg.clickedButton() is not btn_sim:
+            return
+
+        btn.setEnabled(False)
+        btn.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_BrowserReload))
+
+        def worker():
+            try:
+                from composition_root import build_processing_presenter
+                from domain.entities import AudioFile
+                presenter = build_processing_presenter()
+                title = os.path.splitext(fname)[0]
+                mtime = datetime.fromtimestamp(os.path.getmtime(fpath))
+                date_str = mtime.strftime("%d/%m/%Y")
+                audio_file = AudioFile(path=fpath, title=title, video_id="")
+                presenter.upload_uc.execute(
+                    audio_files=[audio_file],
+                    date_str=date_str,
+                    on_log=lambda m: None,
+                    on_status=lambda s: None,
+                )
+                QTimer.singleShot(0, self._refresh_home)
+            except Exception as e:
+                QTimer.singleShot(
+                    0,
+                    lambda: QMessageBox.critical(
+                        self, "Erro no upload", f"Não foi possível enviar o arquivo:\n{e}"
+                    ),
+                )
+                QTimer.singleShot(0, lambda: (
+                    btn.setEnabled(True),
+                    btn.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_ArrowUp)),
+                ))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    # -----------------------------------------------------------------------
+    # Página 1 — Processar
     # -----------------------------------------------------------------------
     def _build_processar_page(self) -> QWidget:
         PAD = 26
@@ -1229,8 +1563,18 @@ class App(QMainWindow):
     def _build_general_tab(self) -> QWidget:
         """Sub-aba 'Geral' — autorização Drive, canal YouTube e pasta Drive."""
         tab = QWidget()
-        layout = QVBoxLayout(tab)
-        layout.setContentsMargins(4, 14, 4, 4)
+        outer = QVBoxLayout(tab)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+
+        container = QWidget()
+        layout = QVBoxLayout(container)
+        layout.setContentsMargins(4, 14, 4, 14)
         layout.setSpacing(10)
 
         # ── Card: Autorização Google Drive ──────────────────────────────────
@@ -1314,7 +1658,83 @@ class App(QMainWindow):
         dc.addWidget(dr_hint)
         layout.addWidget(dr_card)
 
+        # ── Card: Capítulo automático ───────────────────────────────────────
+        ch_card = QFrame()
+        ch_card.setObjectName("cfg_card")
+        cc = QVBoxLayout(ch_card)
+        cc.setContentsMargins(20, 16, 20, 16)
+        cc.setSpacing(8)
+
+        tr4 = QHBoxLayout()
+        tr4.addWidget(self._icon_label("📑", 22))
+        lbl4 = QLabel("Capítulo automático")
+        lbl4.setStyleSheet("font-size: 14px; font-weight: bold;")
+        tr4.addWidget(lbl4)
+        tr4.addStretch()
+        cc.addLayout(tr4)
+
+        ch_hint = QLabel(
+            "Nome (ou parte do nome) do capítulo a baixar automaticamente. "
+            "Deixe em branco para sempre abrir a seleção manual."
+        )
+        ch_hint.setStyleSheet(f"color: {P.HINT}; font-size: 11px;")
+        ch_hint.setWordWrap(True)
+        cc.addWidget(ch_hint)
+
+        self._cfg_chapter_entry = QLineEdit(cfg.get("chapter_name", ""))
+        self._cfg_chapter_entry.setPlaceholderText("Ex: Sermão, Culto da manhã...")
+        cc.addWidget(self._cfg_chapter_entry)
+
+        layout.addWidget(ch_card)
+
+        # ── Card: Manter arquivos no dispositivo ────────────────────────────
+        kf_card = QFrame()
+        kf_card.setObjectName("cfg_card")
+        kfc = QVBoxLayout(kf_card)
+        kfc.setContentsMargins(20, 16, 20, 16)
+        kfc.setSpacing(8)
+
+        tr5 = QHBoxLayout()
+        tr5.addWidget(self._icon_label("💾", 22))
+        lbl5 = QLabel("Manter arquivos no dispositivo")
+        lbl5.setStyleSheet("font-size: 14px; font-weight: bold;")
+        tr5.addWidget(lbl5)
+        tr5.addStretch()
+        kfc.addLayout(tr5)
+
+        kf_hint = QLabel(
+            "Se habilitado, os arquivos de áudio processados são mantidos no "
+            "dispositivo após o upload e ficam visíveis na tela Início."
+        )
+        kf_hint.setStyleSheet(f"color: {P.HINT}; font-size: 11px;")
+        kf_hint.setWordWrap(True)
+        kfc.addWidget(kf_hint)
+
+        self._cfg_keep_files_check = QCheckBox("Manter arquivos após upload")
+        self._cfg_keep_files_check.setChecked(bool(cfg.get("keep_files", False)))
+        kfc.addWidget(self._cfg_keep_files_check)
+
+        layout.addWidget(kf_card)
         layout.addStretch()
+
+        # ── Rodapé: log + versão ────────────────────────────────────────────
+        footer = QHBoxLayout()
+        footer.setContentsMargins(4, 8, 4, 0)
+
+        btn_log = QPushButton("📄  Abrir log de hoje")
+        btn_log.setObjectName("gray_btn")
+        btn_log.clicked.connect(self._open_today_log)
+        footer.addWidget(btn_log)
+        footer.addStretch()
+
+        ver_lbl = QLabel(f"IPMadalena  ·  {APP_VERSION}")
+        ver_lbl.setStyleSheet(f"color: {P.HINT}; font-size: 11px;")
+        footer.addWidget(ver_lbl)
+
+        layout.addLayout(footer)
+
+        scroll.setWidget(container)
+        outer.addWidget(scroll)
         return tab
 
     @staticmethod
@@ -1388,6 +1808,16 @@ class App(QMainWindow):
         self._cfg_feedback_label.setText(f"Erro na autorização: {msg}")
         self._cfg_feedback_label.setStyleSheet(f"color: {P.ERROR}; font-size: 11px;")
 
+    def _open_today_log(self):
+        log_path = os.path.join(
+            baixar_audio.LOGS_DIR,
+            datetime.now().strftime("%d-%m-%Y") + ".log",
+        )
+        if os.path.exists(log_path):
+            os.startfile(log_path)
+        else:
+            QMessageBox.information(self, "Log", "Nenhum log gerado hoje ainda.")
+
     def _cfg_save(self):
         """
         Save unificado: persiste a aba GERAL (canal/pasta) e a aba EDIÇÃO DE
@@ -1418,6 +1848,8 @@ class App(QMainWindow):
             current["channel_url"]     = channel
             current["drive_folder_id"] = folder
             current["audio_edit"]      = audio_dict
+            current["chapter_name"]    = self._cfg_chapter_entry.text().strip()
+            current["keep_files"]      = self._cfg_keep_files_check.isChecked()
             repo.save(current)
         except Exception as e:
             self._cfg_feedback_label.setText(f"Erro ao salvar: {e}")
@@ -1524,6 +1956,17 @@ class App(QMainWindow):
                     self._show_video_selection(*value)
 
                 elif kind == "open_player":
+                    self._show_player_window(*value)
+
+                elif kind == "check_chapters":
+                    date_str, selected = value
+                    threading.Thread(
+                        target=self._worker_check_chapters,
+                        args=(date_str, selected),
+                        daemon=True,
+                    ).start()
+
+                elif kind == "open_player_extra":
                     self._show_player_window(*value)
 
                 elif kind == "done":
@@ -1753,12 +2196,91 @@ class App(QMainWindow):
         except Exception as e:
             self._queue.put(("error", str(e)))
 
-    def _show_player_window(self, date_str: str, selected_videos: list):
+    def _worker_check_chapters(self, date_str: str, selected_videos: list):
+        """
+        Verifica capítulos para cada vídeo selecionado.
+
+        - Se chapter_name estiver configurado: busca capítulos via presenter e
+          faz match por substring (case-insensitive) para cada vídeo.
+            • Vídeos COM capítulo encontrado → segment auto-criado.
+            • Vídeos SEM capítulo → enviados ao player para seleção manual.
+        - Se chapter_name não estiver configurado → abre player para todos.
+        """
+        chapter_name = baixar_audio.load_config().get("chapter_name", "").strip()
+
+        if not chapter_name:
+            self._queue.put(("open_player", (date_str, selected_videos)))
+            return
+
+        presenter = self._build_presenter()
+        auto_segments: list = []
+        manual_videos: list = []
+
+        for video in selected_videos:
+            vid_id = video["id"]
+            self._queue.put(("log", f"Verificando capítulos de '{video['title']}'..."))
+            try:
+                chapters = presenter.get_chapters(
+                    vid_id,
+                    cancel_event=self._cancel_event,
+                    on_log=lambda m: self._queue.put(("log", m)),
+                )
+            except Exception:
+                chapters = []
+
+            match = next(
+                (ch for ch in chapters if chapter_name.lower() in ch["title"].lower()),
+                None,
+            )
+            if match:
+                self._queue.put(("log",
+                    f"  Capítulo encontrado: '{match['title']}' "
+                    f"({match['start']} → {match['end']})"
+                ))
+                auto_segments.append({
+                    "id":    vid_id,
+                    "title": match["title"],
+                    "start": match["start"],
+                    "end":   match["end"],
+                })
+            else:
+                self._queue.put(("log",
+                    f"  Capítulo '{chapter_name}' não encontrado — "
+                    "abrindo seleção manual."
+                ))
+                manual_videos.append(video)
+
+        if not manual_videos:
+            # Todos os vídeos tiveram capítulo encontrado → download automático
+            self._queue.put(("log",
+                f"Capítulos detectados em todos os vídeos. "
+                "Iniciando download automático..."
+            ))
+            threading.Thread(
+                target=self._worker_phase2,
+                args=(date_str, auto_segments),
+                daemon=True,
+            ).start()
+        else:
+            # Alguns precisam de seleção manual; auto_segments são extras
+            self._queue.put(("open_player_extra",
+                (date_str, manual_videos, auto_segments)
+            ))
+
+    def _show_player_window(
+        self,
+        date_str: str,
+        selected_videos: list,
+        extra_segments: list = None,
+    ):
+        extra = extra_segments or []
+
         def _on_complete(segments):
+            all_segments = extra + segments
             self._append_log("Trechos confirmados. Iniciando download...")
             threading.Thread(
                 target=self._worker_phase2,
-                args=(date_str, segments),
+                args=(date_str, all_segments),
                 daemon=True,
             ).start()
 
@@ -1793,7 +2315,7 @@ class App(QMainWindow):
     # Configurações e autorização (banner + gear/nav)
     # -----------------------------------------------------------------------
     def _open_settings(self):
-        self._switch_page(2)
+        self._switch_page(3)
         self._refresh_config_auth()
 
     def _check_auth_visibility(self):
@@ -2052,11 +2574,8 @@ class App(QMainWindow):
 
         if _result["action"] == "proceed":
             selected = _result["selected"]
-            self._append_log(
-                f"{len(selected)} vídeo(s) selecionado(s). "
-                "Abrindo player para seleção de trecho..."
-            )
-            self._queue.put(("open_player", (date_str, selected)))
+            self._append_log(f"{len(selected)} vídeo(s) selecionado(s).")
+            self._queue.put(("check_chapters", (date_str, selected)))
         else:
             self._on_cancelled()
 
@@ -2121,6 +2640,17 @@ class App(QMainWindow):
     # Fechar
     # -----------------------------------------------------------------------
     def closeEvent(self, event):
+        if self._running:
+            msg = QMessageBox(self)
+            msg.setWindowTitle("Fechar o app")
+            msg.setText("Uma operação está em andamento.\nDeseja realmente sair?")
+            msg.setIcon(QMessageBox.Icon.Warning)
+            btn_sair = msg.addButton("Sair assim mesmo", QMessageBox.ButtonRole.YesRole)
+            msg.addButton("Cancelar", QMessageBox.ButtonRole.NoRole)
+            msg.exec()
+            if msg.clickedButton() is not btn_sair:
+                event.ignore()
+                return
         self._queue_timer.stop()
         event.accept()
 
@@ -2307,13 +2837,13 @@ class _AudioPlayerDialog(QDialog):
         s = max(0, int(ms)) // 1000
         return f"{s // 60:02d}:{s % 60:02d}"
 
-    def closeEvent(self, event):
-        """Para o player ao fechar o diálogo (X, Esc ou botão Fechar)."""
+    def hideEvent(self, event):
+        """Para o player sempre que o diálogo sai de cena (X, Esc, accept, reject)."""
         try:
             self._player.stop()
         except Exception:
             pass
-        super().closeEvent(event)
+        super().hideEvent(event)
 
 
 # ---------------------------------------------------------------------------
@@ -2409,6 +2939,7 @@ class _AudioSettingsTab(QWidget):
         layout.addWidget(self._build_card_fade(audio_cfg))
         layout.addWidget(self._build_card_eq(audio_cfg))
         layout.addWidget(self._build_card_noise(audio_cfg))
+        layout.addWidget(self._build_card_norm(audio_cfg))
         layout.addWidget(self._build_card_test())
 
         layout.addStretch()
@@ -2703,7 +3234,103 @@ class _AudioSettingsTab(QWidget):
         return card
 
     # -----------------------------------------------------------------------
-    # Card 5: Teste de configuração (PR 7)
+    # Card 5: Nivelamento de volume (loudnorm)
+    # -----------------------------------------------------------------------
+
+    # Faixa do slider em LUFS (inteiro para QSlider)
+    _LUFS_MIN = -30
+    _LUFS_MAX = -6
+    # Marcadores de referência: (valor_lufs, rótulo)
+    _LUFS_MARKERS = [(-24, "quieto"), (-16, "padrão"), (-10, "alto")]
+
+    def _build_card_norm(self, audio_cfg) -> QFrame:
+        card = QFrame()
+        card.setObjectName("card")
+        v = QVBoxLayout(card)
+        v.setContentsMargins(16, 12, 16, 14)
+        v.setSpacing(10)
+
+        v.addWidget(self._section_label("Nivelamento de volume"))
+
+        hint = QLabel(
+            "Normaliza o volume do áudio baixado e de cada vinheta "
+            "separadamente antes de mixá-los (loudnorm EBU R128)."
+        )
+        hint.setWordWrap(True)
+        hint.setStyleSheet(f"color: {P.HINT}; font-size: 11px;")
+        v.addWidget(hint)
+
+        self._norm_check = QCheckBox("Ativar")
+        self._norm_check.setChecked(audio_cfg.volume_norm_enabled)
+        v.addWidget(self._norm_check)
+
+        # ── Slider de LUFS ────────────────────────────────────────────────
+        slider_frame = QFrame()
+        slider_layout = QVBoxLayout(slider_frame)
+        slider_layout.setContentsMargins(0, 4, 0, 0)
+        slider_layout.setSpacing(2)
+
+        self._norm_slider = QSlider(Qt.Orientation.Horizontal)
+        self._norm_slider.setRange(self._LUFS_MIN, self._LUFS_MAX)
+        self._norm_slider.setSingleStep(1)
+        self._norm_slider.setTickPosition(QSlider.TickPosition.TicksBelow)
+        self._norm_slider.setTickInterval(2)
+        self._norm_slider.setValue(int(audio_cfg.volume_norm_lufs))
+        slider_layout.addWidget(self._norm_slider)
+
+        # Barra de marcadores de referência posicionados proporcionalmente
+        marker_bar = QWidget()
+        marker_bar.setFixedHeight(30)
+        marker_layout = QHBoxLayout(marker_bar)
+        marker_layout.setContentsMargins(0, 0, 0, 0)
+        marker_layout.setSpacing(0)
+
+        lufs_range = self._LUFS_MAX - self._LUFS_MIN  # 24
+
+        def _add_marker(val, label):
+            """Adiciona espaçador proporcional + label de marcador."""
+            frac = (val - self._LUFS_MIN) / lufs_range
+            lbl = QLabel(f"{val}\n{label}")
+            lbl.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+            lbl.setStyleSheet("font-size: 9px; color: gray;")
+            return frac, lbl
+
+        prev_frac = 0.0
+        for val, label in self._LUFS_MARKERS:
+            frac, lbl = _add_marker(val, label)
+            # Espaçador entre o marcador anterior e este
+            stretch = int(round((frac - prev_frac) * 100))
+            marker_layout.addStretch(max(1, stretch))
+            marker_layout.addWidget(lbl)
+            prev_frac = frac
+        # Espaçador final (do último marcador até o fim)
+        marker_layout.addStretch(max(1, int(round((1.0 - prev_frac) * 100))))
+
+        slider_layout.addWidget(marker_bar)
+
+        # Linha com valor atual
+        value_row = QHBoxLayout()
+        self._norm_value_label = QLabel(
+            f"Alvo: {int(audio_cfg.volume_norm_lufs)} LUFS"
+        )
+        self._norm_value_label.setStyleSheet(
+            "font-size: 11px; font-family: Consolas, monospace;"
+        )
+        value_row.addWidget(self._norm_value_label)
+        value_row.addStretch()
+        slider_layout.addLayout(value_row)
+
+        v.addWidget(slider_frame)
+
+        # Atualiza label ao mover o slider
+        self._norm_slider.valueChanged.connect(
+            lambda val: self._norm_value_label.setText(f"Alvo: {val} LUFS")
+        )
+
+        return card
+
+    # -----------------------------------------------------------------------
+    # Card 6: Teste de configuração (PR 7)
     # -----------------------------------------------------------------------
 
     def _build_card_test(self) -> QFrame:
@@ -3263,6 +3890,8 @@ class _AudioSettingsTab(QWidget):
             eq_bands                  = bands,
             noise_reduction_enabled   = bool(self._noise_check.isChecked()),
             noise_reduction_intensity = intensity,
+            volume_norm_enabled       = bool(self._norm_check.isChecked()),
+            volume_norm_lufs          = float(self._norm_slider.value()),
         )
 
     def _section_label(self, text: str) -> QLabel:

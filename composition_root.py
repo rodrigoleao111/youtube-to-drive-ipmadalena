@@ -23,6 +23,7 @@ import baixar_audio
 from application.use_cases import (
     DownloadSegmentsUseCase,
     EditAudioUseCase,
+    GetChaptersUseCase,
     ListVideosUseCase,
     UploadAudioUseCase,
 )
@@ -53,12 +54,14 @@ def build_processing_presenter() -> ProcessingPresenter:
         oauth_config        = baixar_audio._OAUTH_CLIENT_CONFIG,
         scopes              = baixar_audio.SCOPES,
         root_folder_id      = cfg["drive_folder_id"],
-        delete_after_upload = getattr(sys, "frozen", False),
+        delete_after_upload = getattr(sys, "frozen", False) and not cfg.get("keep_files", False),
     )
     history = JsonHistoryRepository(file_path=baixar_audio.HISTORY_FILE)
 
+    video_source = YtDlpVideoSource()
+
     return ProcessingPresenter(
-        list_videos_uc = ListVideosUseCase(source=YtDlpVideoSource()),
+        list_videos_uc = ListVideosUseCase(source=video_source),
         download_uc    = DownloadSegmentsUseCase(downloader=YtDlpAudioDownloader()),
         edit_uc        = EditAudioUseCase(
             editor        = FfmpegAudioEditor(),
@@ -68,6 +71,7 @@ def build_processing_presenter() -> ProcessingPresenter:
             path_resolver = baixar_audio.audio_edit_resolve_paths,
         ),
         upload_uc      = UploadAudioUseCase(storage=storage, history=history),
+        chapters_uc    = GetChaptersUseCase(source=video_source),
         channel_url    = cfg["channel_url"],
         download_dir   = baixar_audio.DOWNLOAD_DIR,
     )

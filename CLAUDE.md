@@ -80,7 +80,7 @@ youtube_to_drive/
 ├── player_window_qt.py             launcher do player Qt (subprocess)
 ├── player_subprocess_qt.py         subprocesso do player YouTube (QWebEngine)
 │
-├── tests/                          suíte com 594 testes (pytest + unittest.mock)
+├── tests/                          suíte com 673 testes (pytest + unittest.mock)
 │
 ├── historico.json                  datas já processadas (gerado em runtime)
 ├── config.json                     canal/pasta Drive + audio_edit (gerado em runtime)
@@ -275,7 +275,7 @@ Esta seção é a **norma para qualquer mudança ou adição** ao projeto. Segui
 
 ## 6. Antes de fazer push
 
-1. `python -m pytest tests/` — DEVE passar 100% (atualmente 579/579).
+1. `python -m pytest tests/` — DEVE passar 100% (atualmente 673/673).
 2. Atualizar `CLAUDE.md` se a arquitetura, convenções ou estrutura mudaram.
 3. Atualizar `README.md` se o comportamento visível ao usuário/dev mudou.
 4. Mensagem de commit em formato convencional: `feat:`, `fix:`, `refactor:`, `docs:`, `test:`, `chore:`.
@@ -365,7 +365,13 @@ Módulo "raiz" do projeto: hospeda constantes, configuração OAuth, utilidades 
 
 ## `app.py`
 
-- **Framework:** PyQt6. **Janela:** `QMainWindow` com sidebar à esquerda + `QStackedWidget` à direita (3 páginas: Processar / Histórico / Configurações).
+- **Framework:** PyQt6. **Janela:** `QMainWindow` com sidebar à esquerda + `QStackedWidget` à direita (4 páginas: Início / Processar / Histórico / Configurações).
+- **`APP_VERSION`:** constante de módulo (`"v3.2.0"`) usada na sidebar e no rodapé da aba Configurações. Bumpar aqui ao fechar cada versão.
+- **Página Início (`_build_home_page`):** lista arquivos MP3 em `DOWNLOAD_DIR` como cards (220×262 px). Topbar com `QComboBox` de ordenação ("Mais recentes" / "A–Z"). Estado vazio com ícone grande + instrução de ação. Subtítulo mostra contagem e tamanho total. Badge "✓ Enviado ao Drive" (verde) ou "● Local" (cinza) detectado pelo título do arquivo vs. `historico.json`. Botão "↑" (SP_ArrowUp) dispara re-upload individual em thread daemon; botão lixeira (SP_TrashIcon) exclui local com confirmação em português.
+- **`_reupload_file(fpath, btn)`:** constrói `AudioFile(video_id="")` com `mtime` como `date_str`, chama `upload_uc.execute()` em thread, atualiza badge via `QTimer.singleShot(0, _refresh_home)`.
+- **`_open_today_log()`:** abre `LOGS_DIR/DD-MM-YYYY.log` com `os.startfile()`; avisa com `QMessageBox.information` se o arquivo não existe ainda.
+- **`_on_home_sort_changed(idx)`:** atualiza `self._home_sort_order` e relama `_refresh_home()`. Preferência in-memory (sem persistência).
+- **`closeEvent`:** verifica `self._running`; se True, exibe `QMessageBox` de confirmação em português antes de aceitar o fechamento. Sem operação em curso, fecha imediatamente.
 - **Thread safety:** `queue.Queue` para o pipeline principal (download → edit → upload) + polling com `QTimer` no main thread. Para o preview de áudio, ver "Dispatcher cross-thread" abaixo.
 - **Cancelamento:** `threading.Event` passado a todas as fases; watchdog daemon termina o subprocess; `check_cancel()` no loop de leitura do stdout.
 - **Instância única:** porta TCP 47892 reservada via `_acquire_single_instance()`; segunda instância exibe alerta e encerra.
@@ -422,20 +428,23 @@ Cultos ao vivo podem ser publicados no YouTube com a data do dia seguinte ao eve
 ```
 tests/
 ├── conftest.py                ← sys.path + fixture shared_app (sessão)
-├── test_domain.py             ← 42 testes puros do domínio
-├── test_ytdlp_source.py       ← 29 testes da infra YouTube (subprocess mockado)
+├── test_domain.py             ← 87 testes puros do domínio
+├── test_ytdlp_source.py       ← 41 testes da infra YouTube (subprocess mockado)
+├── test_ffmpeg_editor.py      ← 43 testes do FfmpegAudioEditor (subprocess mockado)
 ├── test_gdrive_storage.py     ← 38 testes do adaptador Drive (HTTP/Drive API mockados)
-├── test_persistence.py        ← 29 testes dos repositórios JSON (I/O real em tmp_path)
+├── test_persistence.py        ← 33 testes dos repositórios JSON (I/O real em tmp_path)
 ├── test_plyer_notifier.py     ← 10 testes do PlyerNotifier (plyer mockado)
-├── test_use_cases.py          ← 31 testes dos use cases (ports mockados)
-├── test_presenter.py          ← 19 testes do ProcessingPresenter (use cases mockados)
-├── test_composition_root.py   ← 14 testes do composition root (DI/wiring)
-├── test_baixar_audio.py       ← 27 testes de utilidades + auth wrappers + update_ytdlp
-├── test_app.py                ← 58 testes de integração da GUI
-└── test_player_window.py      ← 33 testes do player e utilitários de tempo
+├── test_use_cases.py          ← 50 testes dos use cases (ports mockados)
+├── test_presenter.py          ← 30 testes do ProcessingPresenter (use cases mockados)
+├── test_audio_test_presenter.py ← 17 testes do AudioTestPresenter
+├── test_composition_root.py   ← 22 testes do composition root (DI/wiring)
+├── test_baixar_audio.py       ← 38 testes de utilidades + auth wrappers + update_ytdlp
+├── test_app.py                ← 201 testes de integração da GUI
+├── test_player_window.py      ← 34 testes do PlayerWindow
+└── test_player_window_qt.py   ← 29 testes do PlayerWindowQt
 ```
 
-**Total: 330 testes (331 com setup do shared_app).**
+**Total: 673 testes.**
 
 **Como rodar:**
 ```bash
