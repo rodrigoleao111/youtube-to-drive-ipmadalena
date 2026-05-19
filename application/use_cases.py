@@ -19,6 +19,7 @@ from domain.entities import AudioEditConfig, AudioFile, ProcessingResult, Segmen
 from domain.ports import (
     IAudioDownloader,
     IAudioEditor,
+    IChapterSource,
     ICloudStorage,
     IConfigRepository,
     IHistoryRepository,
@@ -81,6 +82,49 @@ class ListVideosUseCase:
             cancel_event=cancel_event,
             on_log=on_log,
             on_status=on_status,
+        )
+
+
+# ---------------------------------------------------------------------------
+# Fase 1b do fluxo: busca de capítulos de um vídeo
+# ---------------------------------------------------------------------------
+
+@dataclass
+class GetChaptersUseCase:
+    """
+    Retorna os capítulos de um vídeo do YouTube.
+
+    Delega para IChapterSource; existe na camada de aplicação para isolar
+    o caller dos detalhes de implementação (yt-dlp, etc.).
+    """
+
+    source: IChapterSource
+
+    def execute(
+        self,
+        video_id: str,
+        *,
+        cancel_event=None,
+        on_log: Optional[Callable[[str], None]] = None,
+    ) -> List[dict]:
+        """
+        Retorna lista de dicts com chaves ``title``, ``start``, ``end`` (HH:MM:SS).
+
+        Retorna lista vazia se o vídeo não tiver capítulos.
+
+        Parameters
+        ----------
+        video_id:
+            ID do vídeo no YouTube.
+        cancel_event:
+            threading.Event opcional — propaga OperacaoCancelada se sinalizado.
+        on_log:
+            Callback de log para a UI.
+        """
+        return self.source.get_chapters(
+            video_id,
+            cancel_event=cancel_event,
+            on_log=on_log,
         )
 
 

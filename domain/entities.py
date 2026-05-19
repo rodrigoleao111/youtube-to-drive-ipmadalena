@@ -190,6 +190,12 @@ class AudioEditConfig:
     noise_reduction_intensity: str = "media"
     """Intensidade da redução: 'baixa' | 'media' | 'alta'."""
 
+    volume_norm_enabled: bool = False
+    """Se True, normaliza o volume de cada peça (áudio principal + vinhetas) via loudnorm."""
+
+    volume_norm_lufs: float = -16.0
+    """Alvo de loudness integrado em LUFS (EBU R128). Intervalo típico: -30 a -6."""
+
     @property
     def has_any_filter_enabled(self) -> bool:
         """True se qualquer etapa do pipeline estiver ativa (caso contrário, no-op)."""
@@ -198,6 +204,7 @@ class AudioEditConfig:
             or self.fade_out_enabled
             or self.eq_enabled
             or self.noise_reduction_enabled
+            or self.volume_norm_enabled
             or self.intro_path is not None
             or self.outro_path is not None
         )
@@ -218,6 +225,8 @@ class AudioEditConfig:
                                           for b in self.eq_bands],
             "noise_reduction_enabled":   self.noise_reduction_enabled,
             "noise_reduction_intensity": self.noise_reduction_intensity,
+            "volume_norm_enabled":       self.volume_norm_enabled,
+            "volume_norm_lufs":          self.volume_norm_lufs,
         }
 
     @classmethod
@@ -252,4 +261,6 @@ class AudioEditConfig:
             eq_bands                  = bands,
             noise_reduction_enabled   = bool(d.get("noise_reduction_enabled", False)),
             noise_reduction_intensity = d.get("noise_reduction_intensity", "media"),
+            volume_norm_enabled       = bool(d.get("volume_norm_enabled", False)),
+            volume_norm_lufs          = float(d.get("volume_norm_lufs", -16.0)),
         )

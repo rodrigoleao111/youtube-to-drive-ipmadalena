@@ -548,3 +548,47 @@ class TestIAudioEditorProtocol:
         class Vazio:
             pass
         assert not isinstance(Vazio(), IAudioEditor)
+
+
+# ===========================================================================
+# AudioEditConfig — Nivelamento de volume (volume_norm_*)
+# ===========================================================================
+
+class TestAudioEditConfigVolumeNorm:
+
+    def test_default_volume_norm_disabled(self):
+        assert AudioEditConfig().volume_norm_enabled is False
+
+    def test_default_volume_norm_lufs(self):
+        assert AudioEditConfig().volume_norm_lufs == -16.0
+
+    def test_volume_norm_enabled_ativa_has_any_filter(self):
+        assert AudioEditConfig(volume_norm_enabled=True).has_any_filter_enabled is True
+
+    def test_volume_norm_disabled_nao_ativa_sozinho(self):
+        cfg = AudioEditConfig(volume_norm_enabled=False)
+        assert cfg.has_any_filter_enabled is False
+
+    def test_to_dict_inclui_volume_norm(self):
+        d = AudioEditConfig(volume_norm_enabled=True, volume_norm_lufs=-20.0).to_dict()
+        assert d["volume_norm_enabled"] is True
+        assert d["volume_norm_lufs"] == -20.0
+
+    def test_from_dict_le_volume_norm(self):
+        c = AudioEditConfig.from_dict({
+            "volume_norm_enabled": True,
+            "volume_norm_lufs": -14.0,
+        })
+        assert c.volume_norm_enabled is True
+        assert c.volume_norm_lufs == -14.0
+
+    def test_from_dict_default_quando_ausente(self):
+        c = AudioEditConfig.from_dict({})
+        assert c.volume_norm_enabled is False
+        assert c.volume_norm_lufs == -16.0
+
+    def test_roundtrip_volume_norm(self):
+        original = AudioEditConfig(volume_norm_enabled=True, volume_norm_lufs=-12.0)
+        roundtrip = AudioEditConfig.from_dict(original.to_dict())
+        assert roundtrip.volume_norm_enabled is True
+        assert roundtrip.volume_norm_lufs == -12.0

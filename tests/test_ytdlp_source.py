@@ -473,3 +473,113 @@ class TestYtDlpAudioDownloader:
 
         # Z primeiro, A segundo — ordem dos segments, não ordem alfabética
         assert [r.video_id for r in result] == ["primeiro", "segundo"]
+
+
+# ===========================================================================
+# YtDlpVideoSource — get_chapters / _seconds_to_hms
+# ===========================================================================
+
+class TestYtDlpVideoSourceGetChapters:
+    """Testa get_chapters com stdout mockado (sem rede)."""
+
+    def _source(self):
+        return YtDlpVideoSource()
+
+    def _make_dump_json(self, chapters=None, duration=3600):
+        import json as _json
+        data = {"duration": duration, "chapters": chapters or []}
+        proc = MagicMock()
+        proc.stdout = MagicMock()
+        proc.stdout.read = MagicMock(return_value=_json.dumps(data))
+        proc.returncode = 0
+        proc.wait = MagicMock(return_value=0)
+        return proc
+
+    def test_retorna_lista_com_capitulos(self):
+        proc = self._make_dump_json(chapters=[
+            {"title": "Introdução", "start_time": 0.0,    "end_time": 600.0},
+            {"title": "Sermão",     "start_time": 600.0,  "end_time": 3600.0},
+        ])
+        with patch("infrastructure.youtube.ytdlp_source.start_process", return_value=proc):
+            chapters = self._source().get_chapters("abc123")
+        assert len(chapters) == 2
+        assert chapters[0]["title"] == "Introdução"
+        assert chapters[0]["start"] == "00:00:00"
+        assert chapters[0]["end"]   == "00:10:00"
+        assert chapters[1]["title"] == "Sermão"
+        assert chapters[1]["start"] == "00:10:00"
+        assert chapters[1]["end"]   == "01:00:00"
+
+    def test_retorna_lista_vazia_sem_capitulos(self):
+        proc = self._make_dump_json(chapters=[])
+        with patch("infrastructure.youtube.ytdlp_source.start_process", return_value=proc):
+            chapters = self._source().get_chapters("abc123")
+        assert chapters == []
+
+    def test_retorna_lista_vazia_quando_ytdlp_falha(self):
+        proc = self._make_dump_json()
+        proc.returncode = 1
+        with patch("infrastructure.youtube.ytdlp_source.start_process", return_value=proc):
+            chapters = self._source().get_chapters("abc123")
+        assert chapters == []
+
+    def test_retorna_lista_vazia_quando_json_invalido(self):
+        proc = MagicMock()
+        proc.stdout.read = MagicMock(return_value="nao e json")
+        proc.returncode = 0
+        proc.wait = MagicMock(return_value=0)
+        with patch("infrastructure.youtube.ytdlp_source.start_process", return_value=proc):
+            chapters = self._source().get_chapters("abc123")
+        assert chapters == []
+
+    def test_end_time_ausente_usa_start_do_proximo(self):
+        proc = self._make_dump_json(chapters=[
+            {"title": "A", "start_time": 0.0},
+            {"title": "B", "start_time": 300.0},
+        ], duration=600)
+        with patch("infrastructure.youtube.ytdlp_source.start_process", return_value=proc):
+            chapters = self._source().get_chapters("abc123")
+        assert chapters[0]["end"] == "00:05:00"
+
+    def test_end_time_ultimo_capitulo_usa_duracao_total(self):
+        proc = self._make_dump_json(chapters=[
+            {"title": "A", "start_time": 0.0},
+        ], duration=1800)
+        with patch("infrastructure.youtube.ytdlp_source.start_process", return_value=proc):
+            chapters = self._source().get_chapters("abc123")
+        assert chapters[0]["end"] == "00:30:00"
+
+    def test_repassa_cancel_event_para_start_process(self):
+        import threading
+        ev = threading.Event()
+        proc = self._make_dump_json(chapters=[])
+        with patch("infrastructure.youtube.ytdlp_source.start_process",
+                   return_value=proc) as mock_sp:
+            self._source().get_chapters("abc123", cancel_event=ev)
+        mock_sp.assert_called_once()
+        assert mock_sp.call_args.args[1] is ev
+
+    def test_on_log_chamado_com_mensagem(self):
+        proc = self._make_dump_json(chapters=[])
+        logs = []
+        with patch("infrastructure.youtube.ytdlp_source.start_process", return_value=proc):
+            self._source().get_chapters("abc123", on_log=logs.append)
+        assert any("abc123" in m for m in logs)
+
+
+class TestSecondsToHms:
+    def test_zero(self):
+        from infrastructure.youtube.ytdlp_source import _seconds_to_hms
+        assert _seconds_to_hms(0) == "00:00:00"
+
+    def test_exato_uma_hora(self):
+        from infrastructure.youtube.ytdlp_source import _seconds_to_hms
+        assert _seconds_to_hms(3600) == "01:00:00"
+
+    def test_valores_mistos(self):
+        from infrastructure.youtube.ytdlp_source import _seconds_to_hms
+        assert _seconds_to_hms(3661) == "01:01:01"
+
+    def test_trunca_fracao_de_segundo(self):
+        from infrastructure.youtube.ytdlp_source import _seconds_to_hms
+        assert _seconds_to_hms(59.9) == "00:00:59"

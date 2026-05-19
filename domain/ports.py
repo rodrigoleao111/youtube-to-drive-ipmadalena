@@ -64,6 +64,45 @@ class IVideoSource(Protocol):
 
 
 # ---------------------------------------------------------------------------
+# Fonte de capítulos de vídeo
+# ---------------------------------------------------------------------------
+
+@runtime_checkable
+class IChapterSource(Protocol):
+    """
+    Extrai os capítulos de um vídeo do YouTube.
+
+    Implementações: YtDlpVideoSource (infraestrutura/youtube)
+    """
+
+    def get_chapters(
+        self,
+        video_id: str,
+        *,
+        cancel_event=None,
+        on_log: Optional[Callable[[str], None]] = None,
+    ) -> List[dict]:
+        """
+        Retorna os capítulos do vídeo como lista de dicts.
+
+        Cada dict tem as chaves:
+            ``title`` (str), ``start`` (str HH:MM:SS), ``end`` (str HH:MM:SS)
+
+        Retorna lista vazia se o vídeo não tiver capítulos.
+
+        Parameters
+        ----------
+        video_id:
+            ID do vídeo no YouTube.
+        cancel_event:
+            threading.Event opcional — lança OperacaoCancelada se sinalizado.
+        on_log:
+            Callback chamado com mensagens de log.
+        """
+        ...
+
+
+# ---------------------------------------------------------------------------
 # Downloader de áudio
 # ---------------------------------------------------------------------------
 

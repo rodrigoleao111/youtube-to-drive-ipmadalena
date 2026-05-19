@@ -612,3 +612,45 @@ class TestEditAudioUseCase:
 
         config_arg = editor.process.call_args.args[1]
         assert config_arg.intro_path == "/abs/path/intro.mp3"
+
+
+# ===========================================================================
+# GetChaptersUseCase
+# ===========================================================================
+
+class TestGetChaptersUseCase:
+
+    def test_delega_para_source(self):
+        from application.use_cases import GetChaptersUseCase
+        source = MagicMock()
+        source.get_chapters.return_value = [{"title": "Sermão", "start": "00:10:00", "end": "01:00:00"}]
+        uc = GetChaptersUseCase(source=source)
+        result = uc.execute("abc123")
+        source.get_chapters.assert_called_once_with("abc123", cancel_event=None, on_log=None)
+        assert result == [{"title": "Sermão", "start": "00:10:00", "end": "01:00:00"}]
+
+    def test_retorna_lista_vazia_quando_source_retorna_vazio(self):
+        from application.use_cases import GetChaptersUseCase
+        source = MagicMock()
+        source.get_chapters.return_value = []
+        uc = GetChaptersUseCase(source=source)
+        assert uc.execute("abc123") == []
+
+    def test_repassa_cancel_event(self):
+        import threading
+        from application.use_cases import GetChaptersUseCase
+        source = MagicMock()
+        source.get_chapters.return_value = []
+        ev = threading.Event()
+        uc = GetChaptersUseCase(source=source)
+        uc.execute("abc123", cancel_event=ev)
+        assert source.get_chapters.call_args.kwargs["cancel_event"] is ev
+
+    def test_repassa_on_log(self):
+        from application.use_cases import GetChaptersUseCase
+        source = MagicMock()
+        source.get_chapters.return_value = []
+        log = MagicMock()
+        uc = GetChaptersUseCase(source=source)
+        uc.execute("abc123", on_log=log)
+        assert source.get_chapters.call_args.kwargs["on_log"] is log

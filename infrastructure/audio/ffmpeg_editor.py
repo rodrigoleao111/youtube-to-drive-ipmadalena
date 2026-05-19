@@ -131,6 +131,8 @@ class FfmpegAudioEditor:
             if config.outro_path:
                 partes.append(f"outro: {os.path.basename(config.outro_path)}")
             log(f"[Edição] Concatenando vinhetas ({', '.join(partes)})...")
+        if config.volume_norm_enabled:
+            log(f"[Edição] Nivelando volume ({config.volume_norm_lufs:.0f} LUFS — loudnorm)...")
 
         # ---------- Monta comando ffmpeg ----------
         tmp_path = audio.path + ".tmp"
@@ -225,6 +227,10 @@ class FfmpegAudioEditor:
                 f"afade=t=out:st={fade_start}:d={config.fade_out_secs}"
             )
 
+        if config.volume_norm_enabled:
+            lufs = config.volume_norm_lufs
+            main_filters.append(f"loudnorm=I={lufs:.1f}:TP=-1.5:LRA=11")
+
         # Sample rate consistente com vinhetas (mesmo se concat não acontecer,
         # garante compatibilidade do MP3 final)
         main_filters.append(f"aresample={_TARGET_SAMPLE_RATE}")
@@ -251,12 +257,22 @@ class FfmpegAudioEditor:
         chain_parts.append(f"[0:a]{main_chain}[main]")
 
         if has_intro:
+            vinheta_filters = []
+            if config.volume_norm_enabled:
+                lufs = config.volume_norm_lufs
+                vinheta_filters.append(f"loudnorm=I={lufs:.1f}:TP=-1.5:LRA=11")
+            vinheta_filters.append(f"aresample={_TARGET_SAMPLE_RATE}")
             chain_parts.append(
-                f"[{idx_intro}:a]aresample={_TARGET_SAMPLE_RATE}[intro]"
+                f"[{idx_intro}:a]{','.join(vinheta_filters)}[intro]"
             )
         if has_outro:
+            vinheta_filters = []
+            if config.volume_norm_enabled:
+                lufs = config.volume_norm_lufs
+                vinheta_filters.append(f"loudnorm=I={lufs:.1f}:TP=-1.5:LRA=11")
+            vinheta_filters.append(f"aresample={_TARGET_SAMPLE_RATE}")
             chain_parts.append(
-                f"[{idx_outro}:a]aresample={_TARGET_SAMPLE_RATE}[outro]"
+                f"[{idx_outro}:a]{','.join(vinheta_filters)}[outro]"
             )
 
         # Estratégia de junção: se overlap > 0 usa acrossfade; senão concat.

@@ -474,3 +474,69 @@ class TestImplementaProtocol:
     def test_e_instance_de_iaudio_editor(self):
         from domain.ports import IAudioEditor
         assert isinstance(FfmpegAudioEditor(), IAudioEditor)
+
+
+# ===========================================================================
+# _build_filter_complex — Nivelamento de volume (loudnorm)
+# ===========================================================================
+
+class TestBuildFilterComplexVolumeNorm:
+    def _editor(self):
+        return FfmpegAudioEditor()
+
+    def test_loudnorm_na_cadeia_principal_sem_vinhetas(self):
+        cfg = AudioEditConfig(volume_norm_enabled=True, volume_norm_lufs=-16.0)
+        fc, _ = self._editor()._build_filter_complex(cfg, input_dur=60.0)
+        assert "loudnorm=I=-16.0:TP=-1.5:LRA=11" in fc
+
+    def test_loudnorm_lufs_customizado(self):
+        cfg = AudioEditConfig(volume_norm_enabled=True, volume_norm_lufs=-20.0)
+        fc, _ = self._editor()._build_filter_complex(cfg, input_dur=60.0)
+        assert "loudnorm=I=-20.0:TP=-1.5:LRA=11" in fc
+
+    def test_loudnorm_antes_de_aresample_na_cadeia_principal(self):
+        cfg = AudioEditConfig(volume_norm_enabled=True, volume_norm_lufs=-16.0)
+        fc, _ = self._editor()._build_filter_complex(cfg, input_dur=60.0)
+        i_loudnorm  = fc.index("loudnorm")
+        i_aresample = fc.index("aresample=")
+        assert i_loudnorm < i_aresample
+
+    def test_loudnorm_ausente_quando_desabilitado(self):
+        cfg = AudioEditConfig(volume_norm_enabled=False, eq_enabled=True)
+        fc, _ = self._editor()._build_filter_complex(cfg, input_dur=60.0)
+        assert "loudnorm" not in fc
+
+    def test_loudnorm_aplicado_na_intro(self):
+        cfg = AudioEditConfig(
+            volume_norm_enabled=True, volume_norm_lufs=-16.0,
+            intro_path="/tmp/intro.mp3",
+        )
+        fc, _ = self._editor()._build_filter_complex(cfg, input_dur=60.0)
+        assert "[1:a]loudnorm=I=-16.0:TP=-1.5:LRA=11,aresample=44100[intro]" in fc
+
+    def test_loudnorm_aplicado_na_outro(self):
+        cfg = AudioEditConfig(
+            volume_norm_enabled=True, volume_norm_lufs=-16.0,
+            outro_path="/tmp/outro.mp3",
+        )
+        fc, _ = self._editor()._build_filter_complex(cfg, input_dur=60.0)
+        assert "[1:a]loudnorm=I=-16.0:TP=-1.5:LRA=11,aresample=44100[outro]" in fc
+
+    def test_loudnorm_em_intro_e_outro_com_indices_corretos(self):
+        cfg = AudioEditConfig(
+            volume_norm_enabled=True, volume_norm_lufs=-16.0,
+            intro_path="/tmp/i.mp3",
+            outro_path="/tmp/o.mp3",
+        )
+        fc, _ = self._editor()._build_filter_complex(cfg, input_dur=60.0)
+        assert "[1:a]loudnorm=I=-16.0:TP=-1.5:LRA=11,aresample=44100[intro]" in fc
+        assert "[2:a]loudnorm=I=-16.0:TP=-1.5:LRA=11,aresample=44100[outro]" in fc
+
+    def test_sem_loudnorm_nas_vinhetas_quando_desabilitado(self):
+        cfg = AudioEditConfig(
+            volume_norm_enabled=False,
+            intro_path="/tmp/i.mp3",
+        )
+        fc, _ = self._editor()._build_filter_complex(cfg, input_dur=60.0)
+        assert "[1:a]aresample=44100[intro]" in fc
+        assert "loudnorm" not in fc

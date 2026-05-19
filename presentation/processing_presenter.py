@@ -26,6 +26,7 @@ from typing import Callable, List, Optional
 from application.use_cases import (
     DownloadSegmentsUseCase,
     EditAudioUseCase,
+    GetChaptersUseCase,
     ListVideosUseCase,
     UploadAudioUseCase,
 )
@@ -46,6 +47,7 @@ class ProcessingPresenter:
     download_uc: DownloadSegmentsUseCase
     edit_uc: EditAudioUseCase
     upload_uc: UploadAudioUseCase
+    chapters_uc: GetChaptersUseCase
     channel_url: str
     download_dir: str
 
@@ -91,6 +93,29 @@ class ProcessingPresenter:
             {"id": v.id, "title": v.title, "upload_date": v.upload_date}
             for v in videos
         ]
+
+    # -----------------------------------------------------------------------
+    # Fase 1b do fluxo: capítulos de um vídeo
+    # -----------------------------------------------------------------------
+
+    def get_chapters(
+        self,
+        video_id: str,
+        *,
+        cancel_event=None,
+        on_log: Optional[Callable[[str], None]] = None,
+    ) -> List[dict]:
+        """
+        Retorna os capítulos do vídeo como lista de dicts.
+
+        Cada dict tem chaves ``title``, ``start`` e ``end`` (strings HH:MM:SS).
+        Retorna lista vazia se o vídeo não tiver capítulos.
+        """
+        return self.chapters_uc.execute(
+            video_id,
+            cancel_event=cancel_event,
+            on_log=on_log,
+        )
 
     # -----------------------------------------------------------------------
     # Fase 2 do fluxo: download + upload + registro

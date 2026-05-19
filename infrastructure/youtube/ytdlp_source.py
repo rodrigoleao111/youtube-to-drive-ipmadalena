@@ -12,6 +12,7 @@ Referência de compatibilidade retroativa:
 from __future__ import annotations
 
 import glob
+import json
 import os
 import re
 from datetime import datetime, timedelta
@@ -110,6 +111,85 @@ class YtDlpVideoSource:
 
         log(f"{len(videos)} vídeo(s) encontrado(s).")
         return videos
+
+    def get_chapters(
+        self,
+        video_id: str,
+        *,
+        cancel_event=None,
+        on_log: Optional[Callable[[str], None]] = None,
+    ) -> List[dict]:
+        """
+        Retorna os capítulos do vídeo como lista de dicts com chaves
+        ``title``, ``start`` e ``end`` (strings HH:MM:SS).
+
+        Retorna lista vazia se o vídeo não tiver capítulos ou se o
+        yt-dlp falhar (best-effort — não lança exceção).
+
+        Implementa o contrato IChapterSource (duck typing / Protocol).
+        """
+        log = on_log if callable(on_log) else _noop
+
+        url = f"https://www.youtube.com/watch?v={video_id}"
+        cmd = [
+            ytdlp_exe(),
+            "--dump-json",
+            "--no-playlist",
+            "--socket-timeout", "30",
+            "--encoding", "utf-8",
+            "--extractor-args", "youtube:player_client=ios,android,web",
+            url,
+        ]
+
+        log(f"Buscando capítulos do vídeo {video_id}...")
+
+        try:
+            process = start_process(cmd, cancel_event)
+            output = process.stdout.read()
+            process.wait()
+            check_cancel(cancel_event)
+        except Exception:
+            return []
+
+        if process.returncode != 0:
+            return []
+
+        try:
+            data = json.loads(output)
+        except (json.JSONDecodeError, ValueError):
+            return []
+
+        raw_chapters = data.get("chapters") or []
+        if not raw_chapters:
+            log("Vídeo sem capítulos definidos.")
+            return []
+
+        total_duration = data.get("duration") or 0
+        chapters = []
+        for i, ch in enumerate(raw_chapters):
+            start_sec = ch.get("start_time", 0)
+            # end_time nem sempre vem; usa start do próximo ou duração total
+            end_sec = ch.get("end_time") or (
+                raw_chapters[i + 1]["start_time"]
+                if i + 1 < len(raw_chapters)
+                else total_duration
+            )
+            chapters.append({
+                "title": ch.get("title", f"Capítulo {i + 1}"),
+                "start": _seconds_to_hms(start_sec),
+                "end":   _seconds_to_hms(end_sec),
+            })
+
+        log(f"{len(chapters)} capítulo(s) encontrado(s).")
+        return chapters
+
+
+def _seconds_to_hms(seconds: float) -> str:
+    """Converte segundos (float) para string 'HH:MM:SS'."""
+    total = int(seconds)
+    h, rem = divmod(total, 3600)
+    m, s   = divmod(rem, 60)
+    return f"{h:02d}:{m:02d}:{s:02d}"
 
 
 # ---------------------------------------------------------------------------

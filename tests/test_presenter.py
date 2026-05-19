@@ -31,6 +31,7 @@ def _make_audio(path="/tmp/culto.mp3", title="Culto", vid="abc123") -> AudioFile
 
 def _make_presenter(
     *, list_uc=None, download_uc=None, edit_uc=None, upload_uc=None,
+    chapters_uc=None,
     channel_url="https://youtube.com/@IPMadalena/streams",
     download_dir="/tmp/downloads",
 ) -> ProcessingPresenter:
@@ -43,6 +44,7 @@ def _make_presenter(
         download_uc=download_uc or MagicMock(),
         edit_uc=edit_uc,
         upload_uc=upload_uc or MagicMock(),
+        chapters_uc=chapters_uc or MagicMock(),
         channel_url=channel_url,
         download_dir=download_dir,
     )
@@ -281,13 +283,10 @@ class TestPresenterProcessSegments:
         # Substitui o upload_uc do helper pelo que levanta exceção
         edit_uc = MagicMock()
         edit_uc.execute.side_effect = lambda audio_files, **kw: audio_files
-        p = ProcessingPresenter(
-            list_videos_uc=MagicMock(),
+        p = _make_presenter(
             download_uc=MagicMock(execute=MagicMock(return_value=[_make_audio()])),
             edit_uc=edit_uc,
             upload_uc=upload_uc,
-            channel_url="x",
-            download_dir="/tmp",
         )
         with pytest.raises(OperacaoCancelada):
             p.process_segments("19/04/2026", [{"id": "v1", "title": "x"}])
@@ -387,3 +386,42 @@ class TestPresenterPipelineComEdicao:
         with pytest.raises(OperacaoCancelada):
             p.process_segments("19/04/2026", [{"id": "v1", "title": "x"}])
         upload_uc.execute.assert_not_called()
+
+
+# ===========================================================================
+# ProcessingPresenter.get_chapters
+# ===========================================================================
+
+class TestProcessingPresenterGetChapters:
+
+    def _setup(self):
+        chapters_uc = MagicMock()
+        p = _make_presenter(chapters_uc=chapters_uc)
+        return p, chapters_uc
+
+    def test_delega_para_chapters_uc(self):
+        p, chapters_uc = self._setup()
+        chapters_uc.execute.return_value = [{"title": "Sermão", "start": "00:10:00", "end": "01:00:00"}]
+        result = p.get_chapters("abc123")
+        chapters_uc.execute.assert_called_once_with("abc123", cancel_event=None, on_log=None)
+        assert result == [{"title": "Sermão", "start": "00:10:00", "end": "01:00:00"}]
+
+    def test_retorna_lista_vazia_quando_sem_capitulos(self):
+        p, chapters_uc = self._setup()
+        chapters_uc.execute.return_value = []
+        assert p.get_chapters("abc123") == []
+
+    def test_repassa_cancel_event(self):
+        import threading
+        p, chapters_uc = self._setup()
+        chapters_uc.execute.return_value = []
+        ev = threading.Event()
+        p.get_chapters("abc123", cancel_event=ev)
+        assert chapters_uc.execute.call_args.kwargs["cancel_event"] is ev
+
+    def test_repassa_on_log(self):
+        p, chapters_uc = self._setup()
+        chapters_uc.execute.return_value = []
+        log = MagicMock()
+        p.get_chapters("abc123", on_log=log)
+        assert chapters_uc.execute.call_args.kwargs["on_log"] is log
