@@ -559,6 +559,103 @@ git push
 
 ---
 
+# Processo de criação de novo release
+
+> **Trigger:** quando o usuário informar "Gere um novo release" (com ou sem número de versão), executar este processo do início ao fim.
+
+## Passo 1 — Confirmar a nova versão
+
+Se o usuário não especificou a versão, perguntar: `"Qual será o número da nova versão? (ex: v3.3.0)"`.
+
+A versão segue **semver**: `vMAJOR.MINOR.PATCH`
+- `PATCH` → bug fixes, ajustes menores
+- `MINOR` → nova funcionalidade sem quebrar compatibilidade
+- `MAJOR` → mudança incompatível ou redesign significativo
+
+## Passo 2 — Garantir testes 100% verdes
+
+```bash
+python -m pytest tests/ -q
+```
+
+Não prosseguir se houver falhas. Corrigir antes de continuar.
+
+## Passo 3 — Atualizar a constante de versão em `app.py`
+
+Localizar e atualizar a linha:
+
+```python
+APP_VERSION = "vX.Y.Z"   # → nova versão
+```
+
+## Passo 4 — Atualizar documentação
+
+- **`CLAUDE.md`** — atualizar qualquer referência à versão anterior (ex: contagem de testes, se mudou)
+- **`README.md`** — idem
+
+## Passo 5 — Commit do release
+
+```bash
+git add app.py CLAUDE.md README.md
+git commit -m "chore: bump version to vX.Y.Z"
+git push
+```
+
+## Passo 6 — Criar a tag Git e push
+
+```bash
+git tag vX.Y.Z
+git push origin vX.Y.Z
+```
+
+## Passo 7 — Gerar o instalador
+
+```bash
+build_installer.bat
+```
+
+Caso o `.bat` falhe, usar os comandos manuais:
+
+```powershell
+& "C:\Users\rasantos\AppData\Local\Programs\Python\Python312\python.exe" -m PyInstaller build_app.spec --noconfirm --clean
+& "C:\Users\rasantos\AppData\Local\Programs\Inno Setup 6\ISCC.exe" "C:\Users\rasantos\youtube_to_drive\installer.iss"
+```
+
+O instalador gerado estará em `dist\IPMadalena_Setup.exe`.
+
+## Passo 8 — Criar o release no GitHub
+
+```bash
+gh release create vX.Y.Z dist/IPMadalena_Setup.exe \
+  --title "IPMadalena vX.Y.Z" \
+  --notes "$(cat <<'EOF'
+## O que há de novo
+
+- <descrever as principais mudanças desta versão>
+
+## Download
+
+Baixe o instalador `IPMadalena_Setup.exe` abaixo e execute-o para instalar ou atualizar.
+EOF
+)"
+```
+
+O asset `IPMadalena_Setup.exe` fica anexado ao release e é o arquivo que o auto-update do app baixa automaticamente.
+
+## Checklist resumido
+
+| Etapa | Comando / Ação |
+|---|---|
+| ✅ Testes 100% | `python -m pytest tests/ -q` |
+| ✅ Bumpar versão | `APP_VERSION` em `app.py` |
+| ✅ Atualizar docs | `CLAUDE.md`, `README.md` |
+| ✅ Commit + push | `git commit` → `git push` |
+| ✅ Tag + push | `git tag vX.Y.Z` → `git push origin vX.Y.Z` |
+| ✅ Gerar instalador | `build_installer.bat` → `dist/IPMadalena_Setup.exe` |
+| ✅ Release no GitHub | `gh release create vX.Y.Z dist/IPMadalena_Setup.exe ...` |
+
+---
+
 # Autenticação YouTube — caminhos investigados
 
 Esta seção documenta abordagens testadas para obter acesso autenticado ao YouTube via yt-dlp, com o objetivo de baixar formatos de áudio isolado (251/140) em vez do formato 18 (vídeo+áudio). **Não reabrir esses caminhos sem uma razão nova concreta.**
