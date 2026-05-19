@@ -43,8 +43,9 @@ def shared_app():
     with patch("baixar_audio.update_ytdlp"), \
          patch("baixar_audio.check_auth_status", return_value=True):
         from app import App
-        inst = App()
-        inst.hide()
+        with patch.object(App, "_check_update_worker"):
+            inst = App()
+            inst.hide()
 
     yield inst
 
