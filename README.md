@@ -134,14 +134,15 @@ Clique no ícone ⚙ no canto superior direito para acessar a tela de configura�
 2. Limpa arquivos residuais de execuções anteriores
 3. Avisa se a data já foi processada antes (pode prosseguir mesmo assim)
 4. Atualiza o yt-dlp em background ao iniciar
-5. Busca os vídeos publicados na data informada no canal
-6. Exibe popup para selecionar quais vídeos processar
-7. Abre o player para marcar o trecho desejado (início/fim da pregação)
-8. Baixa apenas o trecho selecionado e converte para MP3
-9. Localiza a pasta do mês no Drive (ou cria se não existir)
-10. Faz o upload com progresso em tempo real
-11. Remove os arquivos locais após o upload (a menos que "Manter arquivos no dispositivo" esteja ativo)
-12. Salva histórico local e exibe notificação desktop
+5. Verifica se há nova versão do app no GitHub Releases e exibe banner verde quando disponível — permite baixar e instalar sem sair do app (apenas no instalador; em modo script exibe instrução para `git pull`)
+6. Busca os vídeos publicados na data informada no canal
+7. Exibe popup para selecionar quais vídeos processar
+8. Abre o player para marcar o trecho desejado (início/fim da pregação)
+9. Baixa apenas o trecho selecionado e converte para MP3
+10. Localiza a pasta do mês no Drive (ou cria se não existir)
+11. Faz o upload com progresso em tempo real
+12. Remove os arquivos locais após o upload (a menos que "Manter arquivos no dispositivo" esteja ativo)
+13. Salva histórico local e exibe notificação desktop
 
 > **Transmissões ao vivo:** o YouTube pode registrar a data de publicação como o dia seguinte ao culto. O script lida com isso automaticamente.
 
@@ -241,7 +242,7 @@ Detalhes técnicos completos (port-by-port, decisões de design, problemas conhe
 
 ## Testes
 
-Suíte com **673 testes** usando apenas `pytest` e `unittest.mock` — sem dependências adicionais:
+Suíte com **701 testes** usando apenas `pytest` e `unittest.mock` — sem dependências adicionais:
 
 ```bash
 python -m pytest tests/
@@ -263,7 +264,8 @@ Distribuição por camada:
 | `test_gdrive_storage.py` | 38 | Drive OAuth + upload (HTTP/Drive API mockados) |
 | `test_use_cases.py` | 50 | Use cases da camada application (ports mockados) |
 | `test_persistence.py` | 33 | Repositórios JSON (I/O real em `tmp_path`) |
-| `test_app.py` | 201 | Integração da GUI (Home, Processar, Config, Player) |
+| `test_app.py` | 210 | Integração da GUI (Home, Processar, Config, Player) |
+| `test_github_updater.py` | 19 | Auto-update via GitHub Releases (HTTP mockado) |
 | `test_baixar_audio.py` | 38 | Utilidades + CLI + auth wrappers |
 | `test_presenter.py` | 30 | ProcessingPresenter (use cases mockados) |
 | `test_player_window_qt.py` | 29 | PlayerWindowQt |

@@ -810,6 +810,9 @@ class App(QMainWindow):
         # Atualiza yt-dlp em background
         threading.Thread(target=self._init_update_ytdlp, daemon=True).start()
 
+        # Verifica atualização do app em background
+        threading.Thread(target=self._check_update_worker, daemon=True).start()
+
         # Wizard na primeira execução
         if not baixar_audio.check_auth_status():
             self.hide()
@@ -1288,6 +1291,32 @@ class App(QMainWindow):
         sub.setStyleSheet(f"color: {P.HINT}; font-size: 12px;")
         layout.addWidget(sub)
         layout.addSpacing(14)
+
+        # ── Banner de atualização disponível ────────────────────────────────
+        self._update_banner = QFrame()
+        self._update_banner.setObjectName("update_banner")
+        ub = QHBoxLayout(self._update_banner)
+        ub.setContentsMargins(14, 8, 14, 8)
+        self._update_lbl = QLabel()
+        self._update_lbl.setStyleSheet(f"font-weight: bold; color: {P.GREEN};")
+        btn_do_update = QPushButton("Atualizar agora")
+        btn_do_update.setStyleSheet(
+            f"background: {P.GREEN}; color: white; font-weight: bold;"
+            f" border-radius: 4px; padding: 4px 12px;"
+        )
+        btn_do_update.clicked.connect(self._on_update_clicked)
+        btn_dismiss = QPushButton("✕")
+        btn_dismiss.setObjectName("gray_btn")
+        btn_dismiss.setFixedWidth(28)
+        btn_dismiss.setToolTip("Dispensar")
+        btn_dismiss.clicked.connect(self._update_banner.hide)
+        ub.addWidget(self._update_lbl)
+        ub.addStretch()
+        ub.addWidget(btn_do_update)
+        ub.addSpacing(6)
+        ub.addWidget(btn_dismiss)
+        self._update_banner.hide()
+        layout.addWidget(self._update_banner)
 
         # ── Banner de autorização (oculto quando autorizado) ────────────────
         self._auth_banner = QFrame()
@@ -1995,6 +2024,9 @@ class App(QMainWindow):
                     self._append_log(f"Erro na autorização: {value}")
                     _file_log(f"Erro na autorização Drive: {value}")
 
+                elif kind == "update_available":
+                    self._show_update_banner(value["version"], value["download_url"])
+
         except queue.Empty:
             pass
 
@@ -2323,6 +2355,50 @@ class App(QMainWindow):
             self._auth_banner.hide()
         else:
             self._auth_banner.show()
+
+    # -----------------------------------------------------------------------
+    # Auto-update
+    # -----------------------------------------------------------------------
+
+    def _check_update_worker(self):
+        try:
+            from infrastructure.updater.github_updater import check_latest_version
+            result = check_latest_version(baixar_audio.GITHUB_REPO, APP_VERSION)
+            if result:
+                self._queue.put(("update_available", result))
+        except Exception:
+            pass  # falha silenciosa — sem rede, GitHub indisponível, etc.
+
+    def _show_update_banner(self, version: str, download_url: str):
+        self._pending_update_url = download_url
+        self._update_lbl.setText(f"🎉  Nova versão {version} disponível")
+        self._update_banner.show()
+
+    def _on_update_clicked(self):
+        if not getattr(sys, "frozen", False):
+            QMessageBox.information(
+                self,
+                "Atualização disponível",
+                "Você está rodando em modo script.\n"
+                "Atualize via git pull ou baixe o instalador no GitHub Releases.",
+            )
+            return
+
+        msg = QMessageBox(self)
+        msg.setWindowTitle("Atualizar IPMadalena")
+        msg.setText(
+            "O app será fechado e o instalador iniciará automaticamente.\n"
+            "Deseja continuar?"
+        )
+        msg.setIcon(QMessageBox.Icon.Question)
+        btn_sim = msg.addButton("Atualizar", QMessageBox.ButtonRole.YesRole)
+        msg.addButton("Agora não", QMessageBox.ButtonRole.NoRole)
+        msg.exec()
+        if msg.clickedButton() is not btn_sim:
+            return
+
+        dlg = _UpdateDownloadDialog(self._pending_update_url, parent=self)
+        dlg.exec()
 
     def _start_auth(self):
         self._auth_btn.setEnabled(False)
@@ -2653,6 +2729,88 @@ class App(QMainWindow):
                 return
         self._queue_timer.stop()
         event.accept()
+
+
+# ---------------------------------------------------------------------------
+# Dialog de download de atualização
+# ---------------------------------------------------------------------------
+class _UpdateDownloadDialog(QDialog):
+    """
+    Dialog modal que baixa o instalador de uma nova versão e o executa.
+
+    Iniciado automaticamente ao abrir (QTimer.singleShot). Mostra barra de
+    progresso e label de status. Ao concluir: executa o instalador via
+    subprocess.Popen e encerra o app com sys.exit(0).
+    """
+
+    def __init__(self, url: str, parent=None):
+        super().__init__(parent)
+        self._url = url
+        self._cancelled = False
+
+        self.setWindowTitle("Baixando atualização")
+        self.setFixedWidth(420)
+        self.setWindowFlags(self.windowFlags() & ~Qt.WindowType.WindowContextHelpButtonHint)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(24, 20, 24, 20)
+        layout.setSpacing(12)
+
+        self._status_lbl = QLabel("Preparando download...")
+        layout.addWidget(self._status_lbl)
+
+        self._bar = QProgressBar()
+        self._bar.setMinimum(0)
+        self._bar.setMaximum(100)
+        self._bar.setValue(0)
+        layout.addWidget(self._bar)
+
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+        btn_cancel = QPushButton("Cancelar")
+        btn_cancel.setObjectName("gray_btn")
+        btn_cancel.clicked.connect(self._on_cancel)
+        btn_row.addWidget(btn_cancel)
+        layout.addLayout(btn_row)
+
+        QTimer.singleShot(0, self._start_download)
+
+    def _start_download(self):
+        self._status_lbl.setText("Baixando instalador...")
+        threading.Thread(target=self._worker, daemon=True).start()
+
+    def _worker(self):
+        import tempfile
+        dest = os.path.join(tempfile.gettempdir(), "IPMadalena_Update.exe")
+        try:
+            from infrastructure.updater.github_updater import download_release
+            download_release(
+                self._url,
+                dest,
+                on_progress=lambda p: QTimer.singleShot(
+                    0, lambda val=p: self._bar.setValue(int(val * 100))
+                ),
+            )
+            if not self._cancelled:
+                QTimer.singleShot(0, lambda: self._on_done(dest))
+        except Exception as e:
+            if not self._cancelled:
+                QTimer.singleShot(0, lambda: self._on_error(str(e)))
+
+    def _on_done(self, installer_path: str):
+        self._status_lbl.setText("Download concluído. Iniciando instalador...")
+        self._bar.setValue(100)
+        subprocess.Popen([installer_path])
+        sys.exit(0)
+
+    def _on_error(self, msg: str):
+        self._status_lbl.setText(f"Erro no download: {msg}")
+        QMessageBox.critical(self, "Erro", f"Não foi possível baixar a atualização:\n{msg}")
+        self.reject()
+
+    def _on_cancel(self):
+        self._cancelled = True
+        self.reject()
 
 
 # ---------------------------------------------------------------------------

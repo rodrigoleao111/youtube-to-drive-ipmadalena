@@ -59,8 +59,10 @@ youtube_to_drive/
 │   │   └── gdrive_storage.py       GoogleDriveStorage, _ProgressFile
 │   ├── persistence/
 │   │   └── json_repositories.py    JsonHistoryRepository, JsonConfigRepository
-│   └── notification/
-│       └── plyer_notifier.py       PlyerNotifier
+│   ├── notification/
+│   │   └── plyer_notifier.py       PlyerNotifier
+│   └── updater/
+│       └── github_updater.py       check_latest_version, download_release
 │
 ├── application/                    ← use cases (orquestradores de domínio)
 │   └── use_cases.py                ListVideosUseCase, DownloadSegmentsUseCase,
@@ -80,7 +82,7 @@ youtube_to_drive/
 ├── player_window_qt.py             launcher do player Qt (subprocess)
 ├── player_subprocess_qt.py         subprocesso do player YouTube (QWebEngine)
 │
-├── tests/                          suíte com 673 testes (pytest + unittest.mock)
+├── tests/                          suíte com 701 testes (pytest + unittest.mock)
 │
 ├── historico.json                  datas já processadas (gerado em runtime)
 ├── config.json                     canal/pasta Drive + audio_edit (gerado em runtime)
@@ -275,7 +277,7 @@ Esta seção é a **norma para qualquer mudança ou adição** ao projeto. Segui
 
 ## 6. Antes de fazer push
 
-1. `python -m pytest tests/` — DEVE passar 100% (atualmente 673/673).
+1. `python -m pytest tests/` — DEVE passar 100% (atualmente 701/701).
 2. Atualizar `CLAUDE.md` se a arquitetura, convenções ou estrutura mudaram.
 3. Atualizar `README.md` se o comportamento visível ao usuário/dev mudou.
 4. Mensagem de commit em formato convencional: `feat:`, `fix:`, `refactor:`, `docs:`, `test:`, `chore:`.
@@ -298,6 +300,7 @@ Módulo "raiz" do projeto: hospeda constantes, configuração OAuth, utilidades 
 - **`update_ytdlp()`:** frozen → `yt-dlp -U` (auto-update standalone); script → `pip install --upgrade yt-dlp`. Em ambos: `creationflags=CREATE_NO_WINDOW` no Windows.
 - **`run()` (CLI):** delega ao `composition_root.build_processing_presenter()`; processa todos os vídeos da data inteiros (sem corte de trecho).
 - **Re-export:** `OperacaoCancelada` é importada de `domain.exceptions` (mesma classe; código legado que importa de `baixar_audio` continua funcionando).
+- **`GITHUB_REPO`:** `"rodrigoleao111/youtube-to-drive-ipmadalena"` — repo usado pelo worker de auto-update para consultar GitHub Releases.
 - **`VINHETAS_DIR`:** `BASE_DIR/assets/vinhetas/` — pasta interna do app onde as vinhetas selecionadas pelo usuário são copiadas. Sobrevive a renomeações da pasta original.
 - **`config_repo()`:** público (não mais `_config_repo`) — fábrica do `JsonConfigRepository` com defaults do projeto, incluindo `audio_edit` (config padrão do pipeline de edição). Usado pelo composition root para injetar o repo em use cases.
 - **`audio_edit_persist_paths(d)` / `audio_edit_resolve_paths(d)`:** convertem entre formato persistido (basename) e runtime (path absoluto em `VINHETAS_DIR`). Chamados respectivamente no save da UI e no load do `EditAudioUseCase`. Configs antigas com paths absolutos continuam funcionando (resolve só age em paths não-absolutos).
@@ -338,6 +341,13 @@ Módulo "raiz" do projeto: hospeda constantes, configuração OAuth, utilidades 
 - **`JsonHistoryRepository`:** `load()` retorna `{}` se arquivo ausente/corrompido. `save()` SILENCIA I/O errors (histórico não pode quebrar o fluxo principal). `record(date_str, titles)` adiciona timestamp ISO. `is_processed(date_str)` consulta `load()`.
 - **`JsonConfigRepository`:** `load()` preenche chaves ausentes com defaults (`channel_url`, `drive_folder_id`). `save()` LANÇA exceção em erro (config é crítico — usuário espera confirmação). `update(**kwargs)` strips strings, ignora `None`, persiste apenas campos fornecidos.
 
+## `infrastructure/updater/github_updater.py`
+
+- **`check_latest_version(repo, current) -> dict | None`:** consulta `GET /repos/{repo}/releases/latest` via `urllib.request` (stdlib). Compara `tag_name` com `current` usando `_version_tuple` (conversão numérica segura — ex.: `"v3.10.0" > "v3.9.0"`). Retorna `{"version": tag, "download_url": url_do_exe}` somente se houver versão nova E um asset `.exe` disponível. Qualquer exceção (rede, HTTP) é propagada para o chamador tratar.
+- **`download_release(url, dest, on_progress)`:** usa `urllib.request.urlretrieve` com `reporthook` que chama `on_progress(float)` com valor em `[0.0, 1.0]`. Sem chamada quando `total_size == 0`.
+- **`_version_tuple(v)`:** converte `"v3.2.0"` ou `"3.2.0"` em `(3, 2, 0)` para comparação numérica segura.
+- **Sem dependências externas** — usa apenas stdlib (`urllib`, `json`).
+
 ## `infrastructure/notification/plyer_notifier.py`
 
 - **`PlyerNotifier.notify(title, message, *, app_name="IPMadalena", timeout=8)`:** import lazy de `plyer.notification` (evita carregar plyer se nunca chamado). Best-effort: `try/except: pass` envolve toda a chamada — plyer ausente, sem DBus, etc., são silenciados. Não interrompe o fluxo principal.
@@ -377,6 +387,8 @@ Módulo "raiz" do projeto: hospeda constantes, configuração OAuth, utilidades 
 - **Instância única:** porta TCP 47892 reservada via `_acquire_single_instance()`; segunda instância exibe alerta e encerra.
 - **Log em arquivo:** `logs/DD-MM-YYYY.log` via `logging.basicConfig`. **No modo script (não-frozen), também escreve em stderr** — `_setup_file_logging()` adiciona um `StreamHandler` quando `sys.frozen` é False. Isso faz `logging.getLogger("audio_edit").info(...)` aparecer no console do dev, sem prejudicar o .exe empacotado (que não tem stderr visível).
 - **Auto-update yt-dlp:** thread daemon roda `update_ytdlp()` ao iniciar.
+- **Auto-update do app:** thread daemon `_check_update_worker()` consulta GitHub Releases ao iniciar via `infrastructure.updater.github_updater.check_latest_version(baixar_audio.GITHUB_REPO, APP_VERSION)`. Resultado colocado na `_queue` como `("update_available", {"version": ..., "download_url": ...})`. Exceções silenciadas. `_show_update_banner(version, url)` exibe banner verde no topo. `_on_update_clicked()`: em modo script exibe info; em modo frozen confirma → abre `_UpdateDownloadDialog`. `_UpdateDownloadDialog`: modal com `QProgressBar`, baixa o installer em thread daemon via `download_release()`, ao concluir executa `subprocess.Popen([installer_path])` + `sys.exit(0)`.
+- **Banner de atualização (`_update_banner`):** `QFrame` verde no topo, acima do banner de autorização. Começa oculto. Botão "✕" dispensa (`.hide()`). Botão "Atualizar agora" → `_on_update_clicked()`.
 - **Primeira execução:** se `credentials/token.pkl` não existe, janela principal é `hide()` e `SetupWizard` abre; ao concluir, `_check_auth_visibility()` é chamado e a janela é exibida.
 - **Banner de autorização:** `QFrame` condicional no topo — visível quando Drive não autorizado.
 - **`_set_status(text, state)`:** atualiza `status_label` e `_status_dot`; estados: `idle` (cinza), `running` (verde), `done` (verde), `error` (vermelho).
@@ -439,12 +451,13 @@ tests/
 ├── test_audio_test_presenter.py ← 17 testes do AudioTestPresenter
 ├── test_composition_root.py   ← 22 testes do composition root (DI/wiring)
 ├── test_baixar_audio.py       ← 38 testes de utilidades + auth wrappers + update_ytdlp
-├── test_app.py                ← 201 testes de integração da GUI
+├── test_app.py                ← 210 testes de integração da GUI
+├── test_github_updater.py     ← 19 testes do módulo de auto-update (HTTP mockado)
 ├── test_player_window.py      ← 34 testes do PlayerWindow
 └── test_player_window_qt.py   ← 29 testes do PlayerWindowQt
 ```
 
-**Total: 673 testes.**
+**Total: 701 testes.**
 
 **Como rodar:**
 ```bash

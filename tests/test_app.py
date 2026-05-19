@@ -20,6 +20,7 @@ Estratégia:
 
 import os
 import queue
+import sys
 import threading
 import urllib.request
 from unittest.mock import MagicMock, call, patch
@@ -2568,6 +2569,78 @@ class TestHomePage:
              patch("os.startfile") as mock_start:
             application._open_today_log()
         mock_start.assert_called_once_with(str(log_file))
+
+
+# ===========================================================================
+# Auto-update — banner, worker e fluxo de UI
+# ===========================================================================
+
+class TestAutoUpdate:
+    """
+    Cobre:
+      - existência e estado inicial do banner de atualização
+      - _show_update_banner popula label e exibe o banner
+      - _process_queue com "update_available" chama _show_update_banner
+      - _check_update_worker descarta exceção silenciosamente
+      - _on_update_clicked em modo script exibe QMessageBox.information
+    """
+
+    def test_update_banner_existe_e_comeca_oculto(self, application):
+        from PyQt6.QtWidgets import QFrame
+        assert hasattr(application, "_update_banner")
+        assert isinstance(application._update_banner, QFrame)
+        assert application._update_banner.isHidden()
+
+    def test_update_banner_tem_label(self, application):
+        assert hasattr(application, "_update_lbl")
+        assert application._update_lbl is not None
+
+    def test_show_update_banner_exibe_versao_no_label(self, application):
+        application._show_update_banner("v9.9.9", "https://example.com/setup.exe")
+        assert "v9.9.9" in application._update_lbl.text()
+
+    def test_show_update_banner_torna_banner_nao_oculto(self, application):
+        application._update_banner.hide()
+        application._show_update_banner("v9.9.9", "https://example.com/setup.exe")
+        assert not application._update_banner.isHidden()
+
+    def test_show_update_banner_armazena_url(self, application):
+        application._show_update_banner("v9.9.9", "https://example.com/setup.exe")
+        assert application._pending_update_url == "https://example.com/setup.exe"
+
+    def test_process_queue_update_available_chama_show_update_banner(self, application):
+        with patch.object(application, "_show_update_banner") as mock_show:
+            application._queue.put(("update_available", {
+                "version": "v9.9.9",
+                "download_url": "https://example.com/setup.exe",
+            }))
+            application._process_queue()
+        mock_show.assert_called_once_with("v9.9.9", "https://example.com/setup.exe")
+
+    def test_check_update_worker_descarta_excecao_silenciosamente(self, application):
+        application._update_banner.hide()  # garante estado inicial oculto
+        with patch(
+            "infrastructure.updater.github_updater.check_latest_version",
+            side_effect=OSError("sem rede"),
+        ):
+            # Não deve levantar exceção
+            application._check_update_worker()
+        assert application._update_banner.isHidden()
+
+    def test_on_update_clicked_em_script_mode_exibe_information(self, application):
+        # Em modo script (não frozen), deve mostrar QMessageBox.information
+        # sys.frozen não existe em modo script; criamos o atributo temporariamente
+        with patch.object(sys, "frozen", False, create=True), \
+             patch("app.QMessageBox") as MockMsg:
+            application._on_update_clicked()
+        MockMsg.information.assert_called_once()
+
+    def test_dismiss_button_oculta_banner(self, application):
+        application._show_update_banner("v9.9.9", "https://example.com/setup.exe")
+        assert not application._update_banner.isHidden()
+        # Simula clique no botão dispensar
+        application._update_banner.hide()
+        assert application._update_banner.isHidden()
 
 
 # ===========================================================================

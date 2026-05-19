@@ -27,6 +27,7 @@ if hasattr(sys.stdout, "reconfigure"):
 _DEFAULT_CHANNEL_URL    = "https://www.youtube.com/@IPMadalena/streams"
 _DEFAULT_DRIVE_FOLDER_ID = "1KfsI5zCDL4HZ2pdAWPFfAD3TugplzBez"
 SCOPES                  = ["https://www.googleapis.com/auth/drive"]
+GITHUB_REPO             = "rodrigoleao111/youtube-to-drive-ipmadalena"
 
 # Credenciais OAuth embutidas — o usuário não precisa distribuir client_secret.json.
 # Geradas no Google Cloud Console do projeto ipmadalena-drive.
