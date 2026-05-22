@@ -583,3 +583,136 @@ class TestSecondsToHms:
     def test_trunca_fracao_de_segundo(self):
         from infrastructure.youtube.ytdlp_source import _seconds_to_hms
         assert _seconds_to_hms(59.9) == "00:00:59"
+
+
+# ===========================================================================
+# fetch_video_metadata
+# ===========================================================================
+
+class TestFetchVideoMetadata:
+    """Testa fetch_video_metadata com subprocess mockado."""
+
+    def _make_proc(self, payload: str, returncode: int = 0) -> MagicMock:
+        proc = MagicMock()
+        proc.stdout = MagicMock()
+        proc.stdout.read = MagicMock(return_value=payload)
+        proc.returncode = returncode
+        proc.wait = MagicMock(return_value=returncode)
+        return proc
+
+    def _valid_json(self, description="Descrição do culto.", thumbnail="https://img.yt/thumb.jpg"):
+        import json as _json
+        return _json.dumps({"description": description, "thumbnail": thumbnail})
+
+    def test_retorna_description_do_json(self):
+        from infrastructure.youtube.ytdlp_source import fetch_video_metadata
+        proc = self._make_proc(self._valid_json(description="Texto da descrição."))
+        with patch("infrastructure.youtube.ytdlp_source.start_process", return_value=proc):
+            result = fetch_video_metadata("abc123")
+        assert result["description"] == "Texto da descrição."
+
+    def test_retorna_thumbnail_url_do_json(self):
+        from infrastructure.youtube.ytdlp_source import fetch_video_metadata
+        proc = self._make_proc(self._valid_json(thumbnail="https://img.yt/hq.jpg"))
+        with patch("infrastructure.youtube.ytdlp_source.start_process", return_value=proc):
+            result = fetch_video_metadata("abc123")
+        assert result["thumbnail_url"] == "https://img.yt/hq.jpg"
+
+    def test_retorna_dict_vazio_quando_returncode_nao_zero(self):
+        from infrastructure.youtube.ytdlp_source import fetch_video_metadata
+        proc = self._make_proc(self._valid_json(), returncode=1)
+        with patch("infrastructure.youtube.ytdlp_source.start_process", return_value=proc):
+            result = fetch_video_metadata("abc123")
+        assert result == {"description": "", "thumbnail_url": ""}
+
+    def test_retorna_dict_vazio_quando_json_invalido(self):
+        from infrastructure.youtube.ytdlp_source import fetch_video_metadata
+        proc = self._make_proc("isso nao e json")
+        with patch("infrastructure.youtube.ytdlp_source.start_process", return_value=proc):
+            result = fetch_video_metadata("abc123")
+        assert result == {"description": "", "thumbnail_url": ""}
+
+    def test_retorna_dict_vazio_quando_subprocess_lanca_excecao(self):
+        from infrastructure.youtube.ytdlp_source import fetch_video_metadata
+        with patch("infrastructure.youtube.ytdlp_source.start_process",
+                   side_effect=RuntimeError("erro de rede")):
+            result = fetch_video_metadata("abc123")
+        assert result == {"description": "", "thumbnail_url": ""}
+
+    def test_usa_extractor_args_ios_android_web(self):
+        from infrastructure.youtube.ytdlp_source import fetch_video_metadata
+        proc = self._make_proc(self._valid_json())
+        with patch("infrastructure.youtube.ytdlp_source.start_process", return_value=proc) as sp:
+            fetch_video_metadata("abc123")
+        cmd = sp.call_args.args[0]
+        assert "--extractor-args" in cmd
+        idx = cmd.index("--extractor-args")
+        assert "ios,android,web" in cmd[idx + 1]
+
+    def test_usa_flag_j(self):
+        from infrastructure.youtube.ytdlp_source import fetch_video_metadata
+        proc = self._make_proc(self._valid_json())
+        with patch("infrastructure.youtube.ytdlp_source.start_process", return_value=proc) as sp:
+            fetch_video_metadata("abc123")
+        cmd = sp.call_args.args[0]
+        assert "-j" in cmd
+
+    def test_url_construida_com_video_id(self):
+        from infrastructure.youtube.ytdlp_source import fetch_video_metadata
+        proc = self._make_proc(self._valid_json())
+        with patch("infrastructure.youtube.ytdlp_source.start_process", return_value=proc) as sp:
+            fetch_video_metadata("MYVIDEOID")
+        cmd = sp.call_args.args[0]
+        assert "https://www.youtube.com/watch?v=MYVIDEOID" in cmd
+
+
+# ===========================================================================
+# fetch_video_description (compat wrapper)
+# ===========================================================================
+
+class TestFetchVideoDescription:
+    """Testa o wrapper de compatibilidade fetch_video_description."""
+
+    def _make_proc(self, payload: str, returncode: int = 0) -> MagicMock:
+        import json as _json
+        proc = MagicMock()
+        proc.stdout = MagicMock()
+        proc.stdout.read = MagicMock(return_value=payload)
+        proc.returncode = returncode
+        proc.wait = MagicMock(return_value=returncode)
+        return proc
+
+    def test_retorna_descricao_quando_sucesso(self):
+        import json as _json
+        from infrastructure.youtube.ytdlp_source import fetch_video_description
+        payload = _json.dumps({"description": "Descrição do culto.\nSegunda linha.", "thumbnail": ""})
+        proc = self._make_proc(payload)
+        with patch("infrastructure.youtube.ytdlp_source.start_process", return_value=proc):
+            result = fetch_video_description("dQw4w9WgXcQ")
+        assert result == "Descrição do culto.\nSegunda linha."
+
+    def test_retorna_vazio_quando_returncode_diferente_de_zero(self):
+        import json as _json
+        from infrastructure.youtube.ytdlp_source import fetch_video_description
+        payload = _json.dumps({"description": "qualquer coisa", "thumbnail": ""})
+        proc = self._make_proc(payload, returncode=1)
+        with patch("infrastructure.youtube.ytdlp_source.start_process", return_value=proc):
+            result = fetch_video_description("abc123")
+        assert result == ""
+
+    def test_retorna_vazio_quando_subprocess_lanca_excecao(self):
+        from infrastructure.youtube.ytdlp_source import fetch_video_description
+        with patch("infrastructure.youtube.ytdlp_source.start_process",
+                   side_effect=RuntimeError("erro de rede")):
+            result = fetch_video_description("abc123")
+        assert result == ""
+
+    def test_usa_skip_download(self):
+        import json as _json
+        from infrastructure.youtube.ytdlp_source import fetch_video_description
+        payload = _json.dumps({"description": "desc", "thumbnail": ""})
+        proc = self._make_proc(payload)
+        with patch("infrastructure.youtube.ytdlp_source.start_process", return_value=proc) as sp:
+            fetch_video_description("xyz")
+        cmd = sp.call_args.args[0]
+        assert "--skip-download" in cmd

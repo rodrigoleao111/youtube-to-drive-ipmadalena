@@ -238,3 +238,33 @@ class TestBuildAudioTestPresenter:
         p1 = build_audio_test_presenter()
         p2 = build_audio_test_presenter()
         assert p1 is not p2
+
+
+# ===========================================================================
+# upload_enabled reflete config upload_to_drive
+# ===========================================================================
+
+class TestUploadEnabled:
+    """upload_enabled do ProcessingPresenter reflete config upload_to_drive."""
+
+    def _build(self, cfg_override: dict):
+        base = baixar_audio.load_config()
+        base.update(cfg_override)
+        with patch("baixar_audio.load_config", return_value=base):
+            return build_processing_presenter()
+
+    def test_upload_enabled_true_por_padrao(self):
+        p = self._build({"upload_to_drive": True})
+        assert p.upload_enabled is True
+
+    def test_upload_enabled_false_quando_config_false(self):
+        p = self._build({"upload_to_drive": False})
+        assert p.upload_enabled is False
+
+    def test_upload_enabled_true_quando_chave_ausente(self):
+        # Backward compat: configs antigas sem a chave devem usar True
+        cfg = baixar_audio.load_config()
+        cfg.pop("upload_to_drive", None)
+        with patch("baixar_audio.load_config", return_value=cfg):
+            p = build_processing_presenter()
+        assert p.upload_enabled is True

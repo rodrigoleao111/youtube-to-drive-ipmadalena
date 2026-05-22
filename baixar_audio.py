@@ -101,6 +101,12 @@ def config_repo():
             "audio_edit":      AudioEditConfig().to_dict(),
             "chapter_name":    "",
             "keep_files":      False,
+            "upload_to_drive": True,
+            "spotify": {
+                "show_id":       "",
+                "title_prefix":  "",
+                "default_tags":  "",
+            },
         },
     )
 

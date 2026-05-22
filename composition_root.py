@@ -74,6 +74,7 @@ def build_processing_presenter() -> ProcessingPresenter:
         chapters_uc    = GetChaptersUseCase(source=video_source),
         channel_url    = cfg["channel_url"],
         download_dir   = baixar_audio.DOWNLOAD_DIR,
+        upload_enabled = bool(cfg.get("upload_to_drive", True)),
     )
 
 

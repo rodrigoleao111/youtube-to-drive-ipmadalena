@@ -76,6 +76,7 @@ def _reset_app_state(shared_app):
     app._running = False
     app._converting = False
     app._cancel_event.clear()
+    app._spotify_pending = None
     # Zera barras e oculta o frame
     app._hide_bars()
     # Restaura botões para estado idle
@@ -319,7 +320,6 @@ class TestWorkerPreflight:
              internet=True, disk_ok=True, disk_mb=1000.0, history=None):
         with patch("baixar_audio.check_internet", return_value=internet), \
              patch("baixar_audio.check_disk_space", return_value=(disk_ok, disk_mb)), \
-             patch("baixar_audio.cleanup_downloads"), \
              patch("baixar_audio.load_history", return_value=history or {}):
             application._worker_preflight(date_str)
 
@@ -368,7 +368,6 @@ class TestWorkerPreflight:
     def test_tudo_ok_inicia_thread_worker(self, application):
         with patch("baixar_audio.check_internet", return_value=True), \
              patch("baixar_audio.check_disk_space", return_value=(True, 1000.0)), \
-             patch("baixar_audio.cleanup_downloads"), \
              patch("baixar_audio.load_history", return_value={}), \
              patch("threading.Thread") as MockThread:
             mock_t = MagicMock()
@@ -377,14 +376,15 @@ class TestWorkerPreflight:
         MockThread.assert_called()
         mock_t.start.assert_called_once()
 
-    def test_cleanup_e_chamado_no_preflight(self, application):
+    def test_cleanup_nao_e_chamado_automaticamente_no_preflight(self, application):
+        """Limpeza automática foi removida — fica a critério do usuário."""
         with patch("baixar_audio.check_internet", return_value=True), \
              patch("baixar_audio.check_disk_space", return_value=(True, 1000.0)), \
              patch("baixar_audio.cleanup_downloads") as mock_cleanup, \
              patch("baixar_audio.load_history", return_value={}), \
              patch("threading.Thread"):
             application._worker_preflight("19/04/2026")
-        mock_cleanup.assert_called_once()
+        mock_cleanup.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -1204,31 +1204,42 @@ class TestFetchThumbnail:
 
 class TestConfigPageStructure:
     """
-    Verifica a nova estrutura da página Configurações do App:
-      - QTabWidget com 2 abas: Geral e Edição de áudio
-      - Aba Geral mantém os campos `_cfg_channel_entry` e `_cfg_folder_entry`
+    Verifica a estrutura da página Configurações do App:
+      - QTabWidget com 4 abas: Drive, YouTube, Spotify e Edição de áudio
+      - Aba Drive mantém os campos `_cfg_folder_entry` e `_cfg_auth_*`
+      - Aba YouTube mantém os campos `_cfg_channel_entry` e `_cfg_chapter_entry`
       - Aba Edição de áudio é uma instância de `_AudioSettingsTab`
-      - Save unificado (`_cfg_save`) persiste AMBAS as abas em uma chamada
+      - Save unificado (`_cfg_save`) persiste todas as abas em uma chamada
     """
 
-    def test_config_page_tem_qtabwidget_com_duas_abas(self, application):
+    def test_config_page_tem_qtabwidget_com_quatro_abas(self, application):
         from PyQt6.QtWidgets import QTabWidget
         assert isinstance(application._cfg_tabs, QTabWidget)
-        assert application._cfg_tabs.count() == 2
+        assert application._cfg_tabs.count() == 4
 
-    def test_aba_geral_e_a_primeira(self, application):
-        assert "Geral" in application._cfg_tabs.tabText(0)
+    def test_aba_drive_e_a_primeira(self, application):
+        assert "Drive" in application._cfg_tabs.tabText(0)
 
-    def test_aba_audio_e_a_segunda(self, application):
-        assert "áudio" in application._cfg_tabs.tabText(1).lower()
+    def test_aba_youtube_e_a_segunda(self, application):
+        assert "YouTube" in application._cfg_tabs.tabText(1)
+
+    def test_aba_spotify_e_a_terceira(self, application):
+        assert "Spotify" in application._cfg_tabs.tabText(2)
+
+    def test_aba_audio_e_a_quarta(self, application):
+        assert "áudio" in application._cfg_tabs.tabText(3).lower()
 
     def test_audio_tab_e_instancia_de_audio_settings_tab(self, application):
         from app import _AudioSettingsTab
         assert isinstance(application._audio_tab, _AudioSettingsTab)
 
-    def test_aba_geral_tem_campos_de_canal_e_folder(self, application):
-        assert hasattr(application, "_cfg_channel_entry")
+    def test_aba_drive_tem_campos_de_folder_e_auth(self, application):
         assert hasattr(application, "_cfg_folder_entry")
+        assert hasattr(application, "_cfg_auth_status_label")
+
+    def test_aba_youtube_tem_campos_de_canal_e_chapter(self, application):
+        assert hasattr(application, "_cfg_channel_entry")
+        assert hasattr(application, "_cfg_chapter_entry")
 
     # -----------------------------------------------------------------------
     # Save unificado: persiste AMBAS as abas em uma gravação
@@ -2497,6 +2508,152 @@ class TestHomePage:
         btns = card.findChildren(QPushButton)
         assert any(b.toolTip() == "Enviar ao Drive" for b in btns)
 
+    # ── Ponto 5: Botão Spotify no card ──────────────────────────────────────
+
+    def test_card_sem_botao_spotify_quando_show_id_nao_configurado(
+        self, application, tmp_path
+    ):
+        fpath = tmp_path / "culto.mp3"
+        fpath.write_bytes(b"\x00" * 1024)
+        cfg_sem_spotify = {"channel_url": "x", "drive_folder_id": "y",
+                           "spotify": {"show_id": ""}}
+        with patch("baixar_audio.load_config", return_value=cfg_sem_spotify):
+            card = application._build_home_card(str(fpath))
+        btns = card.findChildren(QPushButton)
+        assert not any(b.toolTip() == "Publicar no Spotify" for b in btns)
+
+    def test_card_tem_botao_spotify_quando_show_id_configurado(
+        self, application, tmp_path
+    ):
+        fpath = tmp_path / "culto.mp3"
+        fpath.write_bytes(b"\x00" * 1024)
+        cfg_com_spotify = {"channel_url": "x", "drive_folder_id": "y",
+                           "spotify": {"show_id": "ABC123"}}
+        with patch("baixar_audio.load_config", return_value=cfg_com_spotify):
+            card = application._build_home_card(str(fpath))
+        btns = card.findChildren(QPushButton)
+        assert any(b.toolTip() == "Publicar no Spotify" for b in btns)
+
+    def test_spotify_from_local_exibe_aviso_quando_show_id_nao_configurado(
+        self, application, tmp_path
+    ):
+        fpath = tmp_path / "culto.mp3"
+        fpath.write_bytes(b"\x00" * 1024)
+        cfg = {"channel_url": "x", "drive_folder_id": "y",
+               "spotify": {"show_id": ""}}
+        with patch("baixar_audio.load_config", return_value=cfg), \
+             patch("app.QMessageBox") as MockMsgBox:
+            application._spotify_from_local(str(fpath))
+        MockMsgBox.information.assert_called_once()
+
+    def test_spotify_from_local_abre_predialog_quando_show_id_configurado(
+        self, application, tmp_path
+    ):
+        fpath = tmp_path / "culto.mp3"
+        fpath.write_bytes(b"\x00" * 1024)
+        cfg = {"channel_url": "x", "drive_folder_id": "y",
+               "spotify": {"show_id": "ABC123", "title_prefix": "",
+                           "default_tags": ""}}
+        with patch("baixar_audio.load_config", return_value=cfg), \
+             patch("app._SpotifyPrePublishDialog") as MockDlg:
+            mock_dlg = MagicMock()
+            MockDlg.return_value = mock_dlg
+            application._spotify_from_local(str(fpath))
+        MockDlg.assert_called_once()
+        mock_dlg.exec.assert_called_once()
+
+    def test_spotify_from_local_usa_nome_do_arquivo_como_titulo(
+        self, application, tmp_path
+    ):
+        fpath = tmp_path / "Culto da Manha 19-05-2026.mp3"
+        fpath.write_bytes(b"\x00" * 1024)
+        cfg = {"channel_url": "x", "drive_folder_id": "y",
+               "spotify": {"show_id": "ABC123", "title_prefix": "",
+                           "default_tags": ""}}
+        captured = {}
+        def capture(**kwargs):
+            captured.update(kwargs)
+            m = MagicMock()
+            return m
+        with patch("baixar_audio.load_config", return_value=cfg), \
+             patch("app._SpotifyPrePublishDialog", side_effect=capture):
+            application._spotify_from_local(str(fpath))
+        assert captured.get("title") == "Culto da Manha 19-05-2026"
+
+    def test_spotify_from_local_aplica_prefixo_no_titulo(
+        self, application, tmp_path
+    ):
+        fpath = tmp_path / "Culto.mp3"
+        fpath.write_bytes(b"\x00" * 1024)
+        cfg = {"channel_url": "x", "drive_folder_id": "y",
+               "spotify": {"show_id": "ABC123", "title_prefix": "IPMadalena",
+                           "default_tags": ""}}
+        captured = {}
+        def capture(**kwargs):
+            captured.update(kwargs)
+            return MagicMock()
+        with patch("baixar_audio.load_config", return_value=cfg), \
+             patch("app._SpotifyPrePublishDialog", side_effect=capture):
+            application._spotify_from_local(str(fpath))
+        assert captured.get("title") == "IPMadalena Culto"
+
+    def test_spotify_from_local_passa_fpath_como_audio_path(
+        self, application, tmp_path
+    ):
+        fpath = tmp_path / "culto.mp3"
+        fpath.write_bytes(b"\x00" * 1024)
+        cfg = {"channel_url": "x", "drive_folder_id": "y",
+               "spotify": {"show_id": "ABC123", "title_prefix": "",
+                           "default_tags": ""}}
+        captured = {}
+        def capture(**kwargs):
+            captured.update(kwargs)
+            return MagicMock()
+        with patch("baixar_audio.load_config", return_value=cfg), \
+             patch("app._SpotifyPrePublishDialog", side_effect=capture):
+            application._spotify_from_local(str(fpath))
+        assert captured.get("audio_path") == str(fpath)
+
+    # ── Ponto 7b: Thumbnail no card ─────────────────────────────────────────
+
+    def test_card_exibe_emoji_quando_sem_thumbnail(self, application, tmp_path):
+        fpath = tmp_path / "culto.mp3"
+        fpath.write_bytes(b"\x00" * 1024)
+        # Sem .jpg ao lado
+        card = application._build_home_card(str(fpath))
+        from PyQt6.QtWidgets import QLabel
+        labels = card.findChildren(QLabel)
+        # O primeiro label (thumb) deve ter texto com emoji, não pixmap
+        thumb_lbl = labels[0]
+        assert thumb_lbl.text() == "🎵"
+        assert thumb_lbl.pixmap() is None or thumb_lbl.pixmap().isNull()
+
+    def test_card_exibe_imagem_quando_thumbnail_existe(self, application, tmp_path):
+        fpath = tmp_path / "culto.mp3"
+        fpath.write_bytes(b"\x00" * 1024)
+        # Cria um arquivo JPEG mínimo válido ao lado do MP3
+        import struct
+        _jpg = (
+            b"\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00"
+            + b"\xff\xdb\x00C\x00" + bytes([8] * 64)
+            + b"\xff\xc0\x00\x0b\x08\x00\x01\x00\x01\x01\x01\x11\x00"
+            + b"\xff\xc4\x00\x1f\x00\x00\x01\x05\x01\x01\x01\x01\x01\x01\x00\x00\x00\x00\x00\x00\x00"
+            + bytes(range(16))
+            + b"\xff\xc4\x00\xb5\x10\x00\x02\x01\x03\x03\x02\x04\x03\x05\x05\x04\x04\x00\x00\x01"
+            + bytes(162)
+            + b"\xff\xda\x00\x08\x01\x01\x00\x00?\x00\xf5\x00\xff\xd9"
+        )
+        thumb_path = tmp_path / "culto.jpg"
+        thumb_path.write_bytes(_jpg)
+        card = application._build_home_card(str(fpath))
+        from PyQt6.QtWidgets import QLabel
+        labels = card.findChildren(QLabel)
+        thumb_lbl = labels[0]
+        # Se o QPixmap for inválido (decodificação falhou) o label pode ter
+        # texto vazio mas nunca "🎵" — confirma que o branch de imagem foi
+        # tomado (texto não é o emoji de fallback).
+        assert thumb_lbl.text() != "🎵"
+
     # ── Ponto 8: Confirmação ao fechar ──────────────────────────────────────
 
     def test_close_sem_operacao_aceita_evento(self, application):
@@ -2559,6 +2716,94 @@ class TestHomePage:
             application._open_today_log()
         # QMessageBox.information deve ser chamado quando log não existe
         MockMsg.information.assert_called_once()
+
+
+# ===========================================================================
+# TestSpotifyCover — cover_image_path nas variantes de fluxo Spotify
+# ===========================================================================
+
+class TestSpotifyCover:
+    """
+    Cobre o threading de cover_image_path:
+      - _spotify_from_local detecta .jpg ao lado do MP3
+      - _spotify_from_local passa cover vazia quando .jpg ausente
+      - _show_spotify_predialog passa cover do pending dict
+    """
+
+    def test_spotify_from_local_passa_cover_image_quando_jpg_existe(
+        self, application, tmp_path
+    ):
+        fpath = tmp_path / "culto.mp3"
+        fpath.write_bytes(b"\x00" * 1024)
+        jpg_path = tmp_path / "culto.jpg"
+        jpg_path.write_bytes(b"\xff\xd8\xff\xd9")  # JPEG mínimo
+
+        cfg = {"channel_url": "x", "drive_folder_id": "y",
+               "spotify": {"show_id": "ABC123", "title_prefix": "",
+                           "default_tags": ""}}
+        captured = {}
+        def capture(**kwargs):
+            captured.update(kwargs)
+            return MagicMock()
+
+        with patch("baixar_audio.load_config", return_value=cfg), \
+             patch("app._SpotifyPrePublishDialog", side_effect=capture):
+            application._spotify_from_local(str(fpath))
+
+        assert captured.get("cover_image_path") == str(jpg_path)
+
+    def test_spotify_from_local_passa_cover_vazia_quando_jpg_ausente(
+        self, application, tmp_path
+    ):
+        fpath = tmp_path / "culto.mp3"
+        fpath.write_bytes(b"\x00" * 1024)
+        # Sem .jpg ao lado
+
+        cfg = {"channel_url": "x", "drive_folder_id": "y",
+               "spotify": {"show_id": "ABC123", "title_prefix": "",
+                           "default_tags": ""}}
+        captured = {}
+        def capture(**kwargs):
+            captured.update(kwargs)
+            return MagicMock()
+
+        with patch("baixar_audio.load_config", return_value=cfg), \
+             patch("app._SpotifyPrePublishDialog", side_effect=capture):
+            application._spotify_from_local(str(fpath))
+
+        assert captured.get("cover_image_path") == ""
+
+    def test_show_spotify_predialog_passa_cover_do_pending(
+        self, application, tmp_path
+    ):
+        # Cria arquivo de áudio e thumbnail na pasta downloads mockada
+        mp3 = tmp_path / "culto.mp3"
+        mp3.write_bytes(b"\x00" * 1024)
+        jpg = tmp_path / "culto.jpg"
+        jpg.write_bytes(b"\xff\xd8\xff\xd9")
+
+        pending = {
+            "show_id":          "XYZ",
+            "video_id":         "abc",
+            "title":            "Culto",
+            "description":      "",
+            "date_str":         "19/05/2026",
+            "tags":             "",
+            "cover_image_path": str(jpg),
+        }
+
+        captured = {}
+        def capture(**kwargs):
+            captured.update(kwargs)
+            m = MagicMock()
+            m.exec = MagicMock()
+            return m
+
+        with patch.object(baixar_audio, "DOWNLOAD_DIR", str(tmp_path)), \
+             patch("app._SpotifyPrePublishDialog", side_effect=capture):
+            application._show_spotify_predialog(pending)
+
+        assert captured.get("cover_image_path") == str(jpg)
 
     def test_open_today_log_abre_arquivo_quando_existe(self, application, tmp_path):
         from datetime import datetime as _dt
@@ -2693,3 +2938,255 @@ class TestKeepFilesConfig:
 
         saved = mock_repo.save.call_args.args[0]
         assert saved["keep_files"] is False
+
+
+# ===========================================================================
+# Upload para o Drive — toggle
+# ===========================================================================
+
+class TestUploadToDriveToggle:
+    """
+    Testa a opção 'Fazer upload para o Google Drive' na aba Drive.
+    """
+
+    def test_checkbox_upload_to_drive_existe(self, application):
+        assert hasattr(application, "_cfg_upload_to_drive_check")
+        from PyQt6.QtWidgets import QCheckBox
+        assert isinstance(application._cfg_upload_to_drive_check, QCheckBox)
+
+    def test_cfg_save_persiste_upload_to_drive_true(self, application):
+        application._cfg_channel_entry.setText("https://canal.ok")
+        application._cfg_folder_entry.setText("FOLDER_OK")
+        application._cfg_upload_to_drive_check.setChecked(True)
+
+        mock_repo = MagicMock()
+        mock_repo.load.return_value = {}
+        with patch("baixar_audio.config_repo", return_value=mock_repo):
+            application._cfg_save()
+
+        saved = mock_repo.save.call_args.args[0]
+        assert saved["upload_to_drive"] is True
+
+    def test_cfg_save_persiste_upload_to_drive_false(self, application):
+        application._cfg_channel_entry.setText("https://canal.ok")
+        application._cfg_folder_entry.setText("FOLDER_OK")
+        application._cfg_upload_to_drive_check.setChecked(False)
+
+        mock_repo = MagicMock()
+        mock_repo.load.return_value = {}
+        with patch("baixar_audio.config_repo", return_value=mock_repo):
+            application._cfg_save()
+
+        saved = mock_repo.save.call_args.args[0]
+        assert saved["upload_to_drive"] is False
+
+
+# ===========================================================================
+# Spotify — aba de configuração + publicação
+# ===========================================================================
+
+class TestSpotifyConfigTab:
+    """Aba Spotify na página de Configurações."""
+
+    def test_aba_spotify_tem_campo_show_id(self, application):
+        assert hasattr(application, "_cfg_spotify_show_id")
+        from PyQt6.QtWidgets import QLineEdit
+        assert isinstance(application._cfg_spotify_show_id, QLineEdit)
+
+    def test_aba_spotify_tem_campo_title_prefix(self, application):
+        assert hasattr(application, "_cfg_spotify_title_prefix")
+        from PyQt6.QtWidgets import QLineEdit
+        assert isinstance(application._cfg_spotify_title_prefix, QLineEdit)
+
+    def test_aba_spotify_tem_campo_default_tags(self, application):
+        assert hasattr(application, "_cfg_spotify_default_tags")
+        from PyQt6.QtWidgets import QLineEdit
+        assert isinstance(application._cfg_spotify_default_tags, QLineEdit)
+
+    def test_cfg_save_persiste_spotify_config(self, application):
+        application._cfg_channel_entry.setText("https://canal.ok")
+        application._cfg_folder_entry.setText("FOLDER_OK")
+        application._cfg_spotify_show_id.setText("my_show_123")
+        application._cfg_spotify_title_prefix.setText("IPMadalena")
+        application._cfg_spotify_default_tags.setText("evangelho")
+
+        mock_repo = MagicMock()
+        mock_repo.load.return_value = {}
+        with patch("baixar_audio.config_repo", return_value=mock_repo):
+            application._cfg_save()
+
+        saved = mock_repo.save.call_args.args[0]
+        assert "spotify" in saved
+        assert saved["spotify"]["show_id"] == "my_show_123"
+        assert saved["spotify"]["title_prefix"] == "IPMadalena"
+        assert saved["spotify"]["default_tags"] == "evangelho"
+
+    def test_cfg_save_spotify_vazio_persistido_como_string_vazia(self, application):
+        application._cfg_channel_entry.setText("https://canal.ok")
+        application._cfg_folder_entry.setText("FOLDER_OK")
+        application._cfg_spotify_show_id.setText("")
+        application._cfg_spotify_title_prefix.setText("")
+        application._cfg_spotify_default_tags.setText("")
+
+        mock_repo = MagicMock()
+        mock_repo.load.return_value = {}
+        with patch("baixar_audio.config_repo", return_value=mock_repo):
+            application._cfg_save()
+
+        saved = mock_repo.save.call_args.args[0]
+        assert saved["spotify"]["show_id"] == ""
+
+
+class TestSpotifyPublish:
+    """Fluxo de publicação no Spotify for Podcasters."""
+
+    def test_spotify_pending_inicia_none(self, application):
+        assert application._spotify_pending is None
+
+    def test_worker_phase2_popula_spotify_pending_quando_show_id_configurado(
+        self, application
+    ):
+        """Quando show_id está configurado, _worker_phase2 define _spotify_pending."""
+        cfg = baixar_audio.load_config()
+        cfg["spotify"] = {"show_id": "abc123", "title_prefix": "", "default_tags": ""}
+        segments = [{"video_id": "VID1", "title": "Culto 19/05", "start": None, "end": None}]
+
+        with patch("baixar_audio.load_config", return_value=cfg), \
+             patch.object(application, "_build_presenter") as mock_pres:
+            mock_pres.return_value.process_segments.return_value = ["Culto 19/05"]
+            application._worker_phase2("19/05/2026", segments)
+            # Drena a fila para não vazar para outros testes
+            try:
+                while True:
+                    application._queue.get_nowait()
+            except Exception:
+                pass
+
+        assert application._spotify_pending is not None
+        assert application._spotify_pending["show_id"] == "abc123"
+        assert application._spotify_pending["video_id"] == "VID1"
+
+    def test_worker_phase2_nao_popula_spotify_pending_sem_show_id(self, application):
+        cfg = baixar_audio.load_config()
+        cfg["spotify"] = {"show_id": "", "title_prefix": "", "default_tags": ""}
+        segments = [{"video_id": "VID1", "title": "Culto", "start": None, "end": None}]
+
+        with patch("baixar_audio.load_config", return_value=cfg), \
+             patch.object(application, "_build_presenter") as mock_pres:
+            mock_pres.return_value.process_segments.return_value = ["Culto"]
+            application._worker_phase2("19/05/2026", segments)
+            try:
+                while True:
+                    application._queue.get_nowait()
+            except Exception:
+                pass
+
+        assert application._spotify_pending is None
+
+    def test_on_done_dispara_spotify_dialog_quando_pending(self, application):
+        """_on_done com _spotify_pending não-None deve agendar _show_spotify_predialog."""
+        application._spotify_pending = {
+            "show_id":     "abc",
+            "video_id":    "VID1",
+            "title":       "Titulo",
+            "description": "",
+            "date_str":    "19/05/2026",
+            "tags":        "",
+        }
+        with patch.object(application, "_show_spotify_predialog") as mock_show, \
+             patch("app.QTimer") as mock_timer:
+            application._on_done()
+
+        mock_timer.singleShot.assert_called_once()
+        # Após _on_done, _spotify_pending deve ser None (consumido)
+        assert application._spotify_pending is None
+
+    def test_on_done_sem_pending_nao_dispara_spotify_dialog(self, application):
+        application._spotify_pending = None
+        with patch.object(application, "_show_spotify_predialog") as mock_show, \
+             patch("app.QTimer") as mock_timer:
+            application._on_done()
+        mock_show.assert_not_called()
+
+    def test_show_spotify_predialog_abre_dialog(self, application, tmp_path):
+        """_show_spotify_predialog instancia _SpotifyPrePublishDialog."""
+        pending = {
+            "show_id":     "myshow",
+            "video_id":    "VID1",
+            "title":       "Culto",
+            "description": "Descricao do culto",
+            "date_str":    "19/05/2026",
+            "tags":        "pregacao",
+        }
+        with patch("app._SpotifyPrePublishDialog") as MockDlg, \
+             patch.object(baixar_audio, "DOWNLOAD_DIR", str(tmp_path)):
+            mock_dlg_instance = MagicMock()
+            MockDlg.return_value = mock_dlg_instance
+            application._show_spotify_predialog(pending)
+
+        MockDlg.assert_called_once()
+        kwargs = MockDlg.call_args.kwargs
+        assert kwargs["show_id"] == "myshow"
+        assert kwargs["video_id"] == "VID1"
+        assert kwargs["title"] == "Culto"
+        assert kwargs["description"] == "Descricao do culto"
+        mock_dlg_instance.exec.assert_called_once()
+
+    def test_show_spotify_predialog_passa_description_vazia_quando_ausente(
+        self, application, tmp_path
+    ):
+        """Se 'description' não está em pending, passa string vazia para o dialog."""
+        pending = {
+            "show_id":  "myshow",
+            "video_id": "VID1",
+            "title":    "Culto",
+            "date_str": "19/05/2026",
+            "tags":     "",
+            # 'description' ausente propositalmente
+        }
+        with patch("app._SpotifyPrePublishDialog") as MockDlg, \
+             patch.object(baixar_audio, "DOWNLOAD_DIR", str(tmp_path)):
+            MockDlg.return_value = MagicMock()
+            application._show_spotify_predialog(pending)
+
+        kwargs = MockDlg.call_args.kwargs
+        assert kwargs["description"] == ""
+
+    def test_spotify_pending_consumido_antes_de_abrir_dialog(self, application, tmp_path):
+        """O campo _spotify_pending deve ser None antes de abrir o diálogo."""
+        application._spotify_pending = {
+            "show_id": "s", "video_id": "v", "title": "t",
+            "description": "", "date_str": "01/01/2026", "tags": "",
+        }
+        consumed_before_open = []
+
+        def fake_show(pending):
+            consumed_before_open.append(application._spotify_pending)
+
+        with patch.object(application, "_show_spotify_predialog", side_effect=fake_show):
+            application._on_done()
+
+        # _spotify_pending já era None quando o diálogo foi "aberto" (via timer real)
+        # Aqui verificamos apenas que o campo foi zerado após _on_done
+        assert application._spotify_pending is None
+
+    def test_worker_phase2_prefixo_concatenado_no_titulo(self, application):
+        cfg = baixar_audio.load_config()
+        cfg["spotify"] = {
+            "show_id": "show1",
+            "title_prefix": "Podcast: ",
+            "default_tags": "",
+        }
+        segments = [{"video_id": "V", "title": "Culto Manha", "start": None, "end": None}]
+
+        with patch("baixar_audio.load_config", return_value=cfg), \
+             patch.object(application, "_build_presenter") as mock_pres:
+            mock_pres.return_value.process_segments.return_value = ["Culto Manha"]
+            application._worker_phase2("01/01/2026", segments)
+            try:
+                while True:
+                    application._queue.get_nowait()
+            except Exception:
+                pass
+
+        assert application._spotify_pending["title"] == "Podcast: Culto Manha"

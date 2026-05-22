@@ -60,6 +60,7 @@ _qt6_hidden = [
     "PyQt6.QtWebEngineCore",
     "PyQt6.QtWebEngineWidgets",
     "PyQt6.QtMultimedia",
+    "PyQt6.QtSvg",
     # player_subprocess_qt e importado condicionalmente via --player-mode-qt
     "player_subprocess_qt",
 ]

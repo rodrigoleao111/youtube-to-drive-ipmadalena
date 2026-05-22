@@ -50,6 +50,8 @@ class ProcessingPresenter:
     chapters_uc: GetChaptersUseCase
     channel_url: str
     download_dir: str
+    upload_enabled: bool = True
+    """Quando False, o passo de upload para o Drive é pulado."""
 
     # -----------------------------------------------------------------------
     # Fase 1 do fluxo: listagem
@@ -191,14 +193,19 @@ class ProcessingPresenter:
             on_progress=on_edit_progress,
         )
 
-        self.upload_uc.execute(
-            date_str,
-            audio_files,
-            cancel_event=cancel_event,
-            on_log=on_log,
-            on_status=on_status,
-            on_progress=on_upload_progress,
-            on_upload_stats=on_upload_stats,
-        )
+        if self.upload_enabled:
+            self.upload_uc.execute(
+                date_str,
+                audio_files,
+                cancel_event=cancel_event,
+                on_log=on_log,
+                on_status=on_status,
+                on_progress=on_upload_progress,
+                on_upload_stats=on_upload_stats,
+            )
+        else:
+            _noop = lambda *_a, **_kw: None
+            on_status and on_status("Upload para o Drive desabilitado — arquivos mantidos localmente.")
+            on_log and on_log("Upload para o Drive desabilitado nas configurações.")
 
         return [s["title"] for s in segments_data]

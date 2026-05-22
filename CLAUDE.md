@@ -41,7 +41,7 @@ youtube_to_drive/
 │
 ├── domain/                         ← núcleo (zero dependências externas)
 │   ├── entities.py                 Video, Segment, AudioFile, ProcessingResult,
-│   │                                EqBand, AudioEditConfig
+│   │                                EqBand, AudioEditConfig, PodcastEpisode
 │   ├── audio_presets.py            EQ_FREQS, EQ_PRESET_VOZ_MASCULINA, NOISE_INTENSITIES
 │   ├── ports.py                    IVideoSource, IAudioDownloader, IAudioEditor,
 │   │                                ICloudStorage, IHistoryRepository,
@@ -82,7 +82,7 @@ youtube_to_drive/
 ├── player_window_qt.py             launcher do player Qt (subprocess)
 ├── player_subprocess_qt.py         subprocesso do player YouTube (QWebEngine)
 │
-├── tests/                          suíte com 701 testes (pytest + unittest.mock)
+├── tests/                          suíte com 733 testes (pytest + unittest.mock)
 │
 ├── historico.json                  datas já processadas (gerado em runtime)
 ├── config.json                     canal/pasta Drive + audio_edit (gerado em runtime)
@@ -302,7 +302,7 @@ Módulo "raiz" do projeto: hospeda constantes, configuração OAuth, utilidades 
 - **Re-export:** `OperacaoCancelada` é importada de `domain.exceptions` (mesma classe; código legado que importa de `baixar_audio` continua funcionando).
 - **`GITHUB_REPO`:** `"rodrigoleao111/youtube-to-drive-ipmadalena"` — repo usado pelo worker de auto-update para consultar GitHub Releases.
 - **`VINHETAS_DIR`:** `BASE_DIR/assets/vinhetas/` — pasta interna do app onde as vinhetas selecionadas pelo usuário são copiadas. Sobrevive a renomeações da pasta original.
-- **`config_repo()`:** público (não mais `_config_repo`) — fábrica do `JsonConfigRepository` com defaults do projeto, incluindo `audio_edit` (config padrão do pipeline de edição). Usado pelo composition root para injetar o repo em use cases.
+- **`config_repo()`:** público (não mais `_config_repo`) — fábrica do `JsonConfigRepository` com defaults do projeto, incluindo `audio_edit` (config padrão do pipeline de edição), `upload_to_drive: True` (toggle de upload) e `spotify` (`show_id`, `title_prefix`, `default_tags`). Usado pelo composition root para injetar o repo em use cases.
 - **`audio_edit_persist_paths(d)` / `audio_edit_resolve_paths(d)`:** convertem entre formato persistido (basename) e runtime (path absoluto em `VINHETAS_DIR`). Chamados respectivamente no save da UI e no load do `EditAudioUseCase`. Configs antigas com paths absolutos continuam funcionando (resolve só age em paths não-absolutos).
 
 ## `infrastructure/youtube/`
@@ -318,6 +318,7 @@ Módulo "raiz" do projeto: hospeda constantes, configuração OAuth, utilidades 
 - **`YtDlpAudioDownloader.download`:** um subprocess por segmento. URLs por ID (`youtube.com/watch?v=<id>`); player_client `ios,android,web` (`tv_embedded` foi descontinuado e causa "Only images are available for download" em lives). Trecho via `--download-sections "*HH:MM:SS-HH:MM:SS"`. **Captura o caminho do MP3 da linha `[ExtractAudio] Destination:`** do stdout — não usa glob para evitar contaminação por arquivos pré-existentes em `output_dir`. `AudioFile.video_id` é preservado do `Segment` original.
 - **Encoding do subprocess yt-dlp standalone:** `PYTHONUTF8=1` é IGNORADO pelo standalone (PyInstaller próprio). Por isso usamos `--encoding utf-8` direto nos comandos yt-dlp.
 - **Progresso normalizado:** linha `[download] X%` → `(idx + X/100) / total`; linha `[ExtractAudio]` → `(idx+1)/total`.
+- **`fetch_video_description(video_id, cancel_event=None) -> str`:** busca a descrição do vídeo via `yt-dlp --print %(description)s --skip-download`. Retorna string vazia em caso de qualquer falha (best-effort). Usado pelo `_SpotifyPrePublishDialog` para pré-preencher a descrição do episódio de forma assíncrona.
 
 ## `infrastructure/drive/gdrive_storage.py`
 
@@ -363,6 +364,7 @@ Módulo "raiz" do projeto: hospeda constantes, configuração OAuth, utilidades 
 - **`ProcessingPresenter`** (dataclass) compõe os três use cases em duas operações de alto nível:
   - `list_videos(date_str, *, cancel_event, on_log, on_status) -> List[dict]` — fase 1.
   - `process_segments(date_str, segments_data, *, cancel_event, on_log, on_status, on_download_progress, on_upload_progress, on_upload_stats) -> List[str]` — fase 2.
+- Campo `upload_enabled: bool = True` — quando `False`, o passo de upload (`UploadAudioUseCase`) é pulado e o áudio fica apenas local. Configurado pelo composition root a partir de `upload_to_drive` no `config.json`.
 - Conversão `Video → dict` (saída) e `dict → Segment` (entrada) acontece no presenter, isolando a View dos tipos de domínio.
 - `VideoNaoEncontrado` é convertido para `RuntimeError` (mantém contrato histórico de `baixar_audio.list_videos()`).
 - Não conhece Tk/customtkinter — recebe os use cases via DI e expõe callbacks que a View aciona.
@@ -393,17 +395,20 @@ Módulo "raiz" do projeto: hospeda constantes, configuração OAuth, utilidades 
 - **Banner de autorização:** `QFrame` condicional no topo — visível quando Drive não autorizado.
 - **`_set_status(text, state)`:** atualiza `status_label` e `_status_dot`; estados: `idle` (cinza), `running` (verde), `done` (verde), `error` (vermelho).
 - **Barras de progresso (3 uniformes):** `download_bar`, `convert_bar` (mostra progresso REAL da edição de áudio quando habilitada; anima até 90% no fallback de yt-dlp), `progress_bar` (upload). Agrupadas em `_progress_frame`.
-- **Página Configurações (`_build_config_page`):** título + subtítulo + **`QTabWidget`** com 2 abas:
-  - **Geral** (`_build_general_tab`): Drive auth, canal YouTube, pasta Drive.
+- **Página Configurações (`_build_config_page`):** título + subtítulo + **`QTabWidget`** com 4 abas (ícones SVG reais via `_logo_icon()`):
+  - **Drive** (`_build_drive_tab`): toggle "Fazer upload para o Drive" (primeiro, controla todos os outros), auth Google Drive, pasta Drive, manter arquivos, abrir log. Quando o toggle está desmarcado, os cards dependentes são desabilitados e o upload é pulado pelo presenter.
+  - **YouTube** (`_build_youtube_tab`): canal YouTube, capítulo automático.
+  - **Spotify** (`_build_spotify_tab`): Show ID, prefixo de título, tags padrão.
   - **Edição de áudio** (instância de `_AudioSettingsTab`): 4 cards funcionais (vinhetas, fade, EQ, redução de ruído) + card de teste de configuração.
-  - Save unificado no rodapé (`_cfg_save`): persiste AMBAS as abas em uma única gravação — evita o footgun de o usuário clicar Save com a aba errada visível e perder mudanças.
+  - Save unificado no rodapé (`_cfg_save`): persiste TODAS as abas em uma única gravação — evita o footgun de o usuário clicar Save com a aba errada visível e perder mudanças.
 - **`_AudioSettingsTab(QWidget)`:** widget self-contained com a sub-aba de edição de áudio. Lê `audio_edit` do `config.json` no construtor (basenames são expandidos para abs paths via `audio_edit_resolve_paths`). Expõe `read_config_from_ui()` para o save unificado da página principal.
 - **`_AudioPlayerDialog(QDialog)`:** popup modal de player de áudio (usado pelo botão "Tocar" do card de teste). Tem slider de posição draggable, botões `⏪ -10s` / `▶|⏸` / `+10s ⏩`, display `MM:SS / MM:SS`. Auto-play ao abrir; para o `QMediaPlayer` no `closeEvent`. Flag `_slider_dragging` evita conflito entre player tick e arrasto do usuário.
 - **Dispatcher cross-thread (`_AudioPreviewDispatcher(QObject)`):** ponte thread→GUI para o worker do preview de teste. Razão: `QTimer.singleShot(0, callable)` chamado de uma `threading.Thread` Python NÃO dispara — não há event loop nessa thread. Solução: sinais `pyqtSignal` num `QObject` criado na thread principal; Qt entrega via `QueuedConnection` automático. Sinais: `log_received(str)`, `progress_changed(float)`, `completed(str)`, `cancelled()`, `failed(str)`.
 - **`_build_presenter()`:** delega ao `composition_root.build_processing_presenter()`. Reconstrói a cada operação para refletir mudanças nas configurações.
 - **`_worker()` (Fase 1) e `_worker_phase2()` (Fase 2):** delegam ao presenter; convertem `OperacaoCancelada` em `("cancelled", None)`, exceções genéricas em `("error", str(e))`.
 - **`_worker_preflight`:** chama `baixar_audio.check_internet()`, `check_disk_space()`, `cleanup_downloads()`, `load_history()` diretamente (utilidades, não use cases).
-- **`_on_done()`:** salva histórico (`baixar_audio.save_history`) + notificação via `self._notifier.notify(...)` (instância de `PlyerNotifier`).
+- **`_on_done()`:** salva histórico (`baixar_audio.save_history`) + notificação via `self._notifier.notify(...)` (instância de `PlyerNotifier`). Se `_spotify_pending` for não-None, agenda `_show_spotify_predialog` via `QTimer.singleShot(800, ...)` e zera o campo.
+- **Spotify publishing:** `_worker_phase2` popula `_spotify_pending` (dict com `show_id`, `video_id`, `title`, `description`, `date_str`, `tags`) quando `show_id` está configurado. A descrição é buscada **sincronamente** no próprio thread worker via `fetch_video_description(video_id)` — assim já está disponível quando o diálogo abre. `_show_spotify_predialog` localiza o MP3 mais recente em `DOWNLOAD_DIR` e abre `_SpotifyPrePublishDialog`. `_SpotifyPrePublishDialog`: modal com campos editáveis de título, descrição (pré-preenchida) e tags; ao confirmar, armazena a janela em `parent_app._spotify_window` para evitar GC e abre `_SpotifyPublishWindow`. `_SpotifyPublishWindow(QMainWindow)`: WebView apontando para `https://podcasters.spotify.com/pod/show/{show_id}/episodes/new`; após load injeta `_SPOTIFY_FILL_JS` com `window._spotifyTitle` e `window._spotifyDescription`. `_SpotifyPage` (inner class lazy): sobrescreve `chooseFiles()` detectando MIME `audio/*` vs `image/*` para retornar o arquivo correto automaticamente. **Nota:** `QApplication.setAttribute(AA_ShareOpenGLContexts)` deve ser chamado antes de `QApplication(sys.argv)` para que o `QWebEngineView` funcione no processo principal.
 - **Mensagens da fila:** `log`, `status`, `progress`, `download_progress`, `edit_progress`, `upload_stats`, `done`, `cancelled`, `error`, `preflight_error`, `history_warning`, `auth_done`, `auth_error`, `select_videos`, `open_player`.
 - **Modo subprocesso do player (frozen exe):** `app.py` detecta `--player-mode-qt` antes de qualquer import Qt; importa `player_subprocess_qt` e chama `main()`, encerrando em seguida — permite que `IPMadalena.exe --player-mode-qt` rode o player sem inicializar a GUI principal.
 
@@ -441,23 +446,23 @@ Cultos ao vivo podem ser publicados no YouTube com a data do dia seguinte ao eve
 tests/
 ├── conftest.py                ← sys.path + fixture shared_app (sessão)
 ├── test_domain.py             ← 87 testes puros do domínio
-├── test_ytdlp_source.py       ← 41 testes da infra YouTube (subprocess mockado)
+├── test_ytdlp_source.py       ← 46 testes da infra YouTube (subprocess mockado)
 ├── test_ffmpeg_editor.py      ← 43 testes do FfmpegAudioEditor (subprocess mockado)
 ├── test_gdrive_storage.py     ← 38 testes do adaptador Drive (HTTP/Drive API mockados)
 ├── test_persistence.py        ← 33 testes dos repositórios JSON (I/O real em tmp_path)
 ├── test_plyer_notifier.py     ← 10 testes do PlyerNotifier (plyer mockado)
 ├── test_use_cases.py          ← 50 testes dos use cases (ports mockados)
-├── test_presenter.py          ← 30 testes do ProcessingPresenter (use cases mockados)
+├── test_presenter.py          ← 34 testes do ProcessingPresenter (use cases mockados)
 ├── test_audio_test_presenter.py ← 17 testes do AudioTestPresenter
-├── test_composition_root.py   ← 22 testes do composition root (DI/wiring)
+├── test_composition_root.py   ← 25 testes do composition root (DI/wiring)
 ├── test_baixar_audio.py       ← 38 testes de utilidades + auth wrappers + update_ytdlp
-├── test_app.py                ← 210 testes de integração da GUI
+├── test_app.py                ← 232 testes de integração da GUI
 ├── test_github_updater.py     ← 19 testes do módulo de auto-update (HTTP mockado)
 ├── test_player_window.py      ← 34 testes do PlayerWindow
 └── test_player_window_qt.py   ← 29 testes do PlayerWindowQt
 ```
 
-**Total: 701 testes.**
+**Total: 733 testes.**
 
 **Como rodar:**
 ```bash

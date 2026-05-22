@@ -425,3 +425,79 @@ class TestProcessingPresenterGetChapters:
         log = MagicMock()
         p.get_chapters("abc123", on_log=log)
         assert chapters_uc.execute.call_args.kwargs["on_log"] is log
+
+
+# ===========================================================================
+# upload_enabled=False — pula o upload
+# ===========================================================================
+
+class TestPresenterUploadDesabilitado:
+    """
+    Quando upload_enabled=False, o UploadAudioUseCase NÃO deve ser chamado.
+    """
+
+    def _seg(self):
+        return {"id": "abc", "title": "Culto", "start": None, "end": None}
+
+    def test_upload_nao_chamado_quando_upload_disabled(self):
+        download_uc = MagicMock()
+        download_uc.execute.return_value = [_make_audio()]
+        edit_uc = MagicMock()
+        edit_uc.execute.side_effect = lambda af, **kw: af
+        upload_uc = MagicMock()
+
+        p = ProcessingPresenter(
+            list_videos_uc=MagicMock(),
+            download_uc=download_uc,
+            edit_uc=edit_uc,
+            upload_uc=upload_uc,
+            chapters_uc=MagicMock(),
+            channel_url="https://canal",
+            download_dir="/tmp",
+            upload_enabled=False,
+        )
+        p.process_segments("19/05/2026", [self._seg()])
+        upload_uc.execute.assert_not_called()
+
+    def test_download_ainda_chamado_quando_upload_disabled(self):
+        download_uc = MagicMock()
+        download_uc.execute.return_value = [_make_audio()]
+        edit_uc = MagicMock()
+        edit_uc.execute.side_effect = lambda af, **kw: af
+
+        p = ProcessingPresenter(
+            list_videos_uc=MagicMock(),
+            download_uc=download_uc,
+            edit_uc=edit_uc,
+            upload_uc=MagicMock(),
+            chapters_uc=MagicMock(),
+            channel_url="https://canal",
+            download_dir="/tmp",
+            upload_enabled=False,
+        )
+        p.process_segments("19/05/2026", [self._seg()])
+        download_uc.execute.assert_called_once()
+
+    def test_upload_enabled_padrao_e_true(self):
+        p = _make_presenter()
+        assert p.upload_enabled is True
+
+    def test_on_status_informativo_quando_upload_disabled(self):
+        download_uc = MagicMock()
+        download_uc.execute.return_value = [_make_audio()]
+        edit_uc = MagicMock()
+        edit_uc.execute.side_effect = lambda af, **kw: af
+
+        statuses = []
+        p = ProcessingPresenter(
+            list_videos_uc=MagicMock(),
+            download_uc=download_uc,
+            edit_uc=edit_uc,
+            upload_uc=MagicMock(),
+            chapters_uc=MagicMock(),
+            channel_url="https://canal",
+            download_dir="/tmp",
+            upload_enabled=False,
+        )
+        p.process_segments("19/05/2026", [self._seg()], on_status=statuses.append)
+        assert any("desabilitado" in s.lower() for s in statuses)

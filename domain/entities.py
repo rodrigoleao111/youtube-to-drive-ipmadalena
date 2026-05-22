@@ -264,3 +264,36 @@ class AudioEditConfig:
             volume_norm_enabled       = bool(d.get("volume_norm_enabled", False)),
             volume_norm_lufs          = float(d.get("volume_norm_lufs", -16.0)),
         )
+
+
+# ===========================================================================
+# Publicação de podcast (Spotify for Podcasters)
+# ===========================================================================
+
+@dataclass(frozen=True)
+class PodcastEpisode:
+    """
+    Metadados de um episódio a ser publicado no Spotify for Podcasters.
+
+    Construído em ``_worker_phase2`` após o processamento bem-sucedido de um
+    segmento. A publicação em si é feita pelo usuário no WebView — o app apenas
+    pré-preenche o formulário.
+    """
+
+    video_id: str
+    """ID do vídeo YouTube de origem (ex.: 'dQw4w9WgXcQ')."""
+
+    title: str
+    """Título do episódio (pode ser prefixado pela config Spotify)."""
+
+    description: str
+    """Descrição do episódio — inicialmente vazia; preenchida de forma assíncrona."""
+
+    audio_path: str
+    """Caminho absoluto do arquivo MP3 (vazio se keep_files=False e já apagado)."""
+
+    tags: Tuple[str, ...] = field(default_factory=tuple)
+    """Tags / labels a aplicar no episódio (vindas da config Spotify)."""
+
+    date_str: str = ""
+    """Data de referência do culto no formato DD/MM/AAAA."""

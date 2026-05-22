@@ -23,7 +23,7 @@ import threading
 import urllib.request
 from datetime import datetime
 
-from PyQt6.QtCore import QDate, QObject, QTimer, Qt, pyqtSignal
+from PyQt6.QtCore import QDate, QObject, QSize, QTimer, Qt, pyqtSignal
 from PyQt6.QtGui import QIcon, QPixmap
 from PyQt6.QtWidgets import (
     QApplication, QButtonGroup, QCheckBox, QComboBox, QDialog, QDoubleSpinBox,
@@ -630,6 +630,79 @@ class _CalendarDialog(QDialog):
 
 
 # ---------------------------------------------------------------------------
+# Logos SVG para ícones das abas de Configurações
+# ---------------------------------------------------------------------------
+
+_LOGO_SVG: dict[str, bytes] = {
+    "drive": (
+        b'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 87.3 78">'
+        b'<path d="m6.6 66.85 3.85 6.65c.8 1.4 1.95 2.5 3.3 3.3'
+        b'l13.75-23.8h-27.5c0 1.55.4 3.1 1.2 4.5z" fill="#0066da"/>'
+        b'<path d="m43.65 25-13.75-23.8c-1.35.8-2.5 1.9-3.3 3.3'
+        b'l-25.4 44a9.06 9.06 0 0 0-1.2 4.5h27.5z" fill="#00ac47"/>'
+        b'<path d="m73.55 76.8c1.35-.8 2.5-1.9 3.3-3.3l1.6-2.75'
+        b'7.65-13.25c.8-1.4 1.2-2.95 1.2-4.5h-27.502l5.852 11.5z"'
+        b' fill="#ea4335"/>'
+        b'<path d="m43.65 25 13.75-23.8c-1.35-.8-2.9-1.2-4.5-1.2'
+        b'h-18.5c-1.6 0-3.15.45-4.5 1.2z" fill="#00832d"/>'
+        b'<path d="m59.8 53h-32.3l-13.75 23.8c1.35.8 2.9 1.2 4.5 1.2'
+        b'h50.8c1.6 0 3.15-.45 4.5-1.2z" fill="#2684fc"/>'
+        b'<path d="m73.4 26.5-12.7-22c-.8-1.4-1.95-2.5-3.3-3.3'
+        b'l-13.75 23.8 16.15 28h27.45c0-1.55-.4-3.1-1.2-4.5z"'
+        b' fill="#ffba00"/></svg>'
+    ),
+    "youtube": (
+        b'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">'
+        b'<path d="M23.495 6.205a3.007 3.007 0 0 0-2.088-2.088'
+        b'c-1.87-.501-9.396-.501-9.396-.501s-7.507-.01-9.396.501'
+        b'A3.007 3.007 0 0 0 .527 6.205a31.247 31.247 0 0 0-.522 5.805'
+        b'a31.247 31.247 0 0 0 .522 5.783 3.007 3.007 0 0 0 2.088 2.088'
+        b'c1.868.502 9.396.502 9.396.502s7.506 0 9.396-.502'
+        b'a3.007 3.007 0 0 0 2.088-2.088 31.247 31.247 0 0 0 .5-5.783'
+        b'a31.247 31.247 0 0 0-.5-5.805z'
+        b'M9.609 15.601V8.408l6.264 3.602z" fill="#FF0000"/></svg>'
+    ),
+    "spotify": (
+        b'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">'
+        b'<path d="M12 0C5.4 0 0 5.4 0 12s5.4 12 12 12 12-5.4 12-12'
+        b'S18.66 0 12 0zm5.521 17.34c-.24.359-.66.48-1.021.24'
+        b'-2.82-1.74-6.36-2.101-10.561-1.141-.418.122-.779-.179'
+        b'-.899-.539-.12-.421.18-.78.54-.9 4.56-1.021 8.52-.6'
+        b' 11.64 1.32.42.18.479.659.301 1.02z'
+        b'm1.44-3.3c-.301.42-.841.6-1.262.3'
+        b'-3.239-1.98-8.159-2.58-11.939-1.38-.479.12-1.02-.12'
+        b'-1.14-.6-.12-.48.12-1.021.6-1.141'
+        b'C9.6 9.9 15 10.561 18.72 12.84c.361.181.54.78.241 1.2z'
+        b'm.12-3.36C15.24 8.4 8.82 8.16 5.16 9.301'
+        b'c-.6.179-1.2-.181-1.38-.721-.18-.601.18-1.2.72-1.381'
+        b' 4.26-1.26 11.28-1.02 15.721 1.621'
+        b'.539.3.719 1.02.419 1.56-.299.421-1.02.599-1.559.3z"'
+        b' fill="#1DB954"/></svg>'
+    ),
+}
+
+
+def _logo_icon(name: str, size: int = 18) -> "QIcon":
+    """Renderiza SVG de logo de serviço como QIcon via QSvgRenderer.
+
+    Fallback silencioso para QIcon() vazio se PyQt6.QtSvg não estiver
+    disponível (improvável, mas protege o runtime em ambientes mínimos).
+    """
+    from PyQt6.QtGui import QIcon, QPixmap, QPainter
+    try:
+        from PyQt6.QtSvg import QSvgRenderer
+        renderer = QSvgRenderer(bytearray(_LOGO_SVG[name]))
+        pixmap = QPixmap(size, size)
+        pixmap.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(pixmap)
+        renderer.render(painter)
+        painter.end()
+        return QIcon(pixmap)
+    except Exception:
+        return QIcon()
+
+
+# ---------------------------------------------------------------------------
 # Helpers de thumbnail — nível de módulo para facilitar mock nos testes
 # ---------------------------------------------------------------------------
 
@@ -796,6 +869,8 @@ class App(QMainWindow):
         self._status_text_color = "gray"   # exposto para testes
         self._cfg_auth_running  = False
         self._dark_mode         = True     # tema inicial
+        # Spotify publishing — preenchido em _worker_phase2, consumido em _on_done
+        self._spotify_pending: dict | None = None
 
         from composition_root import build_notifier
         self._notifier = build_notifier()
@@ -1116,15 +1191,35 @@ class App(QMainWindow):
         v.setContentsMargins(0, 0, 0, 0)
         v.setSpacing(0)
 
-        # Thumbnail (16:9 — fallback emoji)
-        thumb = QLabel("🎵")
+        # Thumbnail (16:9 — imagem real ou fallback emoji)
+        thumb = QLabel()
         thumb.setAlignment(Qt.AlignmentFlag.AlignCenter)
         thumb.setFixedHeight(118)
-        bg = P.D_THUMB if self._dark_mode else P.L_THUMB
-        thumb.setStyleSheet(
-            f"font-size: 36px; background: {bg};"
-            f"border-top-left-radius: 8px; border-top-right-radius: 8px;"
-        )
+        thumb.setFixedWidth(220)
+
+        _thumb_path = os.path.splitext(fpath)[0] + ".jpg"
+        if os.path.isfile(_thumb_path):
+            from PyQt6.QtGui import QPixmap
+            _pix = QPixmap(_thumb_path).scaled(
+                220, 118,
+                Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            # Crop centralizado
+            _x = (_pix.width() - 220) // 2
+            _y = (_pix.height() - 118) // 2
+            thumb.setPixmap(_pix.copy(_x, _y, 220, 118))
+            thumb.setStyleSheet(
+                "border-top-left-radius: 8px; border-top-right-radius: 8px;"
+                " background: transparent;"
+            )
+        else:
+            thumb.setText("🎵")
+            bg = P.D_THUMB if self._dark_mode else P.L_THUMB
+            thumb.setStyleSheet(
+                f"font-size: 36px; background: {bg};"
+                f"border-top-left-radius: 8px; border-top-right-radius: 8px;"
+            )
         v.addWidget(thumb)
 
         # Body
@@ -1179,12 +1274,23 @@ class App(QMainWindow):
 
         if not uploaded:
             btn_upload = QPushButton()
-            btn_upload.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_ArrowUp))
+            btn_upload.setIcon(_logo_icon("drive", 16))
             btn_upload.setObjectName("gray_btn")
             btn_upload.setFixedWidth(32)
             btn_upload.setToolTip("Enviar ao Drive")
             btn_upload.clicked.connect(lambda: self._reupload_file(_fp, btn_upload))
             acts.addWidget(btn_upload)
+
+        # Botão Spotify — aparece somente quando show_id está configurado
+        _sp_cfg = baixar_audio.load_config().get("spotify", {})
+        if _sp_cfg.get("show_id", "").strip():
+            btn_spotify = QPushButton()
+            btn_spotify.setIcon(_logo_icon("spotify", 16))
+            btn_spotify.setObjectName("gray_btn")
+            btn_spotify.setFixedWidth(32)
+            btn_spotify.setToolTip("Publicar no Spotify")
+            btn_spotify.clicked.connect(lambda: self._spotify_from_local(_fp))
+            acts.addWidget(btn_spotify)
 
         btn_del = QPushButton()
         btn_del.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_TrashIcon))
@@ -1264,10 +1370,57 @@ class App(QMainWindow):
                 )
                 QTimer.singleShot(0, lambda: (
                     btn.setEnabled(True),
-                    btn.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_ArrowUp)),
+                    btn.setIcon(_logo_icon("drive", 16)),
                 ))
 
         threading.Thread(target=worker, daemon=True).start()
+
+    def _spotify_from_local(self, fpath: str):
+        """
+        Abre o diálogo de pré-publicação no Spotify para um arquivo local
+        escolhido diretamente na tela Início (sem passar pelo pipeline de download).
+
+        O ``audio_path`` é passado direto — não é necessário o glob de DOWNLOAD_DIR.
+        """
+        cfg    = baixar_audio.load_config()
+        sp_cfg = cfg.get("spotify", {})
+        show_id = sp_cfg.get("show_id", "").strip()
+
+        if not show_id:
+            QMessageBox.information(
+                self,
+                "Spotify não configurado",
+                "Configure o Show ID do Spotify em Configurações → Spotify.",
+            )
+            return
+
+        title_text = os.path.splitext(os.path.basename(fpath))[0]
+        prefix     = sp_cfg.get("title_prefix", "").strip()
+        ep_title   = f"{prefix} {title_text}".strip() if prefix else title_text
+
+        try:
+            mtime    = datetime.fromtimestamp(os.path.getmtime(fpath))
+            date_str = mtime.strftime("%d/%m/%Y")
+        except Exception:
+            date_str = ""
+
+        cover_image_path = ""
+        _c = os.path.splitext(fpath)[0] + ".jpg"
+        if os.path.isfile(_c):
+            cover_image_path = _c
+
+        dlg = _SpotifyPrePublishDialog(
+            show_id          = show_id,
+            video_id         = "",
+            title            = ep_title,
+            description      = "",
+            date_str         = date_str,
+            tags             = sp_cfg.get("default_tags", ""),
+            audio_path       = fpath,
+            cover_image_path = cover_image_path,
+            parent           = self,
+        )
+        dlg.exec()
 
     # -----------------------------------------------------------------------
     # Página 1 — Processar
@@ -1538,7 +1691,7 @@ class App(QMainWindow):
         return card
 
     # -----------------------------------------------------------------------
-    # Página 2 — Configurações (inline, com sub-abas Geral / Edição de áudio)
+    # Página 2 — Configurações (Drive / YouTube / Spotify / Edição de áudio)
     # -----------------------------------------------------------------------
     def _build_config_page(self) -> QWidget:
         PAD = 26
@@ -1568,12 +1721,18 @@ class App(QMainWindow):
 
         # ── Sub-abas ────────────────────────────────────────────────────────
         self._cfg_tabs = QTabWidget()
-        self._cfg_tabs.addTab(self._build_general_tab(), "⚙  Geral")
+        self._cfg_tabs.setIconSize(QSize(18, 18))
+        self._cfg_tabs.addTab(self._build_drive_tab(),   "  Drive")
+        self._cfg_tabs.setTabIcon(0, _logo_icon("drive"))
+        self._cfg_tabs.addTab(self._build_youtube_tab(), "  YouTube")
+        self._cfg_tabs.setTabIcon(1, _logo_icon("youtube"))
+        self._cfg_tabs.addTab(self._build_spotify_tab(), "  Spotify")
+        self._cfg_tabs.setTabIcon(2, _logo_icon("spotify"))
         self._audio_tab = _AudioSettingsTab(self)
-        self._cfg_tabs.addTab(self._audio_tab, "🎚  Edição de áudio")
+        self._cfg_tabs.addTab(self._audio_tab,           "🎚  Edição de áudio")
         layout.addWidget(self._cfg_tabs, stretch=1)
 
-        # ── Save unificado (persiste AMBAS as abas em uma chamada) ──────────
+        # ── Save unificado (persiste todas as abas em uma chamada) ──────────
         btn_row = QHBoxLayout()
         self._cfg_feedback_label = QLabel("")
         self._cfg_feedback_label.setStyleSheet(
@@ -1589,8 +1748,9 @@ class App(QMainWindow):
 
         return page
 
-    def _build_general_tab(self) -> QWidget:
-        """Sub-aba 'Geral' — autorização Drive, canal YouTube e pasta Drive."""
+    # ------------------------------------------------------------------
+    def _build_drive_tab(self) -> QWidget:
+        """Sub-aba 'Drive' — autorização, pasta, manter arquivos, log."""
         tab = QWidget()
         outer = QVBoxLayout(tab)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -1605,6 +1765,38 @@ class App(QMainWindow):
         layout = QVBoxLayout(container)
         layout.setContentsMargins(4, 14, 4, 14)
         layout.setSpacing(10)
+
+        cfg = baixar_audio.load_config()
+        _upload_enabled = bool(cfg.get("upload_to_drive", True))
+
+        # ── Card: Fazer upload para o Drive ─────────────────────────────────
+        # (primeiro na aba — controla a disponibilidade dos demais cards)
+        up_card = QFrame()
+        up_card.setObjectName("cfg_card")
+        upc = QVBoxLayout(up_card)
+        upc.setContentsMargins(20, 16, 20, 16)
+        upc.setSpacing(8)
+
+        tr_up = QHBoxLayout()
+        tr_up.addWidget(self._icon_label("☁️", 22))
+        lbl_up = QLabel("Upload para o Google Drive")
+        lbl_up.setStyleSheet("font-size: 14px; font-weight: bold;")
+        tr_up.addWidget(lbl_up)
+        tr_up.addStretch()
+        upc.addLayout(tr_up)
+
+        up_hint = QLabel(
+            "Quando desabilitado, o processamento salva o áudio apenas localmente "
+            "(visível na tela Início) e não faz upload para o Drive."
+        )
+        up_hint.setStyleSheet(f"color: {P.HINT}; font-size: 11px;")
+        up_hint.setWordWrap(True)
+        upc.addWidget(up_hint)
+
+        self._cfg_upload_to_drive_check = QCheckBox("Fazer upload para o Google Drive")
+        self._cfg_upload_to_drive_check.setChecked(_upload_enabled)
+        upc.addWidget(self._cfg_upload_to_drive_check)
+        layout.addWidget(up_card)
 
         # ── Card: Autorização Google Drive ──────────────────────────────────
         auth_card = QFrame()
@@ -1621,9 +1813,7 @@ class App(QMainWindow):
         tr.addStretch()
         ac.addLayout(tr)
 
-        hint = QLabel(
-            "Permite que o app envie arquivos para o seu Google Drive."
-        )
+        hint = QLabel("Permite que o app envie arquivos para o seu Google Drive.")
         hint.setStyleSheet(f"color: {P.HINT}; font-size: 11px;")
         hint.setWordWrap(True)
         ac.addWidget(hint)
@@ -1638,30 +1828,6 @@ class App(QMainWindow):
         ac.addLayout(sr)
         layout.addWidget(auth_card)
 
-        # ── Card: Canal do YouTube ──────────────────────────────────────────
-        yt_card = QFrame()
-        yt_card.setObjectName("cfg_card")
-        yc = QVBoxLayout(yt_card)
-        yc.setContentsMargins(20, 16, 20, 16)
-        yc.setSpacing(8)
-
-        tr2 = QHBoxLayout()
-        tr2.addWidget(self._icon_label("📺", 22))
-        lbl2 = QLabel("Canal do YouTube")
-        lbl2.setStyleSheet("font-size: 14px; font-weight: bold;")
-        tr2.addWidget(lbl2)
-        tr2.addStretch()
-        yc.addLayout(tr2)
-
-        cfg = baixar_audio.load_config()
-        self._cfg_channel_entry = QLineEdit(cfg["channel_url"])
-        yc.addWidget(self._cfg_channel_entry)
-
-        yt_hint = QLabel("Ex: https://www.youtube.com/@SeuCanal/streams")
-        yt_hint.setStyleSheet(f"color: {P.HINT}; font-size: 11px;")
-        yc.addWidget(yt_hint)
-        layout.addWidget(yt_card)
-
         # ── Card: Pasta do Google Drive ─────────────────────────────────────
         dr_card = QFrame()
         dr_card.setObjectName("cfg_card")
@@ -1669,13 +1835,13 @@ class App(QMainWindow):
         dc.setContentsMargins(20, 16, 20, 16)
         dc.setSpacing(8)
 
-        tr3 = QHBoxLayout()
-        tr3.addWidget(self._icon_label("📁", 22))
-        lbl3 = QLabel("Pasta do Google Drive")
-        lbl3.setStyleSheet("font-size: 14px; font-weight: bold;")
-        tr3.addWidget(lbl3)
-        tr3.addStretch()
-        dc.addLayout(tr3)
+        tr2 = QHBoxLayout()
+        tr2.addWidget(self._icon_label("📁", 22))
+        lbl2 = QLabel("Pasta do Google Drive")
+        lbl2.setStyleSheet("font-size: 14px; font-weight: bold;")
+        tr2.addWidget(lbl2)
+        tr2.addStretch()
+        dc.addLayout(tr2)
 
         self._cfg_folder_entry = QLineEdit(cfg["drive_folder_id"])
         dc.addWidget(self._cfg_folder_entry)
@@ -1687,35 +1853,6 @@ class App(QMainWindow):
         dc.addWidget(dr_hint)
         layout.addWidget(dr_card)
 
-        # ── Card: Capítulo automático ───────────────────────────────────────
-        ch_card = QFrame()
-        ch_card.setObjectName("cfg_card")
-        cc = QVBoxLayout(ch_card)
-        cc.setContentsMargins(20, 16, 20, 16)
-        cc.setSpacing(8)
-
-        tr4 = QHBoxLayout()
-        tr4.addWidget(self._icon_label("📑", 22))
-        lbl4 = QLabel("Capítulo automático")
-        lbl4.setStyleSheet("font-size: 14px; font-weight: bold;")
-        tr4.addWidget(lbl4)
-        tr4.addStretch()
-        cc.addLayout(tr4)
-
-        ch_hint = QLabel(
-            "Nome (ou parte do nome) do capítulo a baixar automaticamente. "
-            "Deixe em branco para sempre abrir a seleção manual."
-        )
-        ch_hint.setStyleSheet(f"color: {P.HINT}; font-size: 11px;")
-        ch_hint.setWordWrap(True)
-        cc.addWidget(ch_hint)
-
-        self._cfg_chapter_entry = QLineEdit(cfg.get("chapter_name", ""))
-        self._cfg_chapter_entry.setPlaceholderText("Ex: Sermão, Culto da manhã...")
-        cc.addWidget(self._cfg_chapter_entry)
-
-        layout.addWidget(ch_card)
-
         # ── Card: Manter arquivos no dispositivo ────────────────────────────
         kf_card = QFrame()
         kf_card.setObjectName("cfg_card")
@@ -1723,13 +1860,13 @@ class App(QMainWindow):
         kfc.setContentsMargins(20, 16, 20, 16)
         kfc.setSpacing(8)
 
-        tr5 = QHBoxLayout()
-        tr5.addWidget(self._icon_label("💾", 22))
-        lbl5 = QLabel("Manter arquivos no dispositivo")
-        lbl5.setStyleSheet("font-size: 14px; font-weight: bold;")
-        tr5.addWidget(lbl5)
-        tr5.addStretch()
-        kfc.addLayout(tr5)
+        tr3 = QHBoxLayout()
+        tr3.addWidget(self._icon_label("💾", 22))
+        lbl3 = QLabel("Manter arquivos no dispositivo")
+        lbl3.setStyleSheet("font-size: 14px; font-weight: bold;")
+        tr3.addWidget(lbl3)
+        tr3.addStretch()
+        kfc.addLayout(tr3)
 
         kf_hint = QLabel(
             "Se habilitado, os arquivos de áudio processados são mantidos no "
@@ -1762,6 +1899,214 @@ class App(QMainWindow):
 
         layout.addLayout(footer)
 
+        scroll.setWidget(container)
+        outer.addWidget(scroll)
+
+        # ── Liga o toggle para habilitar / desabilitar cards dependentes ────
+        _drive_dependent_cards = [auth_card, dr_card, kf_card]
+
+        def _on_upload_toggle(checked: bool):
+            from PyQt6.QtWidgets import QGraphicsOpacityEffect
+            for card in _drive_dependent_cards:
+                card.setEnabled(checked)
+                effect = card.graphicsEffect()
+                if not isinstance(effect, QGraphicsOpacityEffect):
+                    effect = QGraphicsOpacityEffect(card)
+                    card.setGraphicsEffect(effect)
+                effect.setOpacity(1.0 if checked else 0.35)
+
+        self._cfg_upload_to_drive_check.checkStateChanged.connect(
+            lambda state: _on_upload_toggle(
+                state == Qt.CheckState.Checked
+            )
+        )
+        _on_upload_toggle(_upload_enabled)  # estado inicial
+
+        return tab
+
+    # ------------------------------------------------------------------
+    def _build_youtube_tab(self) -> QWidget:
+        """Sub-aba 'YouTube' — canal e capítulo automático."""
+        tab = QWidget()
+        outer = QVBoxLayout(tab)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+
+        container = QWidget()
+        layout = QVBoxLayout(container)
+        layout.setContentsMargins(4, 14, 4, 14)
+        layout.setSpacing(10)
+
+        cfg = baixar_audio.load_config()
+
+        # ── Card: Canal do YouTube ──────────────────────────────────────────
+        yt_card = QFrame()
+        yt_card.setObjectName("cfg_card")
+        yc = QVBoxLayout(yt_card)
+        yc.setContentsMargins(20, 16, 20, 16)
+        yc.setSpacing(8)
+
+        tr = QHBoxLayout()
+        tr.addWidget(self._icon_label("📺", 22))
+        lbl = QLabel("Canal do YouTube")
+        lbl.setStyleSheet("font-size: 14px; font-weight: bold;")
+        tr.addWidget(lbl)
+        tr.addStretch()
+        yc.addLayout(tr)
+
+        self._cfg_channel_entry = QLineEdit(cfg["channel_url"])
+        yc.addWidget(self._cfg_channel_entry)
+
+        yt_hint = QLabel("Ex: https://www.youtube.com/@SeuCanal/streams")
+        yt_hint.setStyleSheet(f"color: {P.HINT}; font-size: 11px;")
+        yc.addWidget(yt_hint)
+        layout.addWidget(yt_card)
+
+        # ── Card: Capítulo automático ───────────────────────────────────────
+        ch_card = QFrame()
+        ch_card.setObjectName("cfg_card")
+        cc = QVBoxLayout(ch_card)
+        cc.setContentsMargins(20, 16, 20, 16)
+        cc.setSpacing(8)
+
+        tr2 = QHBoxLayout()
+        tr2.addWidget(self._icon_label("📑", 22))
+        lbl2 = QLabel("Capítulo automático")
+        lbl2.setStyleSheet("font-size: 14px; font-weight: bold;")
+        tr2.addWidget(lbl2)
+        tr2.addStretch()
+        cc.addLayout(tr2)
+
+        ch_hint = QLabel(
+            "Nome (ou parte do nome) do capítulo a baixar automaticamente. "
+            "Deixe em branco para sempre abrir a seleção manual."
+        )
+        ch_hint.setStyleSheet(f"color: {P.HINT}; font-size: 11px;")
+        ch_hint.setWordWrap(True)
+        cc.addWidget(ch_hint)
+
+        self._cfg_chapter_entry = QLineEdit(cfg.get("chapter_name", ""))
+        self._cfg_chapter_entry.setPlaceholderText("Ex: Sermão, Culto da manhã...")
+        cc.addWidget(self._cfg_chapter_entry)
+
+        layout.addWidget(ch_card)
+        layout.addStretch()
+
+        scroll.setWidget(container)
+        outer.addWidget(scroll)
+        return tab
+
+    # ------------------------------------------------------------------
+    def _build_spotify_tab(self) -> QWidget:
+        """Sub-aba 'Spotify' — Show ID, prefixo de título, tags padrão."""
+        tab = QWidget()
+        outer = QVBoxLayout(tab)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+
+        container = QWidget()
+        layout = QVBoxLayout(container)
+        layout.setContentsMargins(4, 14, 4, 14)
+        layout.setSpacing(10)
+
+        sp_cfg = baixar_audio.load_config().get("spotify", {})
+
+        # ── Card: Show ID ──────────────────────────────────────────────────
+        sid_card = QFrame()
+        sid_card.setObjectName("cfg_card")
+        sc = QVBoxLayout(sid_card)
+        sc.setContentsMargins(20, 16, 20, 16)
+        sc.setSpacing(8)
+
+        tr = QHBoxLayout()
+        tr.addWidget(self._icon_label("🎙", 22))
+        lbl = QLabel("Show ID")
+        lbl.setStyleSheet("font-size: 14px; font-weight: bold;")
+        tr.addWidget(lbl)
+        tr.addStretch()
+        sc.addLayout(tr)
+
+        self._cfg_spotify_show_id = QLineEdit(sp_cfg.get("show_id", ""))
+        self._cfg_spotify_show_id.setPlaceholderText(
+            "Ex: 3a1b2c3d4e5f (URL do podcast no Spotify for Podcasters)"
+        )
+        sc.addWidget(self._cfg_spotify_show_id)
+
+        sid_hint = QLabel(
+            "ID do seu show no Spotify. Encontrado na URL do podcast: "
+            "creators.spotify.com/pod/show/<show_id>/overview"
+        )
+        sid_hint.setStyleSheet(f"color: {P.HINT}; font-size: 11px;")
+        sid_hint.setWordWrap(True)
+        sc.addWidget(sid_hint)
+        layout.addWidget(sid_card)
+
+        # ── Card: Prefixo do título ────────────────────────────────────────
+        pfx_card = QFrame()
+        pfx_card.setObjectName("cfg_card")
+        pc = QVBoxLayout(pfx_card)
+        pc.setContentsMargins(20, 16, 20, 16)
+        pc.setSpacing(8)
+
+        tr2 = QHBoxLayout()
+        tr2.addWidget(self._icon_label("✏️", 22))
+        lbl2 = QLabel("Prefixo do título")
+        lbl2.setStyleSheet("font-size: 14px; font-weight: bold;")
+        tr2.addWidget(lbl2)
+        tr2.addStretch()
+        pc.addLayout(tr2)
+
+        pfx_hint = QLabel(
+            "Texto adicionado antes do título do vídeo ao publicar no Spotify. "
+            "Deixe em branco para usar o título original."
+        )
+        pfx_hint.setStyleSheet(f"color: {P.HINT}; font-size: 11px;")
+        pfx_hint.setWordWrap(True)
+        pc.addWidget(pfx_hint)
+
+        self._cfg_spotify_title_prefix = QLineEdit(sp_cfg.get("title_prefix", ""))
+        self._cfg_spotify_title_prefix.setPlaceholderText("Ex: IPMadalena — ")
+        pc.addWidget(self._cfg_spotify_title_prefix)
+        layout.addWidget(pfx_card)
+
+        # ── Card: Tags padrão ─────────────────────────────────────────────
+        tag_card = QFrame()
+        tag_card.setObjectName("cfg_card")
+        tc = QVBoxLayout(tag_card)
+        tc.setContentsMargins(20, 16, 20, 16)
+        tc.setSpacing(8)
+
+        tr3 = QHBoxLayout()
+        tr3.addWidget(self._icon_label("🏷", 22))
+        lbl3 = QLabel("Tags padrão")
+        lbl3.setStyleSheet("font-size: 14px; font-weight: bold;")
+        tr3.addWidget(lbl3)
+        tr3.addStretch()
+        tc.addLayout(tr3)
+
+        tag_hint = QLabel(
+            "Tags pré-preenchidas ao publicar um episódio. Separe com vírgula."
+        )
+        tag_hint.setStyleSheet(f"color: {P.HINT}; font-size: 11px;")
+        tag_hint.setWordWrap(True)
+        tc.addWidget(tag_hint)
+
+        self._cfg_spotify_default_tags = QLineEdit(sp_cfg.get("default_tags", ""))
+        self._cfg_spotify_default_tags.setPlaceholderText("Ex: pregação, evangelho, IPMadalena")
+        tc.addWidget(self._cfg_spotify_default_tags)
+        layout.addWidget(tag_card)
+
+        layout.addStretch()
         scroll.setWidget(container)
         outer.addWidget(scroll)
         return tab
@@ -1879,6 +2224,12 @@ class App(QMainWindow):
             current["audio_edit"]      = audio_dict
             current["chapter_name"]    = self._cfg_chapter_entry.text().strip()
             current["keep_files"]      = self._cfg_keep_files_check.isChecked()
+            current["upload_to_drive"] = self._cfg_upload_to_drive_check.isChecked()
+            current["spotify"] = {
+                "show_id":      self._cfg_spotify_show_id.text().strip(),
+                "title_prefix": self._cfg_spotify_title_prefix.text().strip(),
+                "default_tags": self._cfg_spotify_default_tags.text().strip(),
+            }
             repo.save(current)
         except Exception as e:
             self._cfg_feedback_label.setText(f"Erro ao salvar: {e}")
@@ -2190,8 +2541,6 @@ class App(QMainWindow):
             return
         log(f"Espaço livre: {free_mb:.0f} MB — OK.")
 
-        baixar_audio.cleanup_downloads(on_log=log)
-
         history = baixar_audio.load_history()
         if date_str in history:
             entry = history[date_str]
@@ -2326,6 +2675,8 @@ class App(QMainWindow):
 
     def _worker_phase2(self, date_str: str, segments: list):
         try:
+            import time as _time
+            _phase2_start = _time.time()
             titles = self._build_presenter().process_segments(
                 date_str,
                 segments,
@@ -2337,6 +2688,72 @@ class App(QMainWindow):
                 on_upload_progress=lambda p: self._queue.put(("progress", p)),
                 on_upload_stats=lambda d, t, r: self._queue.put(("upload_stats", (d, t, r))),
             )
+
+            # --- thumbnail -------------------------------------------------------
+            # Baixa e salva thumbnail ao lado de cada MP3 novo, antes de checar
+            # segments (roda independentemente do bloco Spotify abaixo).
+            _video_id_for_thumb = segments[0].get("video_id", "") if segments else ""
+            if _video_id_for_thumb:
+                try:
+                    thumbnail_bytes = _try_cdn_thumbnail(_video_id_for_thumb)
+                    if thumbnail_bytes:
+                        import glob as _glob
+                        for _mp3 in _glob.glob(
+                            os.path.join(baixar_audio.DOWNLOAD_DIR, "*.mp3")
+                        ):
+                            if os.path.getmtime(_mp3) >= _phase2_start - 2:
+                                _thumb_dst = os.path.splitext(_mp3)[0] + ".jpg"
+                                if not os.path.exists(_thumb_dst):
+                                    with open(_thumb_dst, "wb") as _fh:
+                                        _fh.write(thumbnail_bytes)
+                except Exception:
+                    pass
+
+            # Prepara metadados para publicação no Spotify (se show_id configurado).
+            # Usa o primeiro segmento como referência de título e video_id.
+            if segments:
+                sp_cfg = baixar_audio.load_config().get("spotify", {})
+                show_id = sp_cfg.get("show_id", "").strip()
+                if show_id:
+                    first = segments[0]
+                    prefix = sp_cfg.get("title_prefix", "")
+                    ep_title = (prefix + first.get("title", "")) if prefix else first.get("title", "")
+                    video_id = first.get("video_id", "")
+                    # Busca metadados do YouTube de forma síncrona (já estamos em thread
+                    # daemon — não bloqueia a UI). Silencia falhas de rede.
+                    description = ""
+                    if video_id:
+                        try:
+                            from infrastructure.youtube.ytdlp_source import fetch_video_metadata
+                            meta = fetch_video_metadata(
+                                video_id, cancel_event=self._cancel_event
+                            )
+                            description = meta.get("description", "")
+                        except Exception:
+                            pass
+                    # cover_image_path: primeiro .jpg encontrado ao lado de um MP3 novo
+                    cover_image_path = ""
+                    try:
+                        import glob as _glob
+                        for _mp3 in _glob.glob(
+                            os.path.join(baixar_audio.DOWNLOAD_DIR, "*.mp3")
+                        ):
+                            if os.path.getmtime(_mp3) >= _phase2_start - 2:
+                                _candidate = os.path.splitext(_mp3)[0] + ".jpg"
+                                if os.path.isfile(_candidate):
+                                    cover_image_path = _candidate
+                                    break
+                    except Exception:
+                        pass
+                    self._spotify_pending = {
+                        "show_id":          show_id,
+                        "video_id":         video_id,
+                        "title":            ep_title,
+                        "description":      description,
+                        "date_str":         date_str,
+                        "tags":             sp_cfg.get("default_tags", ""),
+                        "cover_image_path": cover_image_path,
+                    }
             self._queue.put(("done", (date_str, titles)))
         except baixar_audio.OperacaoCancelada:
             self._queue.put(("cancelled", None))
@@ -2698,6 +3115,12 @@ class App(QMainWindow):
             message=f"{n} vídeo(s) enviado(s) ao Drive com sucesso!",
         )
 
+        # Abre diálogo de pré-publicação no Spotify (se configurado)
+        if self._spotify_pending:
+            pending = self._spotify_pending
+            self._spotify_pending = None
+            QTimer.singleShot(800, lambda: self._show_spotify_predialog(pending))
+
     def _on_error(self, msg: str):
         self._running = False
         self._converting = False
@@ -2707,6 +3130,40 @@ class App(QMainWindow):
         self._append_log(f"ERRO: {msg}")
         _file_log(f"ERRO: {msg}")
         self._show_error(msg)
+
+    def _show_spotify_predialog(self, pending: dict):
+        """
+        Abre o diálogo de pré-publicação no Spotify for Podcasters.
+
+        ``pending`` é o dict construído em ``_worker_phase2`` com chaves:
+        ``show_id``, ``video_id``, ``title``, ``date_str``, ``tags``,
+        ``cover_image_path`` (opcional).
+        """
+        import glob as _glob
+        # Localiza o MP3 mais recente em DOWNLOAD_DIR (caso keep_files=True)
+        pattern = os.path.join(baixar_audio.DOWNLOAD_DIR, "*.mp3")
+        candidates = sorted(_glob.glob(pattern), key=os.path.getmtime, reverse=True)
+        audio_path = candidates[0] if candidates else ""
+
+        cover_image_path = pending.get("cover_image_path", "")
+        # fallback: procura .jpg ao lado do arquivo de áudio
+        if not cover_image_path and audio_path:
+            _c = os.path.splitext(audio_path)[0] + ".jpg"
+            if os.path.isfile(_c):
+                cover_image_path = _c
+
+        dlg = _SpotifyPrePublishDialog(
+            show_id          = pending["show_id"],
+            video_id         = pending["video_id"],
+            title            = pending["title"],
+            description      = pending.get("description", ""),
+            date_str         = pending["date_str"],
+            tags             = pending["tags"],
+            audio_path       = audio_path,
+            cover_image_path = cover_image_path,
+            parent           = self,
+        )
+        dlg.exec()
 
     def _on_wizard_complete(self):
         self._check_auth_visibility()
@@ -4071,9 +4528,318 @@ class _AudioSettingsTab(QWidget):
 
 
 # ---------------------------------------------------------------------------
+# Spotify for Podcasters — WebView publishing
+# ---------------------------------------------------------------------------
+
+# JavaScript injetado na página do Spotify for Podcasters após o carregamento.
+# Preenche os campos do formulário React usando os valores passados como variáveis
+# globais (definidas antes da injeção via QWebEnginePage.runJavaScript).
+_SPOTIFY_FILL_JS = r"""
+(function() {
+    // Helper: força o React a reconhecer a mudança de valor do input/textarea
+    function setNativeValue(el, value) {
+        var nativeInputValueSetter = Object.getOwnPropertyDescriptor(
+            window.HTMLInputElement.prototype, 'value'
+        );
+        var nativeTextAreaSetter = Object.getOwnPropertyDescriptor(
+            window.HTMLTextAreaElement.prototype, 'value'
+        );
+        var setter = el.tagName === 'TEXTAREA' ? nativeTextAreaSetter : nativeInputValueSetter;
+        if (setter && setter.set) {
+            setter.set.call(el, value);
+        } else {
+            el.value = value;
+        }
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+
+    function tryFill() {
+        // Título: primeiro input visível que não seja de busca
+        var titleInputs = document.querySelectorAll('input[type="text"]:not([type="search"])');
+        var titleFilled = false;
+        for (var i = 0; i < titleInputs.length; i++) {
+            var el = titleInputs[i];
+            if (el.offsetParent !== null && window._spotifyTitle) {
+                setNativeValue(el, window._spotifyTitle);
+                titleFilled = true;
+                break;
+            }
+        }
+        // Descrição: primeiro textarea visível
+        var descAreas = document.querySelectorAll('textarea');
+        for (var j = 0; j < descAreas.length; j++) {
+            var ta = descAreas[j];
+            if (ta.offsetParent !== null && window._spotifyDescription) {
+                setNativeValue(ta, window._spotifyDescription);
+                break;
+            }
+        }
+        return titleFilled;
+    }
+
+    // Tenta imediatamente; se o form ainda não renderizou, tenta mais 5 vezes
+    if (!tryFill()) {
+        var attempts = 0;
+        var interval = setInterval(function() {
+            if (tryFill() || ++attempts >= 10) {
+                clearInterval(interval);
+            }
+        }, 600);
+    }
+})();
+"""
+
+
+class _SpotifyPage:
+    """
+    Subclasse de QWebEnginePage que intercepta chooseFiles para pré-selecionar
+    o arquivo de áudio ou de capa sem que o usuário precise navegar pelo explorer.
+
+    A instância recebe os paths via atributos ``_audio_path`` e ``_cover_image_path``
+    ANTES de qualquer chamada do browser ao seletor de arquivos.
+    """
+
+    # Criada como mixin para evitar importação circular de QWebEnginePage no
+    # nível do módulo (QWebEngineWidgets exige QApplication criado antes).
+    # O construtor real é feito em _SpotifyPublishWindow._make_page().
+
+    @staticmethod
+    def _make_page(parent_view, audio_path: str = "", cover_path: str = ""):
+        from PyQt6.QtWebEngineCore import QWebEnginePage
+
+        class _Page(QWebEnginePage):
+            def __init__(self, view):
+                super().__init__(view)
+                self._audio_path = audio_path
+                self._cover_image_path = cover_path
+
+            def chooseFiles(self, mode, old_files, accepted_mimetypes):
+                # Detecta se o browser pede áudio ou imagem pela lista de MIMEs
+                is_audio = any("audio" in m for m in (accepted_mimetypes or []))
+                is_image = any("image" in m for m in (accepted_mimetypes or []))
+                if is_audio and self._audio_path and os.path.isfile(self._audio_path):
+                    return [self._audio_path]
+                if is_image and self._cover_image_path and os.path.isfile(self._cover_image_path):
+                    return [self._cover_image_path]
+                return super().chooseFiles(mode, old_files, accepted_mimetypes)
+
+        return _Page(parent_view)
+
+
+class _SpotifyPublishWindow(QMainWindow):
+    """
+    Janela secundária com um QWebEngineView apontando para o formulário de novo
+    episódio no Spotify for Podcasters.
+
+    Após o carregamento, injeta _SPOTIFY_FILL_JS com as variáveis globais
+    ``_spotifyTitle`` e ``_spotifyDescription`` preenchidas.
+    """
+
+    def __init__(
+        self,
+        show_id: str,
+        episode_title: str,
+        episode_description: str,
+        audio_path: str = "",
+        cover_image_path: str = "",
+        parent=None,
+    ):
+        super().__init__(parent)
+        self.setWindowTitle("Publicar no Spotify for Podcasters")
+        self.resize(1100, 780)
+
+        self._show_id = show_id
+        self._episode_title = episode_title
+        self._episode_description = episode_description
+        self._audio_path = audio_path
+        self._cover_image_path = cover_image_path
+
+        from PyQt6.QtWebEngineWidgets import QWebEngineView
+        self._view = QWebEngineView()
+        page = _SpotifyPage._make_page(
+            self._view, audio_path=audio_path, cover_path=cover_image_path
+        )
+        self._view.setPage(page)
+        self._view.loadFinished.connect(self._on_load_finished)
+
+        central = QWidget()
+        self.setCentralWidget(central)
+        layout = QVBoxLayout(central)
+        layout.setContentsMargins(0, 0, 0, 0)
+
+        # Barra de ferramentas superior
+        bar = QHBoxLayout()
+        bar.setContentsMargins(8, 6, 8, 6)
+        bar.setSpacing(8)
+        back_btn = QPushButton("← Voltar")
+        back_btn.clicked.connect(self._view.back)
+        bar.addWidget(back_btn)
+        bar.addStretch()
+        hint_lbl = QLabel("Revise e publique o episódio no Spotify for Podcasters")
+        hint_lbl.setStyleSheet(f"color: {P.HINT}; font-size: 12px;")
+        bar.addWidget(hint_lbl)
+        layout.addLayout(bar)
+        layout.addWidget(self._view)
+
+        url = f"https://creators.spotify.com/pod/show/{show_id}/episode/wizard"
+        from PyQt6.QtCore import QUrl
+        self._view.load(QUrl(url))
+
+    def _on_load_finished(self, ok: bool):
+        if not ok:
+            return
+        # Define variáveis JS antes de injetar o script de preenchimento
+        title_escaped = self._episode_title.replace("\\", "\\\\").replace("'", "\\'")
+        desc_escaped  = self._episode_description.replace("\\", "\\\\").replace("'", "\\'")
+        setup_js = (
+            f"window._spotifyTitle = '{title_escaped}';\n"
+            f"window._spotifyDescription = '{desc_escaped}';\n"
+        )
+        self._view.page().runJavaScript(setup_js)
+        self._view.page().runJavaScript(_SPOTIFY_FILL_JS)
+
+
+class _SpotifyPrePublishDialog(QDialog):
+    """
+    Diálogo modal que exibe os metadados do episódio antes de abrir o WebView.
+
+    O usuário pode editar título, descrição e tags. Ao confirmar, o WebView
+    abre na URL do novo episódio com os campos pré-preenchidos.
+
+    A descrição é buscada de forma assíncrona via yt-dlp logo após a abertura
+    do diálogo (o campo inicia vazio e é preenchido quando a busca conclui).
+    """
+
+    def __init__(
+        self,
+        show_id: str,
+        video_id: str,
+        title: str,
+        description: str,
+        date_str: str,
+        tags: str,
+        audio_path: str,
+        cover_image_path: str = "",
+        parent=None,
+    ):
+        super().__init__(parent)
+        self._show_id          = show_id
+        self._video_id         = video_id
+        self._audio_path       = audio_path
+        self._cover_image_path = cover_image_path
+
+        self.setWindowTitle("Publicar no Spotify for Podcasters")
+        self.setMinimumWidth(500)
+        self.setWindowFlags(self.windowFlags() & ~Qt.WindowType.WindowContextHelpButtonHint)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(24, 20, 24, 20)
+        layout.setSpacing(14)
+
+        # Título
+        lbl_title = QLabel("Título do episódio:")
+        lbl_title.setStyleSheet("font-weight: bold;")
+        layout.addWidget(lbl_title)
+        self._title_edit = QLineEdit(title)
+        layout.addWidget(self._title_edit)
+
+        # Descrição — pré-preenchida com o que foi buscado no worker.
+        # Se estiver vazia (falha de rede), mantém placeholder para o usuário digitar.
+        lbl_desc = QLabel("Descrição:")
+        lbl_desc.setStyleSheet("font-weight: bold;")
+        layout.addWidget(lbl_desc)
+        self._desc_edit = QPlainTextEdit()
+        if description:
+            self._desc_edit.setPlainText(description)
+        else:
+            self._desc_edit.setPlaceholderText(
+                "Não foi possível buscar a descrição do YouTube. Digite aqui."
+            )
+        self._desc_edit.setMinimumHeight(120)
+        layout.addWidget(self._desc_edit)
+
+        # Tags
+        lbl_tags = QLabel("Tags (separadas por vírgula):")
+        lbl_tags.setStyleSheet("font-weight: bold;")
+        layout.addWidget(lbl_tags)
+        self._tags_edit = QLineEdit(tags)
+        self._tags_edit.setPlaceholderText("Ex: pregação, evangelho")
+        layout.addWidget(self._tags_edit)
+
+        # Capa do episódio + arquivo de áudio (row informativa)
+        info_row = QHBoxLayout()
+        info_row.setSpacing(12)
+
+        if cover_image_path and os.path.isfile(cover_image_path):
+            from PyQt6.QtGui import QPixmap
+            cov_pix = QPixmap(cover_image_path).scaled(
+                80, 80,
+                Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            cov_lbl = QLabel()
+            cov_lbl.setPixmap(cov_pix.copy(0, 0, 80, 80))
+            cov_lbl.setFixedSize(80, 80)
+            info_row.addWidget(cov_lbl)
+
+        if audio_path and os.path.isfile(audio_path):
+            af_lbl = QLabel(f"🎵  {os.path.basename(audio_path)}")
+            af_lbl.setStyleSheet(f"color: {P.HINT}; font-size: 11px;")
+            info_row.addWidget(af_lbl)
+        else:
+            no_audio = QLabel("⚠  Arquivo de áudio não encontrado em downloads/")
+            no_audio.setStyleSheet(f"color: {P.WARN_LABEL}; font-size: 11px;")
+            info_row.addWidget(no_audio)
+
+        info_row.addStretch()
+        layout.addLayout(info_row)
+
+        # Botões
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+        cancel_btn = QPushButton("Agora não")
+        cancel_btn.clicked.connect(self.reject)
+        btn_row.addWidget(cancel_btn)
+        self._publish_btn = QPushButton("Abrir Spotify →")
+        self._publish_btn.setDefault(True)
+        self._publish_btn.clicked.connect(self._on_publish)
+        btn_row.addWidget(self._publish_btn)
+        layout.addLayout(btn_row)
+
+    def _on_publish(self):
+        title = self._title_edit.text().strip()
+        if not title:
+            QMessageBox.warning(self, "Título obrigatório", "Informe um título para o episódio.")
+            return
+        desc  = self._desc_edit.toPlainText().strip()
+        # Fecha o diálogo e abre a janela do Spotify.
+        # Armazena a janela no App pai para evitar garbage collection prematura.
+        self.accept()
+        parent_app = self.parent()
+        win = _SpotifyPublishWindow(
+            show_id             = self._show_id,
+            episode_title       = title,
+            episode_description = desc,
+            audio_path          = self._audio_path,
+            cover_image_path    = self._cover_image_path,
+            parent              = parent_app,
+        )
+        # Mantém referência viva no App para evitar que o GC destrua a janela
+        # imediatamente após este método retornar.
+        if parent_app is not None:
+            parent_app._spotify_window = win
+        win.show()
+
+
+# ---------------------------------------------------------------------------
 # Entrada
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
+    # Deve ser chamado ANTES de criar QApplication para que QWebEngineView
+    # funcione corretamente no processo principal (Spotify WebView).
+    QApplication.setAttribute(Qt.ApplicationAttribute.AA_ShareOpenGLContexts)
+
     if not _acquire_single_instance():
         _q = QApplication(sys.argv)
         QMessageBox.critical(

@@ -184,6 +184,47 @@ class YtDlpVideoSource:
         return chapters
 
 
+def fetch_video_metadata(video_id: str, cancel_event=None) -> dict:
+    """
+    Retorna um dict com 'description' e 'thumbnail_url' do vídeo.
+
+    Usa yt-dlp -j (dump JSON completo) com os mesmos extractor-args do
+    download de produção — muito mais robusto que --print %(description)s.
+    Retorna {'description': '', 'thumbnail_url': ''} em qualquer falha.
+    """
+    import json as _json
+    url = f"https://www.youtube.com/watch?v={video_id}"
+    cmd = [
+        ytdlp_exe(),
+        "-j",
+        "--skip-download",
+        "--no-playlist",
+        "--socket-timeout", "30",
+        "--encoding", "utf-8",
+        "--extractor-args", "youtube:player_client=ios,android,web",
+        url,
+    ]
+    try:
+        process = start_process(cmd, cancel_event)
+        output = process.stdout.read()
+        process.wait()
+        check_cancel(cancel_event)
+        if process.returncode == 0 and output.strip():
+            info = _json.loads(output)
+            return {
+                "description":   (info.get("description") or "").strip(),
+                "thumbnail_url": info.get("thumbnail") or "",
+            }
+    except Exception:
+        pass
+    return {"description": "", "thumbnail_url": ""}
+
+
+def fetch_video_description(video_id: str, cancel_event=None) -> str:
+    """Compat wrapper — prefer fetch_video_metadata."""
+    return fetch_video_metadata(video_id, cancel_event).get("description", "")
+
+
 def _seconds_to_hms(seconds: float) -> str:
     """Converte segundos (float) para string 'HH:MM:SS'."""
     total = int(seconds)
