@@ -146,6 +146,31 @@ class TestAudioFile:
         with pytest.raises((AttributeError, TypeError)):
             af.path = "/other"  # type: ignore[misc]
 
+    def test_subfolder_padrao_none(self):
+        """Novo campo subfolder deve ter None como default (retrocompat)."""
+        af = AudioFile(path="/tmp/culto.mp3", title="Culto", video_id="abc")
+        assert af.subfolder is None
+
+    def test_subfolder_pode_ser_definido(self):
+        af = AudioFile(
+            path="/tmp/sub/culto.mp3",
+            title="Culto",
+            video_id="abc",
+            subfolder="/tmp/sub",
+        )
+        assert af.subfolder == "/tmp/sub"
+
+    def test_subfolder_incluido_na_igualdade(self):
+        """Dois AudioFiles com o mesmo path mas subfolder diferente não são iguais."""
+        af1 = AudioFile(path="/tmp/a.mp3", title="T", video_id="x", subfolder="/tmp/sub1")
+        af2 = AudioFile(path="/tmp/a.mp3", title="T", video_id="x", subfolder="/tmp/sub2")
+        assert af1 != af2
+
+    def test_subfolder_imutavel(self):
+        af = AudioFile(path="/tmp/x.mp3", title="T", video_id="x", subfolder="/tmp/sub")
+        with pytest.raises((AttributeError, TypeError)):
+            af.subfolder = "/other"  # type: ignore[misc]
+
 
 # ===========================================================================
 # ProcessingResult
@@ -592,3 +617,106 @@ class TestAudioEditConfigVolumeNorm:
         roundtrip = AudioEditConfig.from_dict(original.to_dict())
         assert roundtrip.volume_norm_enabled is True
         assert roundtrip.volume_norm_lufs == -12.0
+
+
+class TestAudioEditConfigBgMusic:
+    """Testa os campos de música de fundo adicionados ao AudioEditConfig."""
+
+    def test_defaults_bg_music(self):
+        cfg = AudioEditConfig()
+        assert cfg.bg_music_path is None
+        assert cfg.bg_music_enabled is False
+        assert cfg.bg_music_volume == 0.12
+        assert cfg.bg_music_delay == 0.0
+        assert cfg.bg_music_fade_in == 3.0
+        assert cfg.bg_music_fade_out == 6.0
+
+    def test_bg_music_habilitado_ativa_has_any_filter(self):
+        cfg = AudioEditConfig(bg_music_enabled=True, bg_music_path="/tmp/music.mp3")
+        assert cfg.has_any_filter_enabled is True
+
+    def test_bg_music_habilitado_sem_path_nao_ativa_filter(self):
+        """enabled=True mas path=None não deve ativar o pipeline."""
+        cfg = AudioEditConfig(bg_music_enabled=True, bg_music_path=None)
+        assert cfg.has_any_filter_enabled is False
+
+    def test_bg_music_desabilitado_nao_ativa_filter(self):
+        cfg = AudioEditConfig(bg_music_enabled=False, bg_music_path="/tmp/music.mp3")
+        assert cfg.has_any_filter_enabled is False
+
+    def test_to_dict_inclui_campos_bg_music(self):
+        cfg = AudioEditConfig(
+            bg_music_path="/tmp/music.mp3",
+            bg_music_enabled=True,
+            bg_music_volume=0.15,
+            bg_music_delay=2.0,
+            bg_music_fade_in=4.0,
+            bg_music_fade_out=8.0,
+        )
+        d = cfg.to_dict()
+        assert d["bg_music_path"] == "/tmp/music.mp3"
+        assert d["bg_music_enabled"] is True
+        assert d["bg_music_volume"] == 0.15
+        assert d["bg_music_delay"] == 2.0
+        assert d["bg_music_fade_in"] == 4.0
+        assert d["bg_music_fade_out"] == 8.0
+
+    def test_from_dict_le_campos_bg_music(self):
+        cfg = AudioEditConfig.from_dict({
+            "bg_music_path": "/tmp/music.mp3",
+            "bg_music_enabled": True,
+            "bg_music_volume": 0.20,
+            "bg_music_delay": 3.0,
+            "bg_music_fade_in": 5.0,
+            "bg_music_fade_out": 7.0,
+        })
+        assert cfg.bg_music_path == "/tmp/music.mp3"
+        assert cfg.bg_music_enabled is True
+        assert cfg.bg_music_volume == 0.20
+        assert cfg.bg_music_delay == 3.0
+        assert cfg.bg_music_fade_in == 5.0
+        assert cfg.bg_music_fade_out == 7.0
+
+    def test_from_dict_defaults_quando_ausentes(self):
+        cfg = AudioEditConfig.from_dict({})
+        assert cfg.bg_music_path is None
+        assert cfg.bg_music_enabled is False
+        assert cfg.bg_music_volume == 0.12
+        assert cfg.bg_music_delay == 0.0
+        assert cfg.bg_music_fade_in == 3.0
+        assert cfg.bg_music_fade_out == 6.0
+
+    def test_default_bg_music_loop_true(self):
+        assert AudioEditConfig().bg_music_loop is True
+
+    def test_to_dict_inclui_bg_music_loop(self):
+        d = AudioEditConfig(bg_music_loop=False).to_dict()
+        assert d["bg_music_loop"] is False
+
+    def test_from_dict_le_bg_music_loop(self):
+        cfg = AudioEditConfig.from_dict({"bg_music_loop": False})
+        assert cfg.bg_music_loop is False
+
+    def test_from_dict_default_loop_quando_ausente(self):
+        cfg = AudioEditConfig.from_dict({})
+        assert cfg.bg_music_loop is True
+
+    def test_roundtrip_bg_music(self):
+        original = AudioEditConfig(
+            bg_music_path="/tmp/music.mp3",
+            bg_music_enabled=True,
+            bg_music_volume=0.10,
+            bg_music_delay=1.5,
+            bg_music_fade_in=2.5,
+            bg_music_fade_out=5.0,
+            bg_music_loop=False,
+        )
+        roundtrip = AudioEditConfig.from_dict(original.to_dict())
+        assert roundtrip.bg_music_path == "/tmp/music.mp3"
+        assert roundtrip.bg_music_enabled is True
+        assert roundtrip.bg_music_volume == 0.10
+        assert roundtrip.bg_music_delay == 1.5
+        assert roundtrip.bg_music_fade_in == 2.5
+        assert roundtrip.bg_music_fade_out == 5.0
+        assert roundtrip.bg_music_loop is False
+

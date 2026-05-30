@@ -451,6 +451,69 @@ class TestUpload:
         ])
         assert len(result.uploaded_files) == 2
 
+    def test_progresso_monotico_para_multiplos_arquivos(self):
+        """Regressão: progresso não deve ciclar 0→100 por arquivo individualmente."""
+        progress_calls: list = []
+        files = [
+            _audio_file(path="/tmp/a.mp3", title="Culto A"),
+            _audio_file(path="/tmp/b.mp3", title="Culto B"),
+        ]
+
+        storage = _storage()
+        svc = MagicMock()
+        svc.files().list.return_value.execute.side_effect = [
+            {"files": []},  # busca de pasta do mês
+            {"files": []},  # duplicata arquivo A
+            {"files": []},  # duplicata arquivo B
+        ]
+        svc.files().create.return_value.execute.return_value = {"id": "newfolder"}
+        svc._http.credentials = MagicMock()
+
+        session = MagicMock()
+        session.post.return_value.headers = {"Location": "https://upload.example.com"}
+        session.put.return_value.json.return_value = {"id": "x", "webViewLink": "https://drive.google.com/x"}
+
+        with patch.object(storage, "get_service", return_value=svc), \
+             patch("infrastructure.drive.gdrive_storage.AuthorizedSession",
+                   return_value=session), \
+             patch("os.path.getsize", return_value=1024), \
+             patch("builtins.open", mock_open(read_data=b"A" * 64)), \
+             patch("os.remove"):
+            storage.upload(files, "19/04/2026", on_progress=progress_calls.append)
+
+        # Progresso nunca deve cair — sem ciclos 0→100→0→100
+        for a, b in zip(progress_calls, progress_calls[1:]):
+            assert a <= b, f"Progresso não-monotônico: {a} → {b}"
+        # O progresso final deve ser 100
+        assert progress_calls[-1] == 100
+
+    def test_progresso_arquivo_unico_vai_de_0_a_100(self):
+        """Arquivo único: progresso inicia em 0 e termina em 100."""
+        progress_calls: list = []
+        storage = _storage()
+        svc = MagicMock()
+        svc.files().list.return_value.execute.side_effect = [
+            {"files": []},
+            {"files": []},
+        ]
+        svc.files().create.return_value.execute.return_value = {"id": "newfolder"}
+        svc._http.credentials = MagicMock()
+
+        session = MagicMock()
+        session.post.return_value.headers = {"Location": "https://upload.example.com"}
+        session.put.return_value.json.return_value = {"id": "x", "webViewLink": "https://drive.google.com/x"}
+
+        with patch.object(storage, "get_service", return_value=svc), \
+             patch("infrastructure.drive.gdrive_storage.AuthorizedSession",
+                   return_value=session), \
+             patch("os.path.getsize", return_value=1024), \
+             patch("builtins.open", mock_open(read_data=b"A" * 64)), \
+             patch("os.remove"):
+            storage.upload([_audio_file()], "19/04/2026", on_progress=progress_calls.append)
+
+        assert progress_calls[0] == 0
+        assert progress_calls[-1] == 100
+
     def test_cancela_antes_de_conectar(self):
         ev = threading.Event()
         ev.set()
@@ -623,3 +686,112 @@ class TestDuplicateCheckEscape:
         q = self._run_and_capture_query("a'b.mp3")
         # O apóstrofo deve estar presente (escapado), não removido
         assert "'" in q.replace("name=", "").replace("in parents", "").replace("trashed=false", "")
+
+
+# ===========================================================================
+# _mime_for_path
+# ===========================================================================
+
+class TestMimeForPath:
+    """Testa a função de detecção de MIME type por extensão."""
+
+    def _mime(self, path: str) -> str:
+        from infrastructure.drive.gdrive_storage import _mime_for_path
+        return _mime_for_path(path)
+
+    def test_mp3_retorna_audio_mpeg(self):
+        assert self._mime("/tmp/culto.mp3") == "audio/mpeg"
+
+    def test_mp4_retorna_video_mp4(self):
+        assert self._mime("/tmp/culto.mp4") == "video/mp4"
+
+    def test_jpg_retorna_image_jpeg(self):
+        assert self._mime("/tmp/capa.jpg") == "image/jpeg"
+
+    def test_jpeg_retorna_image_jpeg(self):
+        assert self._mime("/tmp/capa.jpeg") == "image/jpeg"
+
+    def test_txt_retorna_text_plain(self):
+        assert self._mime("/tmp/descricao.txt") == "text/plain"
+
+    def test_png_retorna_image_png(self):
+        assert self._mime("/tmp/capa.png") == "image/png"
+
+    def test_extensao_desconhecida_retorna_octet_stream(self):
+        assert self._mime("/tmp/arquivo.xyz") == "application/octet-stream"
+
+    def test_sem_extensao_retorna_octet_stream(self):
+        assert self._mime("/tmp/arquivo") == "application/octet-stream"
+
+    def test_extensao_maiuscula_e_normalizada(self):
+        """Extensão em maiúsculas deve ser tratada igual à minúscula."""
+        assert self._mime("/tmp/culto.MP3") == "audio/mpeg"
+        assert self._mime("/tmp/capa.JPG") == "image/jpeg"
+
+
+# ===========================================================================
+# Limpeza de subpastas vazias após upload
+# ===========================================================================
+
+class TestSubfolderCleanupAfterUpload:
+    """
+    Quando delete_after_upload=True, o upload() deve remover subpastas
+    que ficaram vazias depois de apagar os arquivos.
+    Usa disco real (tmp_path) para verificar que os arquivos/pastas
+    realmente somem.
+    """
+
+    def _run_upload(self, tmp_path, *, delete_after_upload: bool):
+        """
+        Configura e executa upload() com um AudioFile em subpasta real.
+        Retorna a subpasta para o teste verificar se foi removida.
+        """
+        sub = tmp_path / "Culto"
+        sub.mkdir()
+        mp3 = sub / "Culto.mp3"
+        mp3.write_bytes(b"mp3-data")
+
+        af = AudioFile(path=str(mp3), title="Culto", video_id="abc", subfolder=str(sub))
+
+        storage = _storage(delete_after_upload=delete_after_upload)
+
+        # Monta serviço Drive fake
+        svc = MagicMock()
+        svc.files().list.return_value.execute.side_effect = [
+            {"files": []},   # procura pasta do mês
+            {"files": []},   # duplicate-check
+        ]
+        svc.files().create.return_value.execute.return_value = {"id": "newfolder"}
+        svc._http.credentials = MagicMock()
+
+        session = MagicMock()
+        session.post.return_value = MagicMock(
+            headers={"Location": "https://upload.googleapis.com/fake-uri"},
+        )
+        session.put.return_value = MagicMock(
+            json=MagicMock(return_value={"id": "file123", "webViewLink": "https://x"}),
+        )
+
+        with patch.object(storage, "get_service", return_value=svc), \
+             patch("infrastructure.drive.gdrive_storage.AuthorizedSession",
+                   return_value=session), \
+             patch("os.path.getsize", return_value=len(b"mp3-data")), \
+             patch("builtins.open", mock_open(read_data=b"mp3-data")):
+            storage.upload([af], "19/04/2026")
+
+        return sub
+
+    def test_subpasta_removida_quando_delete_after_upload_true(self, tmp_path):
+        """
+        Após upload com delete_after_upload=True, a subpasta vazia deve ser
+        removida automaticamente.
+        """
+        sub = self._run_upload(tmp_path, delete_after_upload=True)
+        assert not sub.exists()
+
+    def test_subpasta_mantida_quando_delete_after_upload_false(self, tmp_path):
+        """
+        Com delete_after_upload=False, a subpasta deve ser preservada.
+        """
+        sub = self._run_upload(tmp_path, delete_after_upload=False)
+        assert sub.exists()

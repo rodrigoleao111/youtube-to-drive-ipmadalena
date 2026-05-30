@@ -102,6 +102,8 @@ def config_repo():
             "chapter_name":    "",
             "keep_files":      False,
             "upload_to_drive": True,
+            "save_video":      False,
+            "video_quality":   "alta",  # "alta" | "baixa"
             "spotify": {
                 "show_id":       "",
                 "title_prefix":  "",
@@ -144,7 +146,7 @@ def audio_edit_persist_paths(d: dict) -> dict:
     if not d:
         return d
     result = dict(d)
-    for key in ("intro_path", "outro_path"):
+    for key in ("intro_path", "outro_path", "bg_music_path"):
         p = result.get(key)
         if not p:
             continue
@@ -166,7 +168,7 @@ def audio_edit_resolve_paths(d: dict) -> dict:
     if not d:
         return d
     result = dict(d)
-    for key in ("intro_path", "outro_path"):
+    for key in ("intro_path", "outro_path", "bg_music_path"):
         p = result.get(key)
         if not p:
             continue

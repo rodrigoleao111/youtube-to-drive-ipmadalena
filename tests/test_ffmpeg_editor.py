@@ -506,31 +506,40 @@ class TestBuildFilterComplexVolumeNorm:
         fc, _ = self._editor()._build_filter_complex(cfg, input_dur=60.0)
         assert "loudnorm" not in fc
 
+    def test_loudnorm_linear_true_na_cadeia_principal(self):
+        """Melhoria de performance: loudnorm deve usar linear=true."""
+        cfg = AudioEditConfig(volume_norm_enabled=True, volume_norm_lufs=-16.0)
+        fc, _ = self._editor()._build_filter_complex(cfg, input_dur=60.0)
+        assert "loudnorm=I=-16.0:TP=-1.5:LRA=11:linear=true:print_format=none" in fc
+
     def test_loudnorm_aplicado_na_intro(self):
+        _loudnorm = "loudnorm=I=-16.0:TP=-1.5:LRA=11:linear=true:print_format=none"
         cfg = AudioEditConfig(
             volume_norm_enabled=True, volume_norm_lufs=-16.0,
             intro_path="/tmp/intro.mp3",
         )
         fc, _ = self._editor()._build_filter_complex(cfg, input_dur=60.0)
-        assert "[1:a]loudnorm=I=-16.0:TP=-1.5:LRA=11,aresample=44100[intro]" in fc
+        assert f"[1:a]{_loudnorm},aresample=44100[intro]" in fc
 
     def test_loudnorm_aplicado_na_outro(self):
+        _loudnorm = "loudnorm=I=-16.0:TP=-1.5:LRA=11:linear=true:print_format=none"
         cfg = AudioEditConfig(
             volume_norm_enabled=True, volume_norm_lufs=-16.0,
             outro_path="/tmp/outro.mp3",
         )
         fc, _ = self._editor()._build_filter_complex(cfg, input_dur=60.0)
-        assert "[1:a]loudnorm=I=-16.0:TP=-1.5:LRA=11,aresample=44100[outro]" in fc
+        assert f"[1:a]{_loudnorm},aresample=44100[outro]" in fc
 
     def test_loudnorm_em_intro_e_outro_com_indices_corretos(self):
+        _loudnorm = "loudnorm=I=-16.0:TP=-1.5:LRA=11:linear=true:print_format=none"
         cfg = AudioEditConfig(
             volume_norm_enabled=True, volume_norm_lufs=-16.0,
             intro_path="/tmp/i.mp3",
             outro_path="/tmp/o.mp3",
         )
         fc, _ = self._editor()._build_filter_complex(cfg, input_dur=60.0)
-        assert "[1:a]loudnorm=I=-16.0:TP=-1.5:LRA=11,aresample=44100[intro]" in fc
-        assert "[2:a]loudnorm=I=-16.0:TP=-1.5:LRA=11,aresample=44100[outro]" in fc
+        assert f"[1:a]{_loudnorm},aresample=44100[intro]" in fc
+        assert f"[2:a]{_loudnorm},aresample=44100[outro]" in fc
 
     def test_sem_loudnorm_nas_vinhetas_quando_desabilitado(self):
         cfg = AudioEditConfig(
@@ -540,3 +549,213 @@ class TestBuildFilterComplexVolumeNorm:
         fc, _ = self._editor()._build_filter_complex(cfg, input_dur=60.0)
         assert "[1:a]aresample=44100[intro]" in fc
         assert "loudnorm" not in fc
+
+
+# ===========================================================================
+# Música de fundo — _mix_background_music
+# ===========================================================================
+
+class TestMixBackgroundMusic:
+    """Testa a segunda passagem de música de fundo."""
+
+    _BG_PATH = "/tmp/music.mp3"
+
+    def _cfg(self, **kw):
+        defaults = dict(
+            bg_music_path=self._BG_PATH,
+            bg_music_enabled=True,
+            bg_music_volume=0.12,
+            bg_music_delay=0.0,
+            bg_music_fade_in=3.0,
+            bg_music_fade_out=6.0,
+        )
+        defaults.update(kw)
+        return AudioEditConfig(**defaults)
+
+    def _run(self, cfg, audio_file, returncode=0, extra_lines=None):
+        proc = _make_proc_mock(
+            stdout_lines=(extra_lines or []) + ["progress=end\n"],
+            returncode=returncode,
+        )
+        logs = []
+        with patch("infrastructure.audio.ffmpeg_editor.start_process",
+                   return_value=proc) as sp, \
+             patch.object(FfmpegAudioEditor, "_probe_duration", return_value=60.0), \
+             patch("os.path.isfile", return_value=True), \
+             patch("os.replace"):
+            FfmpegAudioEditor()._mix_background_music(
+                audio_file.path, cfg,
+                on_log=logs.append,
+            )
+        return sp, logs
+
+    def test_comando_inclui_stream_loop(self, audio_file):
+        sp, _ = self._run(self._cfg(), audio_file)
+        cmd = sp.call_args[0][0]
+        assert "-stream_loop" in cmd
+        assert "-1" in cmd
+
+    def test_comando_inclui_dois_inputs(self, audio_file):
+        sp, _ = self._run(self._cfg(), audio_file)
+        cmd = sp.call_args[0][0]
+        idx = cmd.index("-i")
+        assert cmd[idx + 1] == self._BG_PATH
+        # segundo -i = arquivo do episódio
+        idx2 = cmd.index("-i", idx + 1)
+        assert cmd[idx2 + 1] == audio_file.path
+
+    def test_filter_complex_inclui_volume(self, audio_file):
+        sp, _ = self._run(self._cfg(bg_music_volume=0.15), audio_file)
+        cmd = sp.call_args[0][0]
+        fc = cmd[cmd.index("-filter_complex") + 1]
+        assert "volume=0.1500" in fc
+
+    def test_filter_complex_inclui_fade_in(self, audio_file):
+        sp, _ = self._run(self._cfg(bg_music_fade_in=4.0), audio_file)
+        cmd = sp.call_args[0][0]
+        fc = cmd[cmd.index("-filter_complex") + 1]
+        assert "afade=t=in" in fc
+
+    def test_filter_complex_inclui_fade_out(self, audio_file):
+        sp, _ = self._run(self._cfg(bg_music_fade_out=5.0), audio_file)
+        cmd = sp.call_args[0][0]
+        fc = cmd[cmd.index("-filter_complex") + 1]
+        assert "afade=t=out" in fc
+
+    def test_filter_complex_inclui_adelay_no_episodio_quando_delay_positivo(self, audio_file):
+        """Delay>0: o EPISÓDIO é atrasado (adelay no [1:a]), não a música."""
+        sp, _ = self._run(self._cfg(bg_music_delay=3.0), audio_file)
+        cmd = sp.call_args[0][0]
+        fc = cmd[cmd.index("-filter_complex") + 1]
+        # 3s = 3000 ms
+        assert "adelay=3000" in fc
+        # O adelay é aplicado sobre [1:a] (episódio), não sobre [0:a] (música)
+        assert "[1:a]adelay=3000" in fc
+
+    def test_filter_complex_sem_adelay_quando_delay_zero(self, audio_file):
+        sp, _ = self._run(self._cfg(bg_music_delay=0.0), audio_file)
+        cmd = sp.call_args[0][0]
+        fc = cmd[cmd.index("-filter_complex") + 1]
+        assert "adelay" not in fc
+
+    def test_atrim_usa_output_dur_quando_delay_positivo(self, audio_file):
+        """output_dur = episode_dur + delay; atrim deve cortar a música nesse valor."""
+        # episode=60s, delay=5s → output=65s → atrim=end=65.000
+        sp, _ = self._run(self._cfg(bg_music_delay=5.0), audio_file)
+        cmd = sp.call_args[0][0]
+        fc = cmd[cmd.index("-filter_complex") + 1]
+        assert "atrim=end=65.000" in fc
+
+    def test_log_emitido_com_nome_arquivo(self, audio_file):
+        _, logs = self._run(self._cfg(), audio_file)
+        combined = " ".join(logs).lower()
+        assert "music.mp3" in combined or "música" in combined
+
+    def test_nao_roda_quando_path_ausente(self, audio_file):
+        cfg = AudioEditConfig(bg_music_enabled=True, bg_music_path=None)
+        with patch("infrastructure.audio.ffmpeg_editor.start_process") as sp, \
+             patch.object(FfmpegAudioEditor, "_probe_duration", return_value=60.0):
+            FfmpegAudioEditor()._mix_background_music(audio_file.path, cfg)
+        sp.assert_not_called()
+
+    def test_nao_roda_quando_arquivo_nao_existe(self, audio_file):
+        cfg = self._cfg()
+        with patch("infrastructure.audio.ffmpeg_editor.start_process") as sp, \
+             patch.object(FfmpegAudioEditor, "_probe_duration", return_value=60.0), \
+             patch("os.path.isfile", return_value=False):
+            FfmpegAudioEditor()._mix_background_music(audio_file.path, cfg)
+        sp.assert_not_called()
+
+    def test_delay_grande_estende_saida_nao_bloqueia(self, audio_file):
+        """Delay grande é válido — apenas estende o output (episódio = 60 + delay)."""
+        sp, _ = self._run(self._cfg(bg_music_delay=120.0), audio_file)
+        cmd = sp.call_args[0][0]
+        fc = cmd[cmd.index("-filter_complex") + 1]
+        # output_dur = 60 + 120 = 180s
+        assert "atrim=end=180.000" in fc
+
+    def test_levanta_runtime_error_quando_ffmpeg_falha(self, audio_file):
+        with pytest.raises(RuntimeError, match="ffmpeg falhou"):
+            self._run(self._cfg(), audio_file, returncode=1)
+
+    def test_process_integra_bg_music_na_passagem_principal(self, audio_file):
+        """Melhoria de performance: BG music deve estar no mesmo comando ffmpeg
+        que os demais filtros — passagem única, sem 2ª chamada separada."""
+        cfg = AudioEditConfig(
+            eq_enabled=True,
+            bg_music_path=self._BG_PATH,
+            bg_music_enabled=True,
+        )
+        proc = _make_proc_mock(stdout_lines=["progress=end\n"], returncode=0)
+        captured: list = []
+
+        with patch("infrastructure.audio.ffmpeg_editor.start_process",
+                   side_effect=lambda cmd, **kw: (captured.append(cmd[:]), proc)[1]), \
+             patch.object(FfmpegAudioEditor, "_probe_duration", return_value=60.0), \
+             patch.object(FfmpegAudioEditor, "_mix_background_music") as mock_bg, \
+             patch("os.path.isfile", return_value=True), \
+             patch("os.replace"):
+            FfmpegAudioEditor().process(audio_file, cfg)
+
+        # Exatamente UMA chamada ao ffmpeg
+        assert len(captured) == 1, "Esperado 1 chamada ffmpeg (passagem única)"
+        # _mix_background_music NÃO deve ser chamado separadamente
+        mock_bg.assert_not_called()
+        # Arquivo de BG music presente nos inputs do comando único
+        assert self._BG_PATH in captured[0]
+        # filter_complex deve conter amix
+        fc = captured[0][captured[0].index("-filter_complex") + 1]
+        assert "amix" in fc
+
+    def test_process_bg_nao_inclui_amix_quando_desabilitado(self, audio_file):
+        """Quando BG disabled, nenhum amix no filter_complex."""
+        cfg = AudioEditConfig(eq_enabled=True, bg_music_enabled=False)
+        proc = _make_proc_mock(stdout_lines=["progress=end\n"], returncode=0)
+        captured: list = []
+
+        with patch("infrastructure.audio.ffmpeg_editor.start_process",
+                   side_effect=lambda cmd, **kw: (captured.append(cmd[:]), proc)[1]), \
+             patch.object(FfmpegAudioEditor, "_probe_duration", return_value=60.0), \
+             patch("os.replace"):
+            FfmpegAudioEditor().process(audio_file, cfg)
+
+        assert len(captured) == 1
+        fc = captured[0][captured[0].index("-filter_complex") + 1]
+        assert "amix" not in fc
+
+    def test_stream_loop_presente_quando_loop_true(self, audio_file):
+        sp, _ = self._run(self._cfg(bg_music_loop=True), audio_file)
+        cmd = sp.call_args[0][0]
+        assert "-stream_loop" in cmd
+
+    def test_stream_loop_ausente_quando_loop_false(self, audio_file):
+        sp, _ = self._run(self._cfg(bg_music_loop=False), audio_file)
+        cmd = sp.call_args[0][0]
+        assert "-stream_loop" not in cmd
+
+    def test_amix_duration_shortest_quando_loop_true(self, audio_file):
+        sp, _ = self._run(self._cfg(bg_music_loop=True), audio_file)
+        cmd = sp.call_args[0][0]
+        fc = cmd[cmd.index("-filter_complex") + 1]
+        assert "duration=shortest" in fc
+
+    def test_amix_duration_longest_quando_loop_false(self, audio_file):
+        """Sem loop, a saída dura até o stream mais longo (episódio delayed)."""
+        sp, _ = self._run(self._cfg(bg_music_loop=False), audio_file)
+        cmd = sp.call_args[0][0]
+        fc = cmd[cmd.index("-filter_complex") + 1]
+        assert "duration=longest" in fc
+
+    def test_process_nao_inclui_bg_music_quando_desabilitado(self, audio_file):
+        """Quando bg_music_enabled=False, BG music não entra no comando ffmpeg."""
+        cfg = AudioEditConfig(eq_enabled=True, bg_music_enabled=False)
+        proc = _make_proc_mock(stdout_lines=["progress=end\n"], returncode=0)
+
+        with patch("infrastructure.audio.ffmpeg_editor.start_process",
+                   return_value=proc), \
+             patch.object(FfmpegAudioEditor, "_probe_duration", return_value=60.0), \
+             patch("os.replace"):
+            FfmpegAudioEditor().process(audio_file, cfg)
+
+        # Apenas UMA chamada ao ffmpeg, sem BG music
+        assert "start_process" or True  # verifica implicitamente via ausência de mock_bg

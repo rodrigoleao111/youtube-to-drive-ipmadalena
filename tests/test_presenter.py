@@ -7,6 +7,7 @@ UploadAudioUseCase). Sem acesso a disco, rede ou subprocess.
 
 from __future__ import annotations
 
+import os
 import threading
 from unittest.mock import MagicMock
 
@@ -251,7 +252,7 @@ class TestPresenterProcessSegments:
         download_uc.execute.return_value = []
         upload_uc = MagicMock()
         p = _make_presenter(download_uc=download_uc, upload_uc=upload_uc)
-        with pytest.raises(RuntimeError, match="Nenhum arquivo MP3"):
+        with pytest.raises(RuntimeError, match="áudio"):
             p.process_segments("19/04/2026", [])
         upload_uc.execute.assert_not_called()
 
@@ -264,7 +265,7 @@ class TestPresenterProcessSegments:
         download_uc.execute.return_value = []   # zero arquivos baixados
         upload_uc = MagicMock()
         p = _make_presenter(download_uc=download_uc, upload_uc=upload_uc)
-        with pytest.raises(RuntimeError, match="Nenhum arquivo MP3"):
+        with pytest.raises(RuntimeError, match="áudio"):
             p.process_segments("19/04/2026", [{"id": "v1", "title": "x"}])
         upload_uc.execute.assert_not_called()
 
@@ -501,3 +502,108 @@ class TestPresenterUploadDesabilitado:
         )
         p.process_segments("19/05/2026", [self._seg()], on_status=statuses.append)
         assert any("desabilitado" in s.lower() for s in statuses)
+
+
+# ===========================================================================
+# _build_upload_list()
+# ===========================================================================
+
+class TestBuildUploadList:
+    """
+    Testa ProcessingPresenter._build_upload_list():
+      - AudioFile sem subfolder → passa diretamente (retrocompat.)
+      - AudioFile com subfolder → coleta todos os arquivos da pasta em ordem alfa.
+      - Subpasta duplicada → ignorada (evita duplicação de artefatos).
+    """
+
+    def _presenter(self):
+        return _make_presenter()
+
+    def test_audio_file_sem_subfolder_passa_direto(self):
+        """AudioFile com subfolder=None vai direto para a upload list (retrocompat)."""
+        af = _make_audio(path="/tmp/culto.mp3", title="Culto", vid="v1")
+        p  = self._presenter()
+        result = p._build_upload_list([af])
+        assert result == [af]
+
+    def test_subfolder_coleta_todos_os_arquivos(self, tmp_path):
+        """Arquivos dentro da subpasta são coletados em ordem alfabética."""
+        sub = tmp_path / "Culto"
+        sub.mkdir()
+        (sub / "Culto.mp3").write_bytes(b"mp3")
+        (sub / "capa.jpg").write_bytes(b"jpg")
+        (sub / "descricao.txt").write_text("desc", encoding="utf-8")
+
+        af = AudioFile(path=str(sub / "Culto.mp3"), title="Culto",
+                       video_id="v1", subfolder=str(sub))
+        p  = self._presenter()
+        result = p._build_upload_list([af])
+
+        fnames = [os.path.basename(r.path) for r in result]
+        assert sorted(fnames) == fnames                # ordem alfabética
+        assert "Culto.mp3"     in fnames
+        assert "capa.jpg"      in fnames
+        assert "descricao.txt" in fnames
+
+    def test_subfolder_duplicada_ignorada(self, tmp_path):
+        """Dois AudioFiles apontando para a mesma subpasta só processam uma vez."""
+        sub = tmp_path / "Culto"
+        sub.mkdir()
+        (sub / "Culto.mp3").write_bytes(b"mp3")
+
+        af1 = AudioFile(path=str(sub / "Culto.mp3"), title="Culto",
+                        video_id="v1", subfolder=str(sub))
+        af2 = AudioFile(path=str(sub / "Culto.mp3"), title="Culto",
+                        video_id="v1", subfolder=str(sub))
+
+        p      = self._presenter()
+        result = p._build_upload_list([af1, af2])
+        # Arquivo da subpasta aparece apenas uma vez
+        assert len(result) == 1
+
+    def test_subfolder_inexistente_cai_em_retrocompat(self):
+        """Se subfolder está definido mas não existe, trata como sem subfolder."""
+        af = AudioFile(path="/tmp/culto.mp3", title="Culto",
+                       video_id="v1", subfolder="/caminho/inexistente")
+        p  = self._presenter()
+        result = p._build_upload_list([af])
+        assert result == [af]
+
+    def test_lista_vazia_retorna_lista_vazia(self):
+        p = self._presenter()
+        assert p._build_upload_list([]) == []
+
+    def test_video_id_preservado_nos_artefatos(self, tmp_path):
+        """Artefatos coletados da subpasta preservam o video_id do AudioFile pai."""
+        sub = tmp_path / "Culto"
+        sub.mkdir()
+        (sub / "Culto.mp3").write_bytes(b"mp3")
+
+        af = AudioFile(path=str(sub / "Culto.mp3"), title="Culto",
+                       video_id="vid123", subfolder=str(sub))
+        p  = self._presenter()
+        result = p._build_upload_list([af])
+        assert all(r.video_id == "vid123" for r in result)
+
+    def test_mp4_incluido_na_lista_quando_save_video_true(self, tmp_path):
+        """
+        Mudança de sessão: quando save_video=True o MP4 fica na subpasta;
+        _build_upload_list deve incluí-lo junto com MP3, capa.jpg e descricao.txt.
+        """
+        sub = tmp_path / "Culto"
+        sub.mkdir()
+        (sub / "Culto.mp3").write_bytes(b"mp3")
+        (sub / "Culto.mp4").write_bytes(b"mp4")   # mantido com save_video=True
+        (sub / "capa.jpg").write_bytes(b"jpg")
+        (sub / "descricao.txt").write_text("desc", encoding="utf-8")
+
+        af = AudioFile(path=str(sub / "Culto.mp3"), title="Culto",
+                       video_id="v1", subfolder=str(sub))
+        p      = self._presenter()
+        result = p._build_upload_list([af])
+
+        exts = [os.path.splitext(r.path)[1] for r in result]
+        assert ".mp4" in exts, "MP4 deve ser incluído quando salvo na subpasta"
+        assert ".mp3" in exts
+        assert ".jpg" in exts
+        assert ".txt" in exts

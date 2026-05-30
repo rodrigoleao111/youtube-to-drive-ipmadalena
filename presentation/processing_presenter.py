@@ -20,6 +20,7 @@ operações com significado para a tela principal.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from typing import Callable, List, Optional
 
@@ -30,7 +31,7 @@ from application.use_cases import (
     ListVideosUseCase,
     UploadAudioUseCase,
 )
-from domain.entities import Segment
+from domain.entities import AudioFile, Segment
 from domain.exceptions import VideoNaoEncontrado
 
 
@@ -183,7 +184,7 @@ class ProcessingPresenter:
         )
 
         if not audio_files:
-            raise RuntimeError("Nenhum arquivo MP3 gerado após o download.")
+            raise RuntimeError("Nenhum arquivo de áudio gerado após o download.")
 
         audio_files = self.edit_uc.execute(
             audio_files,
@@ -194,9 +195,10 @@ class ProcessingPresenter:
         )
 
         if self.upload_enabled:
+            upload_files = self._build_upload_list(audio_files)
             self.upload_uc.execute(
                 date_str,
-                audio_files,
+                upload_files,
                 cancel_event=cancel_event,
                 on_log=on_log,
                 on_status=on_status,
@@ -209,3 +211,42 @@ class ProcessingPresenter:
             on_log and on_log("Upload para o Drive desabilitado nas configurações.")
 
         return [s["title"] for s in segments_data]
+
+    # -----------------------------------------------------------------------
+    # Helpers privados
+    # -----------------------------------------------------------------------
+
+    def _build_upload_list(self, audio_files: List[AudioFile]) -> List[AudioFile]:
+        """
+        Monta a lista de arquivos para upload a partir das subpastas.
+
+        Para cada AudioFile com ``subfolder`` preenchido, coleta todos os
+        arquivos presentes na subpasta (MP3, MP4, capa.jpg, descricao.txt)
+        em ordem alfabética. Para AudioFiles sem subfolder (retrocompatibilidade
+        ou fallback), usa o arquivo diretamente.
+
+        Subpastas duplicadas são ignoradas — evita que dois AudioFiles do
+        mesmo segmento dupliquem os artefatos.
+        """
+        upload_list: List[AudioFile] = []
+        seen_subfolders: set = set()
+
+        for af in audio_files:
+            if af.subfolder and os.path.isdir(af.subfolder):
+                if af.subfolder in seen_subfolders:
+                    continue
+                seen_subfolders.add(af.subfolder)
+                for fname in sorted(os.listdir(af.subfolder)):
+                    fpath = os.path.join(af.subfolder, fname)
+                    if os.path.isfile(fpath):
+                        upload_list.append(AudioFile(
+                            path      = fpath,
+                            title     = os.path.splitext(fname)[0],
+                            video_id  = af.video_id,
+                            subfolder = af.subfolder,
+                        ))
+            else:
+                # Retrocompatibilidade: AudioFile sem subfolder
+                upload_list.append(af)
+
+        return upload_list

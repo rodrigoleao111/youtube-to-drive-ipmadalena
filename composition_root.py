@@ -34,6 +34,7 @@ from infrastructure.persistence.json_repositories import JsonHistoryRepository
 from infrastructure.youtube.ytdlp_source import (
     YtDlpAudioDownloader,
     YtDlpVideoSource,
+    fetch_video_metadata,
 )
 from presentation.audio_test_presenter import AudioTestPresenter
 from presentation.processing_presenter import ProcessingPresenter
@@ -62,7 +63,11 @@ def build_processing_presenter() -> ProcessingPresenter:
 
     return ProcessingPresenter(
         list_videos_uc = ListVideosUseCase(source=video_source),
-        download_uc    = DownloadSegmentsUseCase(downloader=YtDlpAudioDownloader()),
+        download_uc    = DownloadSegmentsUseCase(downloader=YtDlpAudioDownloader(
+            save_video       = bool(cfg.get("save_video", False)),
+            video_quality    = cfg.get("video_quality", "alta"),
+            metadata_fetcher = fetch_video_metadata,
+        )),
         edit_uc        = EditAudioUseCase(
             editor        = FfmpegAudioEditor(),
             config_repo   = config_repo,

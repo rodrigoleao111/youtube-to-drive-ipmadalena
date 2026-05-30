@@ -210,132 +210,197 @@ class TestYtDlpVideoSource:
 # ===========================================================================
 
 class TestYtDlpAudioDownloader:
-    """Testa YtDlpAudioDownloader com subprocess e glob mockados."""
+    """
+    Testa YtDlpAudioDownloader com subprocessos mockados.
 
-    def _dl(self):
-        return YtDlpAudioDownloader()
+    O novo fluxo é MP4-first:
+      1. Cria subpasta  output_dir/{título sanitizado}/
+      2. Baixa MP4 via yt-dlp (stdout mockado)
+      3. Salva thumbnail e descrição (_save_extras — mockado por padrão)
+      4. Converte MP4 → MP3 via subprocess.run (mockado por padrão)
+      5. Se save_video=False: remove MP4
+
+    A maioria dos testes usa tmp_path para ter um diretório real,
+    cria um MP4 fake e inclui a linha [Merger] no stdout do proc.
+    """
+
+    def _dl(self, *, save_video=False, metadata_fetcher=None):
+        return YtDlpAudioDownloader(save_video=save_video,
+                                    metadata_fetcher=metadata_fetcher)
 
     def _seg(self, vid_id="abc", title="Culto", start=None, end=None):
         return Segment(video_id=vid_id, title=title, start=start, end=end)
 
+    def _make_mp4(self, tmp_path, title="Culto"):
+        """Cria subpasta + MP4 fake mimicking what yt-dlp would produce."""
+        from infrastructure.youtube.ytdlp_source import sanitize_folder_name
+        safe      = sanitize_folder_name(title)
+        subfolder = tmp_path / safe
+        subfolder.mkdir(parents=True, exist_ok=True)
+        mp4       = subfolder / f"{title}.mp4"
+        mp4.write_bytes(b"fake-mp4-data")
+        return mp4, subfolder
+
+    def _run_ok(self):
+        """MagicMock que simula subprocess.run com returncode=0."""
+        return MagicMock(returncode=0, stderr="")
+
     # -------------------------------------------------------------------
-    # Comando gerado
+    # Comando gerado pelo yt-dlp
     # -------------------------------------------------------------------
 
-    def test_video_completo_sem_download_sections(self):
-        proc = _make_process([])
+    def test_video_completo_sem_download_sections(self, tmp_path):
+        mp4, _ = self._make_mp4(tmp_path)
+        proc   = _make_process([f'[Merger] Merging formats into "{mp4}"'])
         captured_cmd = []
         def fake_start(cmd, *a, **kw):
             captured_cmd.extend(cmd)
             return proc
         with patch("infrastructure.youtube.ytdlp_source.start_process", side_effect=fake_start), \
              patch("infrastructure.youtube.ytdlp_source.ffmpeg_dir", return_value=None), \
-             patch("glob.glob", return_value=[]):
-            self._dl().download([self._seg()], "/tmp/out")
+             patch.object(YtDlpAudioDownloader, "_save_extras"), \
+             patch("subprocess.run", return_value=self._run_ok()):
+            self._dl().download([self._seg()], str(tmp_path))
         assert "--download-sections" not in captured_cmd
 
-    def test_trecho_adiciona_download_sections(self):
-        proc = _make_process([])
+    def test_trecho_adiciona_download_sections(self, tmp_path):
+        mp4, _ = self._make_mp4(tmp_path)
+        proc   = _make_process([f'[Merger] Merging formats into "{mp4}"'])
         captured_cmd = []
         def fake_start(cmd, *a, **kw):
             captured_cmd.extend(cmd)
             return proc
         with patch("infrastructure.youtube.ytdlp_source.start_process", side_effect=fake_start), \
              patch("infrastructure.youtube.ytdlp_source.ffmpeg_dir", return_value=None), \
-             patch("glob.glob", return_value=[]):
+             patch.object(YtDlpAudioDownloader, "_save_extras"), \
+             patch("subprocess.run", return_value=self._run_ok()):
             seg = self._seg(start="00:10:00", end="01:00:00")
-            self._dl().download([seg], "/tmp/out")
+            self._dl().download([seg], str(tmp_path))
         assert "--download-sections" in captured_cmd
         idx = captured_cmd.index("--download-sections")
         assert captured_cmd[idx + 1] == "*00:10:00-01:00:00"
 
-    def test_formato_asterisco_no_trecho(self):
+    def test_formato_asterisco_no_trecho(self, tmp_path):
         """O trecho DEVE ter o prefixo '*' para o yt-dlp."""
-        proc = _make_process([])
+        mp4, _ = self._make_mp4(tmp_path)
+        proc   = _make_process([f'[Merger] Merging formats into "{mp4}"'])
         captured_cmd = []
         def fake_start(cmd, *a, **kw):
             captured_cmd.extend(cmd)
             return proc
         with patch("infrastructure.youtube.ytdlp_source.start_process", side_effect=fake_start), \
              patch("infrastructure.youtube.ytdlp_source.ffmpeg_dir", return_value=None), \
-             patch("glob.glob", return_value=[]):
+             patch.object(YtDlpAudioDownloader, "_save_extras"), \
+             patch("subprocess.run", return_value=self._run_ok()):
             seg = self._seg(start="00:05:00", end="00:30:00")
-            self._dl().download([seg], "/tmp/out")
+            self._dl().download([seg], str(tmp_path))
         idx = captured_cmd.index("--download-sections")
         assert captured_cmd[idx + 1].startswith("*")
 
-    def test_ffmpeg_location_adicionado_quando_disponivel(self):
-        proc = _make_process([])
+    def test_ffmpeg_location_adicionado_quando_disponivel(self, tmp_path):
+        mp4, _ = self._make_mp4(tmp_path)
+        proc   = _make_process([f'[Merger] Merging formats into "{mp4}"'])
         captured_cmd = []
         def fake_start(cmd, *a, **kw):
             captured_cmd.extend(cmd)
             return proc
         with patch("infrastructure.youtube.ytdlp_source.start_process", side_effect=fake_start), \
              patch("infrastructure.youtube.ytdlp_source.ffmpeg_dir", return_value="/usr/bin"), \
-             patch("glob.glob", return_value=[]):
-            self._dl().download([self._seg()], "/tmp/out")
+             patch.object(YtDlpAudioDownloader, "_save_extras"), \
+             patch("subprocess.run", return_value=self._run_ok()):
+            self._dl().download([self._seg()], str(tmp_path))
         assert "--ffmpeg-location" in captured_cmd
         idx = captured_cmd.index("--ffmpeg-location")
         assert captured_cmd[idx + 1] == "/usr/bin"
 
-    def test_sem_ffmpeg_nao_adiciona_flag(self):
-        proc = _make_process([])
+    def test_sem_ffmpeg_nao_adiciona_flag(self, tmp_path):
+        mp4, _ = self._make_mp4(tmp_path)
+        proc   = _make_process([f'[Merger] Merging formats into "{mp4}"'])
         captured_cmd = []
         def fake_start(cmd, *a, **kw):
             captured_cmd.extend(cmd)
             return proc
         with patch("infrastructure.youtube.ytdlp_source.start_process", side_effect=fake_start), \
              patch("infrastructure.youtube.ytdlp_source.ffmpeg_dir", return_value=None), \
-             patch("glob.glob", return_value=[]):
-            self._dl().download([self._seg()], "/tmp/out")
+             patch.object(YtDlpAudioDownloader, "_save_extras"), \
+             patch("subprocess.run", return_value=self._run_ok()):
+            self._dl().download([self._seg()], str(tmp_path))
         assert "--ffmpeg-location" not in captured_cmd
+
+    def test_usa_formato_mp4_na_flag_f(self, tmp_path):
+        """yt-dlp deve usar bestvideo+bestaudio com merge-output-format mp4."""
+        mp4, _ = self._make_mp4(tmp_path)
+        proc   = _make_process([f'[Merger] Merging formats into "{mp4}"'])
+        captured_cmd = []
+        def fake_start(cmd, *a, **kw):
+            captured_cmd.extend(cmd)
+            return proc
+        with patch("infrastructure.youtube.ytdlp_source.start_process", side_effect=fake_start), \
+             patch("infrastructure.youtube.ytdlp_source.ffmpeg_dir", return_value=None), \
+             patch.object(YtDlpAudioDownloader, "_save_extras"), \
+             patch("subprocess.run", return_value=self._run_ok()):
+            self._dl().download([self._seg()], str(tmp_path))
+        assert "--merge-output-format" in captured_cmd
+        idx = captured_cmd.index("--merge-output-format")
+        assert captured_cmd[idx + 1] == "mp4"
 
     # -------------------------------------------------------------------
     # Subprocessos por vídeo
     # -------------------------------------------------------------------
 
-    def test_um_subprocess_por_segmento(self):
-        procs = [_make_process([]) for _ in range(3)]
+    def test_um_subprocess_por_segmento(self, tmp_path):
+        segs   = [self._seg(vid_id=str(i), title=f"V{i}") for i in range(3)]
+        procs  = []
+        for seg in segs:
+            mp4, _ = self._make_mp4(tmp_path, title=seg.title)
+            procs.append(_make_process([f'[Merger] Merging formats into "{mp4}"']))
+
         call_count = []
+        proc_iter  = iter(procs)
         def fake_start(cmd, *a, **kw):
-            p = procs[len(call_count)]
             call_count.append(1)
-            return p
-        segs = [self._seg(vid_id=str(i), title=f"V{i}") for i in range(3)]
+            return next(proc_iter)
+
         with patch("infrastructure.youtube.ytdlp_source.start_process", side_effect=fake_start), \
              patch("infrastructure.youtube.ytdlp_source.ffmpeg_dir", return_value=None), \
-             patch("glob.glob", return_value=[]):
-            self._dl().download(segs, "/tmp/out")
+             patch.object(YtDlpAudioDownloader, "_save_extras"), \
+             patch("subprocess.run", return_value=self._run_ok()):
+            self._dl().download(segs, str(tmp_path))
         assert len(call_count) == 3
 
     # -------------------------------------------------------------------
     # Progresso
     # -------------------------------------------------------------------
 
-    def test_progresso_intermediario_reportado(self):
-        lines = [
+    def test_progresso_intermediario_reportado(self, tmp_path):
+        mp4, _ = self._make_mp4(tmp_path)
+        lines  = [
             "[download]  50.0% of 100MB",
+            f'[Merger] Merging formats into "{mp4}"',
         ]
         proc = _make_process(lines)
         progress_vals = []
         with patch("infrastructure.youtube.ytdlp_source.start_process", return_value=proc), \
              patch("infrastructure.youtube.ytdlp_source.ffmpeg_dir", return_value=None), \
-             patch("glob.glob", return_value=[]):
+             patch.object(YtDlpAudioDownloader, "_save_extras"), \
+             patch("subprocess.run", return_value=self._run_ok()):
             self._dl().download(
-                [self._seg()], "/tmp/out",
+                [self._seg()], str(tmp_path),
                 on_progress=progress_vals.append,
             )
         assert any(0.0 < v < 1.0 for v in progress_vals)
 
-    def test_progresso_completo_ao_extract_audio(self):
-        lines = ["[ExtractAudio] Destination: culto.mp3"]
-        proc = _make_process(lines)
+    def test_progresso_completo_apos_conversao(self, tmp_path):
+        """Após a conversão MP4→MP3, progresso deve atingir 1.0."""
+        mp4, _ = self._make_mp4(tmp_path)
+        proc   = _make_process([f'[Merger] Merging formats into "{mp4}"'])
         progress_vals = []
         with patch("infrastructure.youtube.ytdlp_source.start_process", return_value=proc), \
              patch("infrastructure.youtube.ytdlp_source.ffmpeg_dir", return_value=None), \
-             patch("glob.glob", return_value=[]):
+             patch.object(YtDlpAudioDownloader, "_save_extras"), \
+             patch("subprocess.run", return_value=self._run_ok()):
             self._dl().download(
-                [self._seg()], "/tmp/out",
+                [self._seg()], str(tmp_path),
                 on_progress=progress_vals.append,
             )
         assert 1.0 in progress_vals
@@ -344,67 +409,88 @@ class TestYtDlpAudioDownloader:
     # Erros e cancelamento
     # -------------------------------------------------------------------
 
-    def test_levanta_runtime_error_quando_returncode_diferente_de_zero(self):
+    def test_levanta_runtime_error_quando_returncode_diferente_de_zero(self, tmp_path):
         proc = _make_process([], returncode=1)
         with patch("infrastructure.youtube.ytdlp_source.start_process", return_value=proc), \
              patch("infrastructure.youtube.ytdlp_source.ffmpeg_dir", return_value=None), \
-             patch("glob.glob", return_value=[]):
+             patch.object(YtDlpAudioDownloader, "_save_extras"):
             with pytest.raises(RuntimeError, match="yt-dlp"):
-                self._dl().download([self._seg()], "/tmp/out")
+                self._dl().download([self._seg()], str(tmp_path))
 
-    def test_cancela_entre_segmentos(self):
+    def test_levanta_runtime_error_quando_mp4_nao_encontrado(self, tmp_path):
+        """Se nenhum MP4 é encontrado após download, levanta RuntimeError."""
+        proc = _make_process([])  # nenhuma linha [Merger] nem Destination
+        with patch("infrastructure.youtube.ytdlp_source.start_process", return_value=proc), \
+             patch("infrastructure.youtube.ytdlp_source.ffmpeg_dir", return_value=None), \
+             patch.object(YtDlpAudioDownloader, "_save_extras"):
+            with pytest.raises(RuntimeError, match="MP4"):
+                self._dl().download([self._seg()], str(tmp_path))
+
+    def test_cancela_entre_segmentos(self, tmp_path):
         import threading
         ev = threading.Event()
 
         procs = [_make_process([]), _make_process([])]
         call_count = []
+        proc_iter  = iter(procs)
         def fake_start(cmd, *a, **kw):
             ev.set()    # sinaliza após o primeiro subprocess ser iniciado
-            p = procs[len(call_count)]
             call_count.append(1)
-            return p
+            return next(proc_iter)
 
         segs = [self._seg(vid_id="a"), self._seg(vid_id="b")]
         with patch("infrastructure.youtube.ytdlp_source.start_process", side_effect=fake_start), \
-             patch("infrastructure.youtube.ytdlp_source.ffmpeg_dir", return_value=None), \
-             patch("glob.glob", return_value=[]):
+             patch("infrastructure.youtube.ytdlp_source.ffmpeg_dir", return_value=None):
             with pytest.raises(OperacaoCancelada):
-                self._dl().download(segs, "/tmp/out", cancel_event=ev)
+                self._dl().download(segs, str(tmp_path), cancel_event=ev)
 
     # -------------------------------------------------------------------
-    # Retorno de AudioFile
+    # Retorno de AudioFile e subfolder
     # -------------------------------------------------------------------
 
-    def test_retorna_audio_files_capturados_do_stdout(self, tmp_path):
-        """
-        Captura o caminho real do MP3 a partir da linha
-        `[ExtractAudio] Destination: ...` emitida pelo yt-dlp.
-        """
-        mp3 = tmp_path / "Culto.mp3"
-        mp3.write_bytes(b"ID3")
-        proc = _make_process([f"[ExtractAudio] Destination: {mp3}"])
+    def test_retorna_audio_file_com_path_mp3(self, tmp_path):
+        """AudioFile retornado aponta para o MP3 derivado do MP4."""
+        mp4, _   = self._make_mp4(tmp_path, "Culto")
+        mp3_path = mp4.with_suffix(".mp3")
+        proc     = _make_process([f'[Merger] Merging formats into "{mp4}"'])
 
         with patch("infrastructure.youtube.ytdlp_source.start_process", return_value=proc), \
-             patch("infrastructure.youtube.ytdlp_source.ffmpeg_dir", return_value=None):
+             patch("infrastructure.youtube.ytdlp_source.ffmpeg_dir", return_value=None), \
+             patch.object(YtDlpAudioDownloader, "_save_extras"), \
+             patch("subprocess.run", return_value=self._run_ok()):
             result = self._dl().download(
                 [self._seg(vid_id="abc123", title="Culto")],
                 str(tmp_path),
             )
 
         assert len(result) == 1
-        assert result[0].path == str(mp3)
-        assert result[0].video_id == "abc123"   # video_id preservado
-        assert result[0].title == "Culto"
+        assert result[0].path == str(mp3_path)
+        assert result[0].video_id == "abc123"
+
+    def test_audio_file_tem_subfolder_preenchido(self, tmp_path):
+        """AudioFile.subfolder aponta para a subpasta criada para o segmento."""
+        mp4, subfolder = self._make_mp4(tmp_path, "Culto")
+        proc           = _make_process([f'[Merger] Merging formats into "{mp4}"'])
+
+        with patch("infrastructure.youtube.ytdlp_source.start_process", return_value=proc), \
+             patch("infrastructure.youtube.ytdlp_source.ffmpeg_dir", return_value=None), \
+             patch.object(YtDlpAudioDownloader, "_save_extras"), \
+             patch("subprocess.run", return_value=self._run_ok()):
+            result = self._dl().download(
+                [self._seg(vid_id="abc123", title="Culto")],
+                str(tmp_path),
+            )
+
+        assert result[0].subfolder == str(subfolder)
 
     def test_video_id_preservado_para_cada_segment(self, tmp_path):
         """Multi-segment: cada AudioFile traz o video_id do seu Segment."""
-        mp3_a = tmp_path / "CultoA.mp3"; mp3_a.write_bytes(b"x")
-        mp3_b = tmp_path / "CultoB.mp3"; mp3_b.write_bytes(b"y")
+        mp4_a, _ = self._make_mp4(tmp_path, "CultoA")
+        mp4_b, _ = self._make_mp4(tmp_path, "CultoB")
 
-        # Cada chamada a start_process recebe um stdout diferente
         procs = [
-            _make_process([f"[ExtractAudio] Destination: {mp3_a}"]),
-            _make_process([f"[ExtractAudio] Destination: {mp3_b}"]),
+            _make_process([f'[Merger] Merging formats into "{mp4_a}"']),
+            _make_process([f'[Merger] Merging formats into "{mp4_b}"']),
         ]
         proc_iter = iter(procs)
 
@@ -413,53 +499,21 @@ class TestYtDlpAudioDownloader:
 
         with patch("infrastructure.youtube.ytdlp_source.start_process",
                    side_effect=lambda *a, **k: next(proc_iter)), \
-             patch("infrastructure.youtube.ytdlp_source.ffmpeg_dir", return_value=None):
+             patch("infrastructure.youtube.ytdlp_source.ffmpeg_dir", return_value=None), \
+             patch.object(YtDlpAudioDownloader, "_save_extras"), \
+             patch("subprocess.run", return_value=self._run_ok()):
             result = self._dl().download(segs, str(tmp_path))
 
         assert [r.video_id for r in result] == ["aaa", "bbb"]
-        assert [r.path for r in result] == [str(mp3_a), str(mp3_b)]
-
-    def test_nao_pega_arquivos_preexistentes_no_output_dir(self, tmp_path):
-        """
-        Regressão B1: antes o downloader globava *.mp3 ao final, pegando
-        arquivos pré-existentes (de runs anteriores) que não foram limpos.
-        Agora só retorna o que o yt-dlp acabou de gerar.
-        """
-        # Pré-existentes (residuais de outro run que o cleanup esqueceu)
-        old1 = tmp_path / "antigo1.mp3"; old1.write_bytes(b"velho")
-        old2 = tmp_path / "antigo2.mp3"; old2.write_bytes(b"velho")
-
-        # Arquivo realmente gerado por este run
-        new = tmp_path / "Culto novo.mp3"; new.write_bytes(b"novo")
-        proc = _make_process([f"[ExtractAudio] Destination: {new}"])
-
-        with patch("infrastructure.youtube.ytdlp_source.start_process", return_value=proc), \
-             patch("infrastructure.youtube.ytdlp_source.ffmpeg_dir", return_value=None):
-            result = self._dl().download(
-                [self._seg(title="Culto novo")],
-                str(tmp_path),
-            )
-
-        # Apenas o arquivo novo deve estar no resultado
-        assert len(result) == 1
-        assert result[0].path == str(new)
-        # Os antigos NÃO entram
-        paths = [r.path for r in result]
-        assert str(old1) not in paths
-        assert str(old2) not in paths
 
     def test_ordem_de_retorno_segue_ordem_dos_segments(self, tmp_path):
-        """
-        Regressão B1: ordem do retorno antes era alfabética (sorted glob).
-        Agora segue a ordem dos segments fornecidos.
-        """
-        # Cria com nomes que NÃO ordenam alfabeticamente como os segments
-        mp3_z = tmp_path / "Z_primeiro.mp3";  mp3_z.write_bytes(b"x")
-        mp3_a = tmp_path / "A_segundo.mp3";   mp3_a.write_bytes(b"y")
+        """Ordem do retorno segue a ordem dos segments fornecidos."""
+        mp4_z, _ = self._make_mp4(tmp_path, "Z_primeiro")
+        mp4_a, _ = self._make_mp4(tmp_path, "A_segundo")
 
         procs = [
-            _make_process([f"[ExtractAudio] Destination: {mp3_z}"]),
-            _make_process([f"[ExtractAudio] Destination: {mp3_a}"]),
+            _make_process([f'[Merger] Merging formats into "{mp4_z}"']),
+            _make_process([f'[Merger] Merging formats into "{mp4_a}"']),
         ]
         proc_iter = iter(procs)
 
@@ -468,11 +522,291 @@ class TestYtDlpAudioDownloader:
 
         with patch("infrastructure.youtube.ytdlp_source.start_process",
                    side_effect=lambda *a, **k: next(proc_iter)), \
-             patch("infrastructure.youtube.ytdlp_source.ffmpeg_dir", return_value=None):
+             patch("infrastructure.youtube.ytdlp_source.ffmpeg_dir", return_value=None), \
+             patch.object(YtDlpAudioDownloader, "_save_extras"), \
+             patch("subprocess.run", return_value=self._run_ok()):
             result = self._dl().download(segs, str(tmp_path))
 
         # Z primeiro, A segundo — ordem dos segments, não ordem alfabética
         assert [r.video_id for r in result] == ["primeiro", "segundo"]
+
+    def test_nao_pega_arquivos_preexistentes_de_outros_segmentos(self, tmp_path):
+        """
+        Regressão B1 (updated): com subpastas por segmento, arquivos de outros
+        segmentos NÃO afetam a resolução do MP4 atual (cada um tem sua própria pasta).
+        """
+        # Pré-existentes em root (de runs anteriores sem subpasta)
+        (tmp_path / "antigo.mp3").write_bytes(b"velho")
+
+        mp4, _ = self._make_mp4(tmp_path, "Culto novo")
+        proc   = _make_process([f'[Merger] Merging formats into "{mp4}"'])
+
+        with patch("infrastructure.youtube.ytdlp_source.start_process", return_value=proc), \
+             patch("infrastructure.youtube.ytdlp_source.ffmpeg_dir", return_value=None), \
+             patch.object(YtDlpAudioDownloader, "_save_extras"), \
+             patch("subprocess.run", return_value=self._run_ok()):
+            result = self._dl().download(
+                [self._seg(title="Culto novo")],
+                str(tmp_path),
+            )
+
+        assert len(result) == 1
+        assert result[0].path.endswith(".mp3")
+        # Resultado está dentro da subpasta, não na raiz
+        assert str(tmp_path / "antigo.mp3") != result[0].path
+
+    # -------------------------------------------------------------------
+    # Resolução de path MP4 (fallbacks)
+    # -------------------------------------------------------------------
+
+    def test_usa_destination_quando_merger_ausente(self, tmp_path):
+        """Se não há linha [Merger], usa [download] Destination: *.mp4."""
+        mp4, _ = self._make_mp4(tmp_path, "Culto")
+        proc   = _make_process([f"[download] Destination: {mp4}"])
+        with patch("infrastructure.youtube.ytdlp_source.start_process", return_value=proc), \
+             patch("infrastructure.youtube.ytdlp_source.ffmpeg_dir", return_value=None), \
+             patch.object(YtDlpAudioDownloader, "_save_extras"), \
+             patch("subprocess.run", return_value=self._run_ok()):
+            result = self._dl().download([self._seg(title="Culto")], str(tmp_path))
+        assert result[0].path.endswith(".mp3")
+
+    def test_usa_glob_quando_merger_e_destination_ausentes(self, tmp_path):
+        """Fallback para glob *.mp4 dentro da subpasta quando nenhuma linha de destino existe."""
+        mp4, _ = self._make_mp4(tmp_path, "Culto")
+        proc   = _make_process([])  # nenhuma linha de destino
+        with patch("infrastructure.youtube.ytdlp_source.start_process", return_value=proc), \
+             patch("infrastructure.youtube.ytdlp_source.ffmpeg_dir", return_value=None), \
+             patch.object(YtDlpAudioDownloader, "_save_extras"), \
+             patch("subprocess.run", return_value=self._run_ok()):
+            result = self._dl().download([self._seg(title="Culto")], str(tmp_path))
+        assert result[0].path.endswith(".mp3")
+
+    # -------------------------------------------------------------------
+    # save_video flag
+    # -------------------------------------------------------------------
+
+    def test_remove_mp4_quando_save_video_false(self, tmp_path):
+        """Quando save_video=False (default), o MP4 deve ser removido."""
+        mp4, _ = self._make_mp4(tmp_path, "Culto")
+        proc   = _make_process([f'[Merger] Merging formats into "{mp4}"'])
+        with patch("infrastructure.youtube.ytdlp_source.start_process", return_value=proc), \
+             patch("infrastructure.youtube.ytdlp_source.ffmpeg_dir", return_value=None), \
+             patch.object(YtDlpAudioDownloader, "_save_extras"), \
+             patch("subprocess.run", return_value=self._run_ok()):
+            self._dl(save_video=False).download([self._seg(title="Culto")], str(tmp_path))
+        assert not mp4.exists()
+
+    def test_mantem_mp4_quando_save_video_true(self, tmp_path):
+        """Quando save_video=True, o MP4 deve ser mantido."""
+        mp4, _ = self._make_mp4(tmp_path, "Culto")
+        proc   = _make_process([f'[Merger] Merging formats into "{mp4}"'])
+        with patch("infrastructure.youtube.ytdlp_source.start_process", return_value=proc), \
+             patch("infrastructure.youtube.ytdlp_source.ffmpeg_dir", return_value=None), \
+             patch.object(YtDlpAudioDownloader, "_save_extras"), \
+             patch("subprocess.run", return_value=self._run_ok()):
+            self._dl(save_video=True).download([self._seg(title="Culto")], str(tmp_path))
+        assert mp4.exists()
+
+    def test_save_video_false_por_padrao(self):
+        """save_video=False é o padrão."""
+        assert self._dl()._save_video is False
+
+    # -------------------------------------------------------------------
+    # Mudanças de sessão — progresso multi-segmento e status messages
+    # -------------------------------------------------------------------
+
+    def test_progresso_monotico_para_dois_segmentos(self, tmp_path):
+        """
+        Mudança de sessão: com N=2 segmentos o progresso nunca deve regredir —
+        o slot de cada segmento é (idx + …) / total, garantindo monotonicidade.
+        """
+        mp4_a, _ = self._make_mp4(tmp_path, "CultoA")
+        mp4_b, _ = self._make_mp4(tmp_path, "CultoB")
+
+        lines_a = [
+            "[download]  30.0% of 100MB",
+            "[download]  80.0% of 100MB",
+            f'[Merger] Merging formats into "{mp4_a}"',
+        ]
+        lines_b = [
+            "[download]  50.0% of 100MB",
+            f'[Merger] Merging formats into "{mp4_b}"',
+        ]
+        procs = [_make_process(lines_a), _make_process(lines_b)]
+        proc_iter = iter(procs)
+
+        progress_vals: list = []
+        segs = [
+            self._seg(vid_id="a", title="CultoA"),
+            self._seg(vid_id="b", title="CultoB"),
+        ]
+
+        with patch("infrastructure.youtube.ytdlp_source.start_process",
+                   side_effect=lambda *a, **k: next(proc_iter)), \
+             patch("infrastructure.youtube.ytdlp_source.ffmpeg_dir", return_value=None), \
+             patch.object(YtDlpAudioDownloader, "_save_extras"), \
+             patch("subprocess.run", return_value=self._run_ok()):
+            self._dl().download(segs, str(tmp_path),
+                                on_progress=progress_vals.append)
+
+        assert progress_vals, "Nenhum progresso reportado"
+        # Monotonicidade: nenhum valor pode ser menor que o anterior
+        for a, b in zip(progress_vals, progress_vals[1:]):
+            assert a <= b, f"Progresso regrediu: {a:.3f} → {b:.3f}"
+        # Deve terminar em 1.0
+        assert progress_vals[-1] == pytest.approx(1.0)
+
+    def test_status_convertendo_emitido_pelo_downloader(self, tmp_path):
+        """
+        Mudança de sessão: o downloader deve emitir status "Convertendo para MP3..."
+        (usado pela GUI para iniciar a animação da convert_bar).
+        """
+        mp4, _ = self._make_mp4(tmp_path)
+        proc   = _make_process([f'[Merger] Merging formats into "{mp4}"'])
+        statuses: list = []
+
+        with patch("infrastructure.youtube.ytdlp_source.start_process", return_value=proc), \
+             patch("infrastructure.youtube.ytdlp_source.ffmpeg_dir", return_value=None), \
+             patch.object(YtDlpAudioDownloader, "_save_extras"), \
+             patch("subprocess.run", return_value=self._run_ok()):
+            self._dl().download(
+                [self._seg()], str(tmp_path),
+                on_status=statuses.append,
+            )
+
+        assert any("Convertendo" in s for s in statuses), \
+            f"Esperado status 'Convertendo...' entre: {statuses}"
+
+    def test_status_salvando_metadados_emitido(self, tmp_path):
+        """
+        Mudança de sessão: o downloader deve emitir status "Salvando metadados..."
+        antes de chamar _save_extras.
+        """
+        mp4, _ = self._make_mp4(tmp_path)
+        proc   = _make_process([f'[Merger] Merging formats into "{mp4}"'])
+        statuses: list = []
+
+        with patch("infrastructure.youtube.ytdlp_source.start_process", return_value=proc), \
+             patch("infrastructure.youtube.ytdlp_source.ffmpeg_dir", return_value=None), \
+             patch.object(YtDlpAudioDownloader, "_save_extras"), \
+             patch("subprocess.run", return_value=self._run_ok()):
+            self._dl().download(
+                [self._seg()], str(tmp_path),
+                on_status=statuses.append,
+            )
+
+        assert any("metadados" in s.lower() for s in statuses), \
+            f"Esperado status com 'metadados' entre: {statuses}"
+
+    # ------------------------------------------------------------------
+    # --write-description e captura de descricao.txt
+    # ------------------------------------------------------------------
+
+    # ------------------------------------------------------------------
+    # Qualidade do vídeo
+    # ------------------------------------------------------------------
+
+    def _captured_cmd(self, tmp_path, *, video_quality="alta"):
+        """Retorna o comando yt-dlp capturado para o dado video_quality."""
+        mp4, _ = self._make_mp4(tmp_path)
+        proc   = _make_process([f'[Merger] Merging formats into "{mp4}"'])
+        captured: list = []
+        def fake_start(cmd, *a, **kw):
+            captured.extend(cmd)
+            return proc
+        with patch("infrastructure.youtube.ytdlp_source.start_process",
+                   side_effect=fake_start), \
+             patch("infrastructure.youtube.ytdlp_source.ffmpeg_dir",
+                   return_value=None), \
+             patch.object(YtDlpAudioDownloader, "_save_extras"), \
+             patch("subprocess.run", return_value=self._run_ok()):
+            YtDlpAudioDownloader(video_quality=video_quality).download(
+                [self._seg()], str(tmp_path)
+            )
+        return captured
+
+    def test_qualidade_alta_usa_bestvideo(self, tmp_path):
+        cmd = self._captured_cmd(tmp_path, video_quality="alta")
+        idx = cmd.index("-f")
+        assert "bestvideo" in cmd[idx + 1]
+
+    def test_qualidade_baixa_usa_worstvideo(self, tmp_path):
+        cmd = self._captured_cmd(tmp_path, video_quality="baixa")
+        idx = cmd.index("-f")
+        assert "worstvideo" in cmd[idx + 1]
+
+    def test_qualidade_default_e_alta(self, tmp_path):
+        cmd = self._captured_cmd(tmp_path)   # sem video_quality → default
+        idx = cmd.index("-f")
+        assert "bestvideo" in cmd[idx + 1]
+
+    def test_write_description_no_comando_ytdlp(self, tmp_path):
+        """Regressão: --write-description deve estar no comando de download."""
+        mp4, _ = self._make_mp4(tmp_path)
+        proc   = _make_process([f'[Merger] Merging formats into "{mp4}"'])
+        captured: list = []
+        def fake_start(cmd, *a, **kw):
+            captured.extend(cmd)
+            return proc
+        with patch("infrastructure.youtube.ytdlp_source.start_process",
+                   side_effect=fake_start), \
+             patch("infrastructure.youtube.ytdlp_source.ffmpeg_dir",
+                   return_value=None), \
+             patch.object(YtDlpAudioDownloader, "_save_extras"), \
+             patch("subprocess.run", return_value=self._run_ok()):
+            self._dl().download([self._seg()], str(tmp_path))
+        assert "--write-description" in captured
+
+    def test_description_file_renomeado_para_descricao_txt(self, tmp_path):
+        """Arquivo .description gerado pelo yt-dlp deve virar descricao.txt."""
+        mp4, subfolder = self._make_mp4(tmp_path)          # cria tmp_path/Culto/
+        # Simula o arquivo .description criado pelo yt-dlp
+        desc_file = subfolder / "Culto.description"
+        desc_file.write_text("Descrição do culto.", encoding="utf-8")
+
+        proc = _make_process([f'[Merger] Merging formats into "{mp4}"'])
+        with patch("infrastructure.youtube.ytdlp_source.start_process",
+                   return_value=proc), \
+             patch("infrastructure.youtube.ytdlp_source.ffmpeg_dir",
+                   return_value=None), \
+             patch.object(YtDlpAudioDownloader, "_save_extras"), \
+             patch("subprocess.run", return_value=self._run_ok()):
+            self._dl().download([self._seg()], str(tmp_path))
+
+        txt = subfolder / "descricao.txt"
+        assert txt.exists(), "descricao.txt deve ser criado após renomear .description"
+        assert txt.read_text(encoding="utf-8") == "Descrição do culto."
+        assert not desc_file.exists(), ".description deve ser removido após renomear"
+
+    def test_save_extras_nao_chama_fetcher_quando_descricao_txt_existe(self, tmp_path):
+        """_save_extras não deve chamar metadata_fetcher se descricao.txt já existir."""
+        subfolder = tmp_path / "video"
+        subfolder.mkdir()
+        (subfolder / "descricao.txt").write_text("já existe", encoding="utf-8")
+
+        fetcher = MagicMock(return_value={"description": "nova", "thumbnail_url": ""})
+        dl = YtDlpAudioDownloader(metadata_fetcher=fetcher)
+        # urllib é importado dentro do try da thumbnail — deixa falhar silenciosamente
+        with patch("urllib.request.urlopen", side_effect=Exception("sem rede")):
+            dl._save_extras("vid123", str(subfolder))
+
+        fetcher.assert_not_called()
+        assert (subfolder / "descricao.txt").read_text(encoding="utf-8") == "já existe"
+
+    def test_save_extras_chama_fetcher_como_fallback_quando_sem_descricao(self, tmp_path):
+        """_save_extras chama metadata_fetcher se descricao.txt não existe."""
+        subfolder = tmp_path / "video"
+        subfolder.mkdir()
+
+        fetcher = MagicMock(return_value={"description": "descrição do fallback",
+                                          "thumbnail_url": ""})
+        dl = YtDlpAudioDownloader(metadata_fetcher=fetcher)
+        with patch("urllib.request.urlopen", side_effect=Exception("sem rede")):
+            dl._save_extras("vid123", str(subfolder))
+
+        fetcher.assert_called_once_with("vid123")
+        assert (subfolder / "descricao.txt").read_text(encoding="utf-8") \
+            == "descrição do fallback"
 
 
 # ===========================================================================
@@ -632,6 +966,25 @@ class TestFetchVideoMetadata:
             result = fetch_video_metadata("abc123")
         assert result == {"description": "", "thumbnail_url": ""}
 
+    def test_parseia_json_mesmo_com_warnings_antes(self):
+        """Regressão: warnings do yt-dlp misturados antes do JSON não devem
+        quebrar o parsing (start_process redireciona stderr → stdout)."""
+        import json as _json
+        from infrastructure.youtube.ytdlp_source import fetch_video_metadata
+        json_line = _json.dumps({"description": "Culto da manhã.", "thumbnail": "http://t.jpg"})
+        # Simula output real do yt-dlp: warnings/info antes do JSON
+        mixed_output = (
+            "[youtube] Extracting URL: https://www.youtube.com/watch?v=abc\n"
+            "[youtube] abc: Downloading webpage\n"
+            "WARNING: [youtube] Formato indisponível\n"
+            f"{json_line}\n"
+        )
+        proc = self._make_proc(mixed_output)
+        with patch("infrastructure.youtube.ytdlp_source.start_process", return_value=proc):
+            result = fetch_video_metadata("abc123")
+        assert result["description"] == "Culto da manhã."
+        assert result["thumbnail_url"] == "http://t.jpg"
+
     def test_retorna_dict_vazio_quando_subprocess_lanca_excecao(self):
         from infrastructure.youtube.ytdlp_source import fetch_video_metadata
         with patch("infrastructure.youtube.ytdlp_source.start_process",
@@ -716,3 +1069,218 @@ class TestFetchVideoDescription:
             fetch_video_description("xyz")
         cmd = sp.call_args.args[0]
         assert "--skip-download" in cmd
+
+
+# ===========================================================================
+# sanitize_folder_name
+# ===========================================================================
+
+class TestSanitizeFolderName:
+    """Testa a função de sanitização de nomes de pasta."""
+
+    def _s(self, title: str) -> str:
+        from infrastructure.youtube.ytdlp_source import sanitize_folder_name
+        return sanitize_folder_name(title)
+
+    def test_remove_dois_pontos(self):
+        assert ":" not in self._s("Culto: Domingo de Páscoa")
+
+    def test_remove_barra(self):
+        assert "/" not in self._s("a/b")
+
+    def test_remove_barra_invertida(self):
+        assert "\\" not in self._s("a\\b")
+
+    def test_remove_asterisco(self):
+        assert "*" not in self._s("culto * especial")
+
+    def test_remove_interrogacao(self):
+        assert "?" not in self._s("culto?")
+
+    def test_remove_angulo(self):
+        result = self._s("a<b>c")
+        assert "<" not in result and ">" not in result
+
+    def test_remove_pipe(self):
+        assert "|" not in self._s("a|b")
+
+    def test_remove_aspas(self):
+        assert '"' not in self._s('diz "amém"')
+
+    def test_colapsa_espacos_multiplos(self):
+        assert "  " not in self._s("culto   domingo")
+
+    def test_trunca_a_150_chars(self):
+        long_title = "a" * 200
+        assert len(self._s(long_title)) == 150
+
+    def test_titulo_vazio_retorna_video(self):
+        assert self._s("") == "video"
+
+    def test_titulo_so_caracteres_proibidos_retorna_video(self):
+        assert self._s("///:::***") == "video"
+
+    def test_preserva_acentos_e_unicode(self):
+        result = self._s("Culto de Páscoa 2026")
+        assert "Páscoa" in result
+
+    def test_remove_ponto_e_espaco_no_final(self):
+        assert not self._s("culto.").endswith(".")
+        assert not self._s("culto ").endswith(" ")
+
+    def test_preserva_caracteres_permitidos(self):
+        result = self._s("Culto Domingo 19-04-2026")
+        assert "Domingo" in result
+        assert "19-04-2026" in result
+
+
+# ===========================================================================
+# YtDlpAudioDownloader._save_extras
+# ===========================================================================
+
+class TestSaveExtras:
+    """
+    Testa _save_extras — operações best-effort de thumbnail e descrição.
+    urllib.request.urlopen é mockado para evitar rede real.
+    """
+
+    def _dl(self, metadata_fetcher=None):
+        return YtDlpAudioDownloader(metadata_fetcher=metadata_fetcher)
+
+    def _fake_response(self, data: bytes):
+        """Mock de resposta HTTP que devolve `data` em .read()."""
+        resp = MagicMock()
+        resp.read.return_value = data
+        resp.__enter__ = lambda s: resp
+        resp.__exit__  = MagicMock(return_value=False)
+        return resp
+
+    def test_salva_capa_jpg_quando_cdn_retorna_dados_validos(self, tmp_path):
+        resp = self._fake_response(b"x" * 600)  # > 500 bytes
+        with patch("urllib.request.urlopen", return_value=resp), \
+             patch("ssl.create_default_context"):
+            self._dl()._save_extras("abc123", str(tmp_path))
+        assert (tmp_path / "capa.jpg").exists()
+        assert len((tmp_path / "capa.jpg").read_bytes()) == 600
+
+    def test_nao_salva_capa_quando_cdn_retorna_poucos_bytes(self, tmp_path):
+        """Dados < 500 bytes são descartados (placeholder de 404)."""
+        resp = self._fake_response(b"x" * 200)  # < 500 bytes
+        with patch("urllib.request.urlopen", return_value=resp), \
+             patch("ssl.create_default_context"):
+            self._dl()._save_extras("abc123", str(tmp_path))
+        assert not (tmp_path / "capa.jpg").exists()
+
+    def test_salva_descricao_txt_quando_metadata_fetcher_disponivel(self, tmp_path):
+        mock_fetcher = MagicMock(return_value={
+            "description": "Culto de domingo 2026.", "thumbnail_url": ""
+        })
+        with patch("urllib.request.urlopen", side_effect=Exception("sem rede")):
+            self._dl(metadata_fetcher=mock_fetcher)._save_extras("abc123", str(tmp_path))
+        assert (tmp_path / "descricao.txt").exists()
+        assert (tmp_path / "descricao.txt").read_text(encoding="utf-8") == "Culto de domingo 2026."
+
+    def test_nao_salva_descricao_sem_metadata_fetcher(self, tmp_path):
+        with patch("urllib.request.urlopen", side_effect=Exception("sem rede")):
+            self._dl(metadata_fetcher=None)._save_extras("abc123", str(tmp_path))
+        assert not (tmp_path / "descricao.txt").exists()
+
+    def test_nao_lanca_excecao_em_falha_de_rede(self, tmp_path):
+        """Falhas de rede são silenciadas (best-effort)."""
+        mock_fetcher = MagicMock(side_effect=RuntimeError("sem rede"))
+        with patch("urllib.request.urlopen", side_effect=RuntimeError("sem rede")):
+            # Não deve lançar exceção
+            self._dl(metadata_fetcher=mock_fetcher)._save_extras("abc123", str(tmp_path))
+
+    def test_nao_salva_descricao_quando_texto_vazio(self, tmp_path):
+        """Descrição vazia não gera arquivo."""
+        mock_fetcher = MagicMock(return_value={"description": "", "thumbnail_url": ""})
+        with patch("urllib.request.urlopen", side_effect=Exception("sem rede")):
+            self._dl(metadata_fetcher=mock_fetcher)._save_extras("abc123", str(tmp_path))
+        assert not (tmp_path / "descricao.txt").exists()
+
+
+# ===========================================================================
+# YtDlpAudioDownloader._convert_to_mp3
+# ===========================================================================
+
+class TestConvertToMp3:
+    """Testa _convert_to_mp3 com subprocess.run mockado."""
+
+    def test_chama_ffmpeg_com_flags_corretos(self, tmp_path):
+        mp4 = tmp_path / "video.mp4"
+        mp4.write_bytes(b"fake-mp4")
+        mp3 = tmp_path / "video.mp3"
+
+        dl = YtDlpAudioDownloader()
+        captured = []
+        def fake_run(cmd, **kwargs):
+            captured.extend(cmd)
+            return MagicMock(returncode=0, stderr="")
+
+        with patch("subprocess.run", side_effect=fake_run):
+            dl._convert_to_mp3(str(mp4), str(mp3))
+
+        assert "-i"   in captured
+        assert str(mp4) in captured
+        assert "-vn"  in captured
+        assert "-f"   in captured
+        idx = captured.index("-f")
+        assert captured[idx + 1] == "mp3"
+        assert str(mp3) in captured
+
+    def test_levanta_runtime_error_quando_ffmpeg_falha(self, tmp_path):
+        mp4 = tmp_path / "video.mp4"
+        mp4.write_bytes(b"fake-mp4")
+        mp3 = tmp_path / "video.mp3"
+
+        dl = YtDlpAudioDownloader()
+        with patch("subprocess.run", return_value=MagicMock(returncode=1, stderr="ffmpeg error")):
+            with pytest.raises(RuntimeError, match="ffmpeg"):
+                dl._convert_to_mp3(str(mp4), str(mp3))
+
+    def test_usa_ffdir_quando_disponivel(self, tmp_path):
+        mp4 = tmp_path / "video.mp4"
+        mp4.write_bytes(b"fake-mp4")
+        mp3 = tmp_path / "video.mp3"
+
+        dl = YtDlpAudioDownloader()
+        captured = []
+        def fake_run(cmd, **kwargs):
+            captured.extend(cmd)
+            return MagicMock(returncode=0, stderr="")
+
+        with patch("subprocess.run", side_effect=fake_run), \
+             patch("os.path.exists", return_value=True):
+            dl._convert_to_mp3(str(mp4), str(mp3), ffdir="/usr/bin")
+
+        # O primeiro token do comando deve ser o caminho do ffmpeg com o ffdir
+        assert "/usr/bin" in captured[0]
+
+    def test_usa_ffmpeg_literal_sem_ffdir(self, tmp_path):
+        mp4 = tmp_path / "video.mp4"
+        mp4.write_bytes(b"fake-mp4")
+        mp3 = tmp_path / "video.mp3"
+
+        dl = YtDlpAudioDownloader()
+        captured = []
+        def fake_run(cmd, **kwargs):
+            captured.extend(cmd)
+            return MagicMock(returncode=0, stderr="")
+
+        with patch("subprocess.run", side_effect=fake_run):
+            dl._convert_to_mp3(str(mp4), str(mp3))
+
+        assert captured[0] == "ffmpeg"
+
+    def test_on_log_chamado_com_mensagem_de_conversao(self, tmp_path):
+        mp4 = tmp_path / "video.mp4"
+        mp4.write_bytes(b"fake-mp4")
+        mp3 = tmp_path / "video.mp3"
+
+        dl   = YtDlpAudioDownloader()
+        logs = []
+        with patch("subprocess.run", return_value=MagicMock(returncode=0, stderr="")):
+            dl._convert_to_mp3(str(mp4), str(mp3), on_log=logs.append)
+
+        assert any("MP3" in m or "Conver" in m for m in logs)

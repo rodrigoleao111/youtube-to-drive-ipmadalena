@@ -32,6 +32,22 @@ def _noop(*_a, **_kw):
     pass
 
 
+_MIME_MAP = {
+    ".mp3":  "audio/mpeg",
+    ".mp4":  "video/mp4",
+    ".jpg":  "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".txt":  "text/plain",
+    ".png":  "image/png",
+}
+
+
+def _mime_for_path(file_path: str) -> str:
+    """Retorna o MIME type correto baseado na extensão do arquivo."""
+    ext = os.path.splitext(file_path)[1].lower()
+    return _MIME_MAP.get(ext, "application/octet-stream")
+
+
 _MESES_PT = {
     1: "Janeiro",  2: "Fevereiro", 3: "Março",    4: "Abril",
     5: "Maio",     6: "Junho",     7: "Julho",     8: "Agosto",
@@ -361,13 +377,15 @@ class GoogleDriveStorage:
         creds   = service._http.credentials
         session = AuthorizedSession(creds)
 
+        mime_type = _mime_for_path(file_path)
+
         # Inicia upload resumível — obtém URI de destino
         init_resp = session.post(
             "https://www.googleapis.com/upload/drive/v3/files",
             params={"uploadType": "resumable", "fields": "id,name,webViewLink"},
             json={"name": file_name, "parents": [folder_id]},
             headers={
-                "X-Upload-Content-Type":   "audio/mpeg",
+                "X-Upload-Content-Type":   mime_type,
                 "X-Upload-Content-Length": str(file_size_bytes),
             },
         )
@@ -384,7 +402,7 @@ class GoogleDriveStorage:
             upload_resp = session.put(
                 upload_uri,
                 data=pf,
-                headers={"Content-Type": "audio/mpeg"},
+                headers={"Content-Type": mime_type},
             )
             upload_resp.raise_for_status()
             avg_rate = pf.average_rate_mbps()
@@ -455,13 +473,20 @@ class GoogleDriveStorage:
             if cancel_event and cancel_event.is_set():
                 raise OperacaoCancelada("Operação cancelada.")
 
+            # Normaliza o progresso para cobrir o lote inteiro (0–100 ao longo
+            # de todos os arquivos).  Sem isso, cada arquivo ciclaria 0→100
+            # individualmente — regressão visível quando a subpasta contém
+            # MP3 + capa.jpg + descricao.txt (+ MP4 opcional).
+            def _norm_progress(pct: float, _i: int = i, _n: int = total) -> None:
+                progress(int((_i - 1 + pct / 100) / _n * 100))
+
             status(f"Enviando arquivo {i} de {total}...")
             _result, was_skipped = self._upload_single(
                 service,
                 audio_file.path,
                 folder_id,
                 on_log=log,
-                on_progress=progress,
+                on_progress=_norm_progress,
                 on_upload_stats=upload_stats,
                 cancel_event=cancel_event,
             )
@@ -478,6 +503,19 @@ class GoogleDriveStorage:
                     pass
             else:
                 log(f"[DEBUG] Arquivo mantido em: {audio_file.path}")
+
+        # Remove subpastas que ficaram vazias após apagar os arquivos
+        if self._delete_after_upload:
+            seen: set = set()
+            for audio_file in files:
+                sf = audio_file.subfolder
+                if sf and sf not in seen:
+                    seen.add(sf)
+                    try:
+                        if os.path.isdir(sf) and not os.listdir(sf):
+                            os.rmdir(sf)
+                    except Exception:
+                        pass
 
         status("Concluído!")
         log(f"✓ {total} arquivo(s) enviado(s) para o Drive.")

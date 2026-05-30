@@ -78,6 +78,15 @@ class AudioFile:
     video_id: str
     """ID do vídeo de origem."""
 
+    subfolder: Optional[str] = None
+    """
+    Caminho absoluto da subpasta criada por segmento em downloads/.
+    None quando o downloader não usa subpastas (retrocompatibilidade).
+    Usado pelo presenter para montar a lista de upload com todos os
+    artefatos (MP4, capa.jpg, descricao.txt) e pela GUI para localizar
+    a capa na tela Início.
+    """
+
     def filename(self) -> str:
         """Nome do arquivo sem o diretório."""
         import os
@@ -196,6 +205,31 @@ class AudioEditConfig:
     volume_norm_lufs: float = -16.0
     """Alvo de loudness integrado em LUFS (EBU R128). Intervalo típico: -30 a -6."""
 
+    # ------------------------------------------------------------------
+    # Música de fundo
+    # ------------------------------------------------------------------
+
+    bg_music_path: Optional[str] = None
+    """Caminho do arquivo de música de fundo (None = sem música)."""
+
+    bg_music_enabled: bool = False
+    """Se True, mistura a música de fundo no áudio final."""
+
+    bg_music_volume: float = 0.12
+    """Volume da música em relação ao áudio principal (0.0–1.0). Default 12%."""
+
+    bg_music_delay: float = 0.0
+    """Segundos de espera até a música começar após o início do episódio."""
+
+    bg_music_fade_in: float = 3.0
+    """Duração (s) do fade in da música de fundo."""
+
+    bg_music_fade_out: float = 6.0
+    """Duração (s) do fade out da música de fundo."""
+
+    bg_music_loop: bool = True
+    """Se True, a música é repetida em loop até o fim do episódio."""
+
     @property
     def has_any_filter_enabled(self) -> bool:
         """True se qualquer etapa do pipeline estiver ativa (caso contrário, no-op)."""
@@ -207,6 +241,7 @@ class AudioEditConfig:
             or self.volume_norm_enabled
             or self.intro_path is not None
             or self.outro_path is not None
+            or (self.bg_music_enabled and self.bg_music_path is not None)
         )
 
     def to_dict(self) -> dict:
@@ -227,6 +262,13 @@ class AudioEditConfig:
             "noise_reduction_intensity": self.noise_reduction_intensity,
             "volume_norm_enabled":       self.volume_norm_enabled,
             "volume_norm_lufs":          self.volume_norm_lufs,
+            "bg_music_path":             self.bg_music_path,
+            "bg_music_enabled":          self.bg_music_enabled,
+            "bg_music_volume":           self.bg_music_volume,
+            "bg_music_delay":            self.bg_music_delay,
+            "bg_music_fade_in":          self.bg_music_fade_in,
+            "bg_music_fade_out":         self.bg_music_fade_out,
+            "bg_music_loop":             self.bg_music_loop,
         }
 
     @classmethod
@@ -263,6 +305,13 @@ class AudioEditConfig:
             noise_reduction_intensity = d.get("noise_reduction_intensity", "media"),
             volume_norm_enabled       = bool(d.get("volume_norm_enabled", False)),
             volume_norm_lufs          = float(d.get("volume_norm_lufs", -16.0)),
+            bg_music_path             = d.get("bg_music_path"),
+            bg_music_enabled          = bool(d.get("bg_music_enabled", False)),
+            bg_music_volume           = float(d.get("bg_music_volume", 0.12)),
+            bg_music_delay            = float(d.get("bg_music_delay", 0.0)),
+            bg_music_fade_in          = float(d.get("bg_music_fade_in", 3.0)),
+            bg_music_fade_out         = float(d.get("bg_music_fade_out", 6.0)),
+            bg_music_loop             = bool(d.get("bg_music_loop", True)),
         )
 
 

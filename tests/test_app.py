@@ -194,6 +194,32 @@ class TestQueueProcessing:
         application._process_queue()
         assert application.download_bar.get() == pytest.approx(0.45, abs=0.01)
 
+    # ------------------------------------------------------------------
+    # Novos testes — mudanças da sessão: edit_progress e convert_bar
+    # ------------------------------------------------------------------
+
+    def test_mensagem_edit_progress_atualiza_convert_bar(self, application):
+        """
+        Mudança de sessão: edit_progress deve atualizar a convert_bar
+        com o valor normalizado recebido (0.0–1.0).
+        """
+        application._show_bars()
+        application._queue.put(("edit_progress", 0.70))
+        application._process_queue()
+        assert application.convert_bar.get() == pytest.approx(0.70, abs=0.01)
+
+    def test_mensagem_edit_progress_desativa_flag_converting(self, application):
+        """
+        Mudança de sessão: edit_progress deve parar a animação em andamento
+        (setar _converting=False) antes de aplicar o valor real.
+        """
+        application._show_bars()
+        application._converting = True   # simula animação em andamento
+        application._queue.put(("edit_progress", 0.50))
+        application._process_queue()
+        assert application._converting is False
+        assert application.convert_bar.get() == pytest.approx(0.50, abs=0.01)
+
     def test_mensagem_done_chama_on_done_com_args(self, application):
         with patch.object(application, "_on_done") as mock_done:
             application._queue.put(("done", ("19/04/2026", ["Culto A", "Culto B"])))
@@ -814,6 +840,48 @@ class TestWorkerPhase2:
         assert "progress" in kinds        # on_upload_progress vira "progress"
         assert "upload_stats" in kinds
 
+    def test_on_edit_progress_callback_enfileirado(self, application):
+        """
+        Mudança de sessão: _worker_phase2 deve repassar on_edit_progress
+        ao presenter e o callback deve enfileirar ("edit_progress", valor).
+        """
+        captured_callbacks = {}
+
+        def fake_process(date_str, segs, **kwargs):
+            captured_callbacks.update(kwargs)
+            return []
+
+        mock_presenter = MagicMock()
+        mock_presenter.process_segments.side_effect = fake_process
+
+        with patch.object(application, "_build_presenter", return_value=mock_presenter):
+            application._worker_phase2("19/04/2026", self._segments())
+
+        # Drena fila do ("done", ...) produzido pelo worker
+        try:
+            while True:
+                application._queue.get_nowait()
+        except queue.Empty:
+            pass
+
+        # on_edit_progress deve estar presente e ser callable
+        assert callable(captured_callbacks.get("on_edit_progress")), \
+            "on_edit_progress não foi repassado ao presenter"
+
+        # Invocar o callback deve enfileirar a mensagem correta
+        captured_callbacks["on_edit_progress"](0.75)
+        msgs = []
+        try:
+            while True:
+                msgs.append(application._queue.get_nowait())
+        except queue.Empty:
+            pass
+
+        kinds = [m[0] for m in msgs]
+        assert "edit_progress" in kinds
+        payloads = [m[1] for m in msgs if m[0] == "edit_progress"]
+        assert payloads == [0.75]
+
 
 # ---------------------------------------------------------------------------
 # _CheckCell — toggle de seleção
@@ -1215,19 +1283,22 @@ class TestConfigPageStructure:
     def test_config_page_tem_qtabwidget_com_quatro_abas(self, application):
         from PyQt6.QtWidgets import QTabWidget
         assert isinstance(application._cfg_tabs, QTabWidget)
-        assert application._cfg_tabs.count() == 4
+        assert application._cfg_tabs.count() == 5
 
     def test_aba_drive_e_a_primeira(self, application):
         assert "Drive" in application._cfg_tabs.tabText(0)
 
-    def test_aba_youtube_e_a_segunda(self, application):
-        assert "YouTube" in application._cfg_tabs.tabText(1)
+    def test_aba_arquivos_locais_e_a_segunda(self, application):
+        assert "Arquivos" in application._cfg_tabs.tabText(1)
 
-    def test_aba_spotify_e_a_terceira(self, application):
-        assert "Spotify" in application._cfg_tabs.tabText(2)
+    def test_aba_youtube_e_a_terceira(self, application):
+        assert "YouTube" in application._cfg_tabs.tabText(2)
 
-    def test_aba_audio_e_a_quarta(self, application):
-        assert "áudio" in application._cfg_tabs.tabText(3).lower()
+    def test_aba_spotify_e_a_quarta(self, application):
+        assert "Spotify" in application._cfg_tabs.tabText(3)
+
+    def test_aba_audio_e_a_quinta(self, application):
+        assert "áudio" in application._cfg_tabs.tabText(4).lower()
 
     def test_audio_tab_e_instancia_de_audio_settings_tab(self, application):
         from app import _AudioSettingsTab
@@ -3190,3 +3261,87 @@ class TestSpotifyPublish:
                 pass
 
         assert application._spotify_pending["title"] == "Podcast: Culto Manha"
+
+    # ------------------------------------------------------------------
+    # Mudança de sessão: busca de MP3 em subpastas do DOWNLOAD_DIR
+    # ------------------------------------------------------------------
+
+    def test_show_spotify_predialog_encontra_mp3_em_subfolder(
+        self, application, tmp_path
+    ):
+        """
+        Regressão MP4-first: _show_spotify_predialog deve encontrar o MP3
+        dentro de uma subpasta (novo fluxo downloads/{título}/arquivo.mp3).
+        """
+        import time as _time
+        subfolder = tmp_path / "Culto Domingo"
+        subfolder.mkdir()
+        mp3 = subfolder / "Culto Domingo.mp3"
+        mp3.write_bytes(b"fake-mp3-data")
+
+        pending = {
+            "show_id":          "myshow",
+            "video_id":         "VID1",
+            "title":            "Culto Domingo",
+            "description":      "",
+            "date_str":         "25/05/2026",
+            "tags":             "",
+            "cover_image_path": "",
+        }
+
+        captured = {}
+
+        def fake_dlg(**kwargs):
+            captured.update(kwargs)
+            return MagicMock()
+
+        with patch("app._SpotifyPrePublishDialog", side_effect=fake_dlg), \
+             patch.object(baixar_audio, "DOWNLOAD_DIR", str(tmp_path)):
+            application._show_spotify_predialog(pending)
+
+        assert captured.get("audio_path") == str(mp3), \
+            f"Esperado {mp3}, obtido {captured.get('audio_path')!r}"
+
+    def test_show_spotify_predialog_prefere_subfolder_sobre_raiz(
+        self, application, tmp_path
+    ):
+        """
+        Quando há MP3 tanto na raiz quanto em subfolder, o mais recente
+        deve ser selecionado (comportamento de sorted + reverse=True).
+        """
+        import time as _time
+
+        # MP3 na raiz — mais antigo
+        mp3_root = tmp_path / "antigo.mp3"
+        mp3_root.write_bytes(b"antigo")
+
+        _time.sleep(0.01)  # garante mtime diferente
+
+        # MP3 em subfolder — mais recente
+        sub = tmp_path / "Culto"
+        sub.mkdir()
+        mp3_sub = sub / "Culto.mp3"
+        mp3_sub.write_bytes(b"novo")
+
+        pending = {
+            "show_id":          "s",
+            "video_id":         "v",
+            "title":            "Culto",
+            "description":      "",
+            "date_str":         "25/05/2026",
+            "tags":             "",
+            "cover_image_path": "",
+        }
+
+        captured = {}
+
+        def fake_dlg(**kwargs):
+            captured.update(kwargs)
+            return MagicMock()
+
+        with patch("app._SpotifyPrePublishDialog", side_effect=fake_dlg), \
+             patch.object(baixar_audio, "DOWNLOAD_DIR", str(tmp_path)):
+            application._show_spotify_predialog(pending)
+
+        assert captured.get("audio_path") == str(mp3_sub), \
+            "O MP3 mais recente (em subfolder) deve ser escolhido"

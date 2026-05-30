@@ -19,12 +19,13 @@ import os
 import queue
 import socket
 import sys
+import shutil
 import threading
 import urllib.request
 from datetime import datetime
 
 from PyQt6.QtCore import QDate, QObject, QSize, QTimer, Qt, pyqtSignal
-from PyQt6.QtGui import QIcon, QPixmap
+from PyQt6.QtGui import QColor, QIcon, QPalette, QPixmap
 from PyQt6.QtWidgets import (
     QApplication, QButtonGroup, QCheckBox, QComboBox, QDialog, QDoubleSpinBox,
     QFileDialog, QFrame, QGridLayout, QHBoxLayout,
@@ -38,7 +39,7 @@ from setup_wizard import SetupWizard
 from player_window_qt import PlayerWindowQt as PlayerWindow
 
 
-APP_VERSION = "v3.3.0"
+APP_VERSION = "v3.4.0"
 
 # ---------------------------------------------------------------------------
 # Instância única — impede abrir dois apps ao mesmo tempo
@@ -178,16 +179,71 @@ P = _Palette  # alias curto para uso nos QSS
 
 
 # ---------------------------------------------------------------------------
+# QPalette — garante que o Fusion style use as cores corretas em controles
+# que não têm regra QSS explícita (QComboBox, QDoubleSpinBox, QTabBar…)
+# ---------------------------------------------------------------------------
+def _build_palette(dark: bool) -> QPalette:
+    """Constrói a QPalette para o tema escolhido."""
+    pal = QPalette()
+    if dark:
+        pal.setColor(QPalette.ColorRole.Window,          QColor(P.D_BG))
+        pal.setColor(QPalette.ColorRole.WindowText,      QColor(P.D_TEXT))
+        pal.setColor(QPalette.ColorRole.Base,            QColor(P.D_INPUT))
+        pal.setColor(QPalette.ColorRole.AlternateBase,   QColor(P.D_CARD))
+        pal.setColor(QPalette.ColorRole.Text,            QColor(P.D_TEXT))
+        pal.setColor(QPalette.ColorRole.Button,          QColor(P.D_GRAY_BTN))
+        pal.setColor(QPalette.ColorRole.ButtonText,      QColor(P.D_GRAY_TEXT))
+        pal.setColor(QPalette.ColorRole.BrightText,      QColor(P.D_TEXT))
+        pal.setColor(QPalette.ColorRole.PlaceholderText, QColor(P.D_TEXT_SUB))
+        pal.setColor(QPalette.ColorRole.ToolTipBase,     QColor(P.D_CARD))
+        pal.setColor(QPalette.ColorRole.ToolTipText,     QColor(P.D_TEXT))
+        pal.setColor(QPalette.ColorRole.Highlight,       QColor(P.GREEN))
+        pal.setColor(QPalette.ColorRole.HighlightedText, QColor("#ffffff"))
+        pal.setColor(QPalette.ColorRole.Link,            QColor(P.GREEN))
+        # Estado desabilitado
+        pal.setColor(QPalette.ColorGroup.Disabled,
+                     QPalette.ColorRole.WindowText,      QColor(P.D_BTN_DIS_T))
+        pal.setColor(QPalette.ColorGroup.Disabled,
+                     QPalette.ColorRole.Text,            QColor(P.D_BTN_DIS_T))
+        pal.setColor(QPalette.ColorGroup.Disabled,
+                     QPalette.ColorRole.ButtonText,      QColor(P.D_BTN_DIS_T))
+    else:
+        pal.setColor(QPalette.ColorRole.Window,          QColor(P.L_BG))
+        pal.setColor(QPalette.ColorRole.WindowText,      QColor(P.L_TEXT))
+        pal.setColor(QPalette.ColorRole.Base,            QColor(P.L_INPUT))
+        pal.setColor(QPalette.ColorRole.AlternateBase,   QColor(P.L_CARD))
+        pal.setColor(QPalette.ColorRole.Text,            QColor(P.L_TEXT))
+        pal.setColor(QPalette.ColorRole.Button,          QColor(P.L_GRAY_BTN))
+        pal.setColor(QPalette.ColorRole.ButtonText,      QColor(P.L_GRAY_TEXT))
+        pal.setColor(QPalette.ColorRole.BrightText,      QColor(P.L_TEXT))
+        pal.setColor(QPalette.ColorRole.PlaceholderText, QColor(P.L_TEXT_SUB))
+        pal.setColor(QPalette.ColorRole.ToolTipBase,     QColor(P.L_CARD))
+        pal.setColor(QPalette.ColorRole.ToolTipText,     QColor(P.L_TEXT))
+        pal.setColor(QPalette.ColorRole.Highlight,       QColor(P.GREEN))
+        pal.setColor(QPalette.ColorRole.HighlightedText, QColor("#ffffff"))
+        pal.setColor(QPalette.ColorRole.Link,            QColor(P.GREEN))
+        pal.setColor(QPalette.ColorGroup.Disabled,
+                     QPalette.ColorRole.WindowText,      QColor(P.L_BTN_DIS_T))
+        pal.setColor(QPalette.ColorGroup.Disabled,
+                     QPalette.ColorRole.Text,            QColor(P.L_BTN_DIS_T))
+        pal.setColor(QPalette.ColorGroup.Disabled,
+                     QPalette.ColorRole.ButtonText,      QColor(P.L_BTN_DIS_T))
+    return pal
+
+
+# ---------------------------------------------------------------------------
 # Stylesheet — Modo Escuro
 # ---------------------------------------------------------------------------
 _QSS_DARK = f"""
+/* Cor e fonte globais — SEM background-color no QWidget: evita forçar
+   autoFillBackground=True em QLabel/QCheckBox dentro de cards coloridos. */
 QMainWindow, QWidget {{
-    background-color: {P.D_BG};
     color: {P.D_TEXT};
     font-family: 'Segoe UI', Arial, sans-serif;
     font-size: 13px;
 }}
-QLabel  {{ background: transparent; color: {P.D_TEXT}; }}
+QMainWindow {{ background-color: {P.D_BG}; }}
+QLabel  {{ color: {P.D_TEXT}; }}
 QDialog {{ background-color: {P.D_BG}; }}
 
 /* ── Sidebar ── */
@@ -273,13 +329,14 @@ QLabel#thumb {{ background: {P.D_THUMB}; border-radius: 5px; color: {P.D_GRAY_BT
 # Stylesheet — Modo Claro
 # ---------------------------------------------------------------------------
 _QSS_LIGHT = f"""
+/* Cor e fonte globais — SEM background-color no QWidget. */
 QMainWindow, QWidget {{
-    background-color: {P.L_BG};
     color: {P.L_TEXT};
     font-family: 'Segoe UI', Arial, sans-serif;
     font-size: 13px;
 }}
-QLabel  {{ background: transparent; color: {P.L_TEXT}; }}
+QMainWindow {{ background-color: {P.L_BG}; }}
+QLabel  {{ color: {P.L_TEXT}; }}
 QDialog {{ background-color: {P.L_BG}; }}
 
 /* ── Sidebar ── */
@@ -1033,7 +1090,9 @@ class App(QMainWindow):
         """Alterna entre modo escuro e modo claro."""
         self._dark_mode = not self._dark_mode
         qss = _QSS_DARK if self._dark_mode else _QSS_LIGHT
-        QApplication.instance().setStyleSheet(qss)
+        app = QApplication.instance()
+        app.setPalette(_build_palette(self._dark_mode))
+        app.setStyleSheet(qss)
 
         # Atualiza ícone do botão
         self._theme_btn.setText("☀" if self._dark_mode else "🌙")
@@ -1110,9 +1169,12 @@ class App(QMainWindow):
             if item.widget():
                 item.widget().deleteLater()
 
-        # Busca arquivos MP3 em DOWNLOAD_DIR
+        # Busca arquivos MP3 em DOWNLOAD_DIR (raiz e subpastas de 1 nível)
         os.makedirs(baixar_audio.DOWNLOAD_DIR, exist_ok=True)
-        all_files = _glob.glob(os.path.join(baixar_audio.DOWNLOAD_DIR, "*.mp3"))
+        all_files = (
+            _glob.glob(os.path.join(baixar_audio.DOWNLOAD_DIR, "*.mp3")) +
+            _glob.glob(os.path.join(baixar_audio.DOWNLOAD_DIR, "*", "*.mp3"))
+        )
         sort_idx = getattr(self, "_home_sort_order", 0)
         if sort_idx == 1:
             mp3_files = sorted(all_files, key=lambda f: os.path.basename(f).lower())
@@ -1197,7 +1259,12 @@ class App(QMainWindow):
         thumb.setFixedHeight(118)
         thumb.setFixedWidth(220)
 
-        _thumb_path = os.path.splitext(fpath)[0] + ".jpg"
+        # Procura capa.jpg na mesma pasta do MP3 (novo formato — subpastas);
+        # se não encontrar, tenta o nome-base.jpg (retrocompatibilidade).
+        _mp3_dir = os.path.dirname(fpath)
+        _thumb_path = os.path.join(_mp3_dir, "capa.jpg")
+        if not os.path.isfile(_thumb_path):
+            _thumb_path = os.path.splitext(fpath)[0] + ".jpg"
         if os.path.isfile(_thumb_path):
             from PyQt6.QtGui import QPixmap
             _pix = QPixmap(_thumb_path).scaled(
@@ -1292,6 +1359,17 @@ class App(QMainWindow):
             btn_spotify.clicked.connect(lambda: self._spotify_from_local(_fp))
             acts.addWidget(btn_spotify)
 
+        # Botão "Abrir pasta no Explorer"
+        btn_folder = QPushButton()
+        btn_folder.setIcon(
+            self.style().standardIcon(QStyle.StandardPixmap.SP_DirOpenIcon)
+        )
+        btn_folder.setObjectName("gray_btn")
+        btn_folder.setFixedWidth(32)
+        btn_folder.setToolTip("Abrir pasta no Explorer")
+        btn_folder.clicked.connect(lambda: self._reveal_in_explorer(_fp))
+        acts.addWidget(btn_folder)
+
         btn_del = QPushButton()
         btn_del.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_TrashIcon))
         btn_del.setObjectName("gray_btn")
@@ -1323,12 +1401,30 @@ class App(QMainWindow):
         msg.exec()
         if msg.clickedButton() is btn_sim:
             try:
-                os.remove(fpath)
+                mp3_dir = os.path.dirname(fpath)
+                if os.path.normpath(mp3_dir) != os.path.normpath(baixar_audio.DOWNLOAD_DIR):
+                    # MP3 está em subpasta — exclui a pasta inteira (MP4, capa, descrição)
+                    shutil.rmtree(mp3_dir, ignore_errors=True)
+                else:
+                    os.remove(fpath)
                 self._refresh_home()
             except Exception as e:
                 QMessageBox.critical(
                     self, "Erro", f"Não foi possível excluir o arquivo:\n{e}"
                 )
+
+    def _reveal_in_explorer(self, fpath: str):
+        """Abre o Explorer do Windows com o arquivo selecionado."""
+        try:
+            # /select, faz o Explorer abrir a pasta e destacar o arquivo
+            import subprocess as _sp
+            _sp.Popen(["explorer", "/select,", os.path.normpath(fpath)])
+        except Exception:
+            # Fallback: abre só a pasta sem selecionar o arquivo
+            try:
+                os.startfile(os.path.dirname(fpath))
+            except Exception:
+                pass
 
     def _reupload_file(self, fpath: str, btn: QPushButton):
         fname = os.path.basename(fpath)
@@ -1724,10 +1820,11 @@ class App(QMainWindow):
         self._cfg_tabs.setIconSize(QSize(18, 18))
         self._cfg_tabs.addTab(self._build_drive_tab(),   "  Drive")
         self._cfg_tabs.setTabIcon(0, _logo_icon("drive"))
+        self._cfg_tabs.addTab(self._build_local_tab(),   "💾  Arquivos locais")
         self._cfg_tabs.addTab(self._build_youtube_tab(), "  YouTube")
-        self._cfg_tabs.setTabIcon(1, _logo_icon("youtube"))
+        self._cfg_tabs.setTabIcon(2, _logo_icon("youtube"))
         self._cfg_tabs.addTab(self._build_spotify_tab(), "  Spotify")
-        self._cfg_tabs.setTabIcon(2, _logo_icon("spotify"))
+        self._cfg_tabs.setTabIcon(3, _logo_icon("spotify"))
         self._audio_tab = _AudioSettingsTab(self)
         self._cfg_tabs.addTab(self._audio_tab,           "🎚  Edição de áudio")
         layout.addWidget(self._cfg_tabs, stretch=1)
@@ -1852,6 +1949,73 @@ class App(QMainWindow):
         dr_hint.setStyleSheet(f"color: {P.HINT}; font-size: 11px;")
         dc.addWidget(dr_hint)
         layout.addWidget(dr_card)
+        layout.addStretch()
+
+        # ── Rodapé: log + versão ────────────────────────────────────────────
+        footer = QHBoxLayout()
+        footer.setContentsMargins(4, 8, 4, 0)
+
+        btn_log = QPushButton("📄  Abrir log de hoje")
+        btn_log.setObjectName("gray_btn")
+        btn_log.clicked.connect(self._open_today_log)
+        footer.addWidget(btn_log)
+        footer.addStretch()
+
+        ver_lbl = QLabel(f"IPMadalena  ·  {APP_VERSION}")
+        ver_lbl.setStyleSheet(f"color: {P.HINT}; font-size: 11px;")
+        footer.addWidget(ver_lbl)
+
+        layout.addLayout(footer)
+
+        scroll.setWidget(container)
+        outer.addWidget(scroll)
+
+        # ── Liga o toggle para habilitar / desabilitar cards dependentes ────
+        # Apenas autenticação e pasta do Drive ficam bloqueados quando o upload
+        # está desabilitado — manter arquivos e salvar vídeo são independentes.
+        _drive_dependent_cards = [auth_card, dr_card]
+
+        def _on_upload_toggle(checked: bool):
+            from PyQt6.QtWidgets import QGraphicsOpacityEffect
+            for card in _drive_dependent_cards:
+                card.setEnabled(checked)
+                if checked:
+                    # Sem efeito quando habilitado — evita artefatos de
+                    # compositing off-screen que escurecem widgets filhos.
+                    card.setGraphicsEffect(None)
+                else:
+                    effect = QGraphicsOpacityEffect(card)
+                    effect.setOpacity(0.35)
+                    card.setGraphicsEffect(effect)
+
+        self._cfg_upload_to_drive_check.checkStateChanged.connect(
+            lambda state: _on_upload_toggle(
+                state == Qt.CheckState.Checked
+            )
+        )
+        _on_upload_toggle(_upload_enabled)  # estado inicial
+
+        return tab
+
+    # ------------------------------------------------------------------
+    def _build_local_tab(self) -> QWidget:
+        """Sub-aba 'Arquivos locais' — manter arquivos e salvar vídeo."""
+        tab = QWidget()
+        outer = QVBoxLayout(tab)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+
+        container = QWidget()
+        layout = QVBoxLayout(container)
+        layout.setContentsMargins(4, 14, 4, 14)
+        layout.setSpacing(10)
+
+        cfg = baixar_audio.load_config()
 
         # ── Card: Manter arquivos no dispositivo ────────────────────────────
         kf_card = QFrame()
@@ -1881,47 +2045,83 @@ class App(QMainWindow):
         kfc.addWidget(self._cfg_keep_files_check)
 
         layout.addWidget(kf_card)
+
+        # ── Card: Salvar vídeo (MP4) ─────────────────────────────────────────
+        sv_card = QFrame()
+        sv_card.setObjectName("cfg_card")
+        svc = QVBoxLayout(sv_card)
+        svc.setContentsMargins(20, 16, 20, 16)
+        svc.setSpacing(8)
+
+        tr_sv = QHBoxLayout()
+        tr_sv.addWidget(self._icon_label("🎬", 22))
+        lbl_sv = QLabel("Salvar vídeo no dispositivo")
+        lbl_sv.setStyleSheet("font-size: 14px; font-weight: bold;")
+        tr_sv.addWidget(lbl_sv)
+        tr_sv.addStretch()
+        svc.addLayout(tr_sv)
+
+        sv_hint = QLabel(
+            "Se habilitado, o arquivo MP4 (vídeo do trecho selecionado) é mantido "
+            "na pasta do áudio após o processamento. Por padrão apenas o MP3 é salvo."
+        )
+        sv_hint.setStyleSheet(f"color: {P.HINT}; font-size: 11px;")
+        sv_hint.setWordWrap(True)
+        svc.addWidget(sv_hint)
+
+        self._cfg_save_video_check = QCheckBox("Salvar vídeo (MP4)")
+        self._cfg_save_video_check.setChecked(bool(cfg.get("save_video", False)))
+        svc.addWidget(self._cfg_save_video_check)
+
+        # ── Seleção de qualidade (habilitada somente quando save_video=True) ─
+        quality_frame = QFrame()
+        qfl = QHBoxLayout(quality_frame)
+        qfl.setContentsMargins(20, 0, 0, 0)
+        qfl.setSpacing(12)
+
+        quality_lbl = QLabel("Qualidade do vídeo:")
+        quality_lbl.setStyleSheet(f"color: {P.HINT}; font-size: 11px;")
+        quality_lbl.setToolTip(
+            "Define a qualidade do arquivo MP4 salvo localmente.\n"
+            "Alta: melhor resolução disponível (arquivo maior).\n"
+            "Baixa: menor resolução (arquivo menor, carrega mais rápido).\n"
+            "Não afeta o áudio final — apenas o vídeo salvo."
+        )
+        qfl.addWidget(quality_lbl)
+
+        _saved_quality = cfg.get("video_quality", "alta")
+
+        self._cfg_video_quality_alta = QRadioButton("Alta")
+        self._cfg_video_quality_alta.setChecked(_saved_quality != "baixa")
+        self._cfg_video_quality_alta.setToolTip("Melhor qualidade disponível no YouTube.")
+        qfl.addWidget(self._cfg_video_quality_alta)
+
+        self._cfg_video_quality_baixa = QRadioButton("Baixa")
+        self._cfg_video_quality_baixa.setChecked(_saved_quality == "baixa")
+        self._cfg_video_quality_baixa.setToolTip(
+            "Menor qualidade disponível — arquivo significativamente menor."
+        )
+        qfl.addWidget(self._cfg_video_quality_baixa)
+
+        _quality_group = QButtonGroup(quality_frame)
+        _quality_group.addButton(self._cfg_video_quality_alta)
+        _quality_group.addButton(self._cfg_video_quality_baixa)
+
+        qfl.addStretch()
+        svc.addWidget(quality_frame)
+
+        # Sincroniza estado inicial e mudanças do checkbox com os radios
+        def _on_save_video_toggle(checked: bool):
+            quality_frame.setEnabled(checked)
+
+        self._cfg_save_video_check.toggled.connect(_on_save_video_toggle)
+        _on_save_video_toggle(bool(cfg.get("save_video", False)))
+
+        layout.addWidget(sv_card)
         layout.addStretch()
-
-        # ── Rodapé: log + versão ────────────────────────────────────────────
-        footer = QHBoxLayout()
-        footer.setContentsMargins(4, 8, 4, 0)
-
-        btn_log = QPushButton("📄  Abrir log de hoje")
-        btn_log.setObjectName("gray_btn")
-        btn_log.clicked.connect(self._open_today_log)
-        footer.addWidget(btn_log)
-        footer.addStretch()
-
-        ver_lbl = QLabel(f"IPMadalena  ·  {APP_VERSION}")
-        ver_lbl.setStyleSheet(f"color: {P.HINT}; font-size: 11px;")
-        footer.addWidget(ver_lbl)
-
-        layout.addLayout(footer)
 
         scroll.setWidget(container)
         outer.addWidget(scroll)
-
-        # ── Liga o toggle para habilitar / desabilitar cards dependentes ────
-        _drive_dependent_cards = [auth_card, dr_card, kf_card]
-
-        def _on_upload_toggle(checked: bool):
-            from PyQt6.QtWidgets import QGraphicsOpacityEffect
-            for card in _drive_dependent_cards:
-                card.setEnabled(checked)
-                effect = card.graphicsEffect()
-                if not isinstance(effect, QGraphicsOpacityEffect):
-                    effect = QGraphicsOpacityEffect(card)
-                    card.setGraphicsEffect(effect)
-                effect.setOpacity(1.0 if checked else 0.35)
-
-        self._cfg_upload_to_drive_check.checkStateChanged.connect(
-            lambda state: _on_upload_toggle(
-                state == Qt.CheckState.Checked
-            )
-        )
-        _on_upload_toggle(_upload_enabled)  # estado inicial
-
         return tab
 
     # ------------------------------------------------------------------
@@ -2225,6 +2425,10 @@ class App(QMainWindow):
             current["chapter_name"]    = self._cfg_chapter_entry.text().strip()
             current["keep_files"]      = self._cfg_keep_files_check.isChecked()
             current["upload_to_drive"] = self._cfg_upload_to_drive_check.isChecked()
+            current["save_video"]      = self._cfg_save_video_check.isChecked()
+            current["video_quality"]   = (
+                "baixa" if self._cfg_video_quality_baixa.isChecked() else "alta"
+            )
             current["spotify"] = {
                 "show_id":      self._cfg_spotify_show_id.text().strip(),
                 "title_prefix": self._cfg_spotify_title_prefix.text().strip(),
@@ -2689,62 +2893,42 @@ class App(QMainWindow):
                 on_upload_stats=lambda d, t, r: self._queue.put(("upload_stats", (d, t, r))),
             )
 
-            # --- thumbnail -------------------------------------------------------
-            # Baixa e salva thumbnail ao lado de cada MP3 novo, antes de checar
-            # segments (roda independentemente do bloco Spotify abaixo).
-            _video_id_for_thumb = segments[0].get("video_id", "") if segments else ""
-            if _video_id_for_thumb:
-                try:
-                    thumbnail_bytes = _try_cdn_thumbnail(_video_id_for_thumb)
-                    if thumbnail_bytes:
-                        import glob as _glob
-                        for _mp3 in _glob.glob(
-                            os.path.join(baixar_audio.DOWNLOAD_DIR, "*.mp3")
-                        ):
-                            if os.path.getmtime(_mp3) >= _phase2_start - 2:
-                                _thumb_dst = os.path.splitext(_mp3)[0] + ".jpg"
-                                if not os.path.exists(_thumb_dst):
-                                    with open(_thumb_dst, "wb") as _fh:
-                                        _fh.write(thumbnail_bytes)
-                except Exception:
-                    pass
-
             # Prepara metadados para publicação no Spotify (se show_id configurado).
-            # Usa o primeiro segmento como referência de título e video_id.
+            # Thumbnail e descrição já foram salvos pelo downloader na subpasta;
+            # aqui apenas localiza os caminhos para passar ao diálogo do Spotify.
             if segments:
                 sp_cfg = baixar_audio.load_config().get("spotify", {})
                 show_id = sp_cfg.get("show_id", "").strip()
                 if show_id:
-                    first = segments[0]
-                    prefix = sp_cfg.get("title_prefix", "")
+                    first    = segments[0]
+                    prefix   = sp_cfg.get("title_prefix", "")
                     ep_title = (prefix + first.get("title", "")) if prefix else first.get("title", "")
                     video_id = first.get("video_id", "")
-                    # Busca metadados do YouTube de forma síncrona (já estamos em thread
-                    # daemon — não bloqueia a UI). Silencia falhas de rede.
+
+                    # Descrição: lê do descricao.txt gerado pelo downloader na subpasta
                     description = ""
-                    if video_id:
-                        try:
-                            from infrastructure.youtube.ytdlp_source import fetch_video_metadata
-                            meta = fetch_video_metadata(
-                                video_id, cancel_event=self._cancel_event
-                            )
-                            description = meta.get("description", "")
-                        except Exception:
-                            pass
-                    # cover_image_path: primeiro .jpg encontrado ao lado de um MP3 novo
-                    cover_image_path = ""
                     try:
-                        import glob as _glob
-                        for _mp3 in _glob.glob(
-                            os.path.join(baixar_audio.DOWNLOAD_DIR, "*.mp3")
-                        ):
-                            if os.path.getmtime(_mp3) >= _phase2_start - 2:
-                                _candidate = os.path.splitext(_mp3)[0] + ".jpg"
-                                if os.path.isfile(_candidate):
-                                    cover_image_path = _candidate
-                                    break
+                        from infrastructure.youtube.ytdlp_source import sanitize_folder_name
+                        _subfolder = os.path.join(
+                            baixar_audio.DOWNLOAD_DIR,
+                            sanitize_folder_name(first.get("title", "")),
+                        )
+                        _txt = os.path.join(_subfolder, "descricao.txt")
+                        if os.path.isfile(_txt):
+                            with open(_txt, encoding="utf-8") as _fh:
+                                description = _fh.read()
                     except Exception:
                         pass
+
+                    # cover_image_path: capa.jpg na subpasta do primeiro segmento
+                    cover_image_path = ""
+                    try:
+                        _capa = os.path.join(_subfolder, "capa.jpg")
+                        if os.path.isfile(_capa):
+                            cover_image_path = _capa
+                    except Exception:
+                        pass
+
                     self._spotify_pending = {
                         "show_id":          show_id,
                         "video_id":         video_id,
@@ -3140,9 +3324,14 @@ class App(QMainWindow):
         ``cover_image_path`` (opcional).
         """
         import glob as _glob
-        # Localiza o MP3 mais recente em DOWNLOAD_DIR (caso keep_files=True)
-        pattern = os.path.join(baixar_audio.DOWNLOAD_DIR, "*.mp3")
-        candidates = sorted(_glob.glob(pattern), key=os.path.getmtime, reverse=True)
+        # Localiza o MP3 mais recente em DOWNLOAD_DIR — inclui subpastas
+        # criadas pelo novo fluxo MP4-first (downloads/{título}/arquivo.mp3)
+        candidates = sorted(
+            _glob.glob(os.path.join(baixar_audio.DOWNLOAD_DIR, "*.mp3")) +
+            _glob.glob(os.path.join(baixar_audio.DOWNLOAD_DIR, "*", "*.mp3")),
+            key=os.path.getmtime,
+            reverse=True,
+        )
         audio_path = candidates[0] if candidates else ""
 
         cover_image_path = pending.get("cover_image_path", "")
@@ -3551,6 +3740,7 @@ class _AudioSettingsTab(QWidget):
 
         # ── Cards funcionais ──────────────────────────────────────────────
         layout.addWidget(self._build_card_vinhetas(audio_cfg))
+        layout.addWidget(self._build_card_bg_music(audio_cfg))
         layout.addWidget(self._build_card_fade(audio_cfg))
         layout.addWidget(self._build_card_eq(audio_cfg))
         layout.addWidget(self._build_card_noise(audio_cfg))
@@ -3605,6 +3795,233 @@ class _AudioSettingsTab(QWidget):
 
         return card
 
+    # -----------------------------------------------------------------------
+    # Card 2: Música de fundo
+    # -----------------------------------------------------------------------
+
+    def _build_card_bg_music(self, audio_cfg) -> QFrame:
+        """Card para configurar e habilitar música de fundo no episódio."""
+        card = QFrame()
+        card.setObjectName("card")
+        v = QVBoxLayout(card)
+        v.setContentsMargins(16, 12, 16, 14)
+        v.setSpacing(10)
+
+        v.addWidget(self._section_label("Música de fundo"))
+
+        hint = QLabel(
+            "Mistura uma faixa de música ao áudio do episódio. "
+            "A música toca em loop no volume configurado, com fade in/out, "
+            "sempre mais baixa que o áudio principal."
+        )
+        hint.setWordWrap(True)
+        hint.setStyleSheet(f"color: {P.HINT}; font-size: 11px;")
+        v.addWidget(hint)
+
+        # ── Seleção do arquivo ────────────────────────────────────────────
+        self._bg_music_path = audio_cfg.bg_music_path or ""
+
+        file_row = QHBoxLayout()
+        file_row.setSpacing(6)
+
+        self._bg_music_path_label = QLabel(
+            self._truncate(self._bg_music_path) or "Nenhum arquivo selecionado"
+        )
+        self._bg_music_path_label.setStyleSheet(f"color: {P.HINT}; font-size: 11px;")
+        self._bg_music_path_label.setMinimumWidth(220)
+
+        btn_select_bg = QPushButton("Selecionar")
+        btn_select_bg.setObjectName("gray_btn")
+        btn_select_bg.setFixedWidth(110)
+        btn_select_bg.clicked.connect(self._select_bg_music)
+        btn_select_bg.setToolTip(
+            "Escolha um arquivo de música para tocar de fundo durante o episódio.\n"
+            "O arquivo é copiado para dentro do app (MP3, WAV, M4A, OGG, FLAC)."
+        )
+
+        btn_remove_bg = QPushButton("Remover")
+        btn_remove_bg.setObjectName("gray_btn")
+        btn_remove_bg.setFixedWidth(90)
+        btn_remove_bg.clicked.connect(self._remove_bg_music)
+        btn_remove_bg.setEnabled(bool(self._bg_music_path))
+        btn_remove_bg.setToolTip("Remove a música de fundo configurada.")
+        self._bg_music_btn_remove = btn_remove_bg
+
+        file_row.addWidget(self._bg_music_path_label, stretch=1)
+        file_row.addWidget(btn_select_bg)
+        file_row.addWidget(btn_remove_bg)
+        v.addLayout(file_row)
+
+        # ── Toggles ───────────────────────────────────────────────────────
+        self._bg_music_check = QCheckBox("Ativar música de fundo")
+        self._bg_music_check.setChecked(audio_cfg.bg_music_enabled)
+        self._bg_music_check.setToolTip(
+            "Quando marcado, a música escolhida é misturada ao áudio do episódio\n"
+            "antes do upload. A voz fica sempre mais alta que a música."
+        )
+        v.addWidget(self._bg_music_check)
+
+        self._bg_music_loop_check = QCheckBox("Repetir em loop até o fim do episódio")
+        self._bg_music_loop_check.setChecked(audio_cfg.bg_music_loop)
+        self._bg_music_loop_check.setToolTip(
+            "Marcado: a música repete automaticamente se for mais curta que o episódio.\n"
+            "Desmarcado: a música toca uma vez e para; o sermão continua sem música."
+        )
+        v.addWidget(self._bg_music_loop_check)
+
+        # ── Parâmetros ────────────────────────────────────────────────────
+        params_frame = QFrame()
+        params_layout = QVBoxLayout(params_frame)
+        params_layout.setContentsMargins(0, 4, 0, 0)
+        params_layout.setSpacing(6)
+
+        def _spin_row(label_text, value, min_val, max_val, step, suffix, decimals=1):
+            row = QHBoxLayout()
+            lbl = QLabel(label_text)
+            lbl.setFixedWidth(180)
+            spin = QDoubleSpinBox()
+            spin.setRange(min_val, max_val)
+            spin.setSingleStep(step)
+            spin.setDecimals(decimals)
+            spin.setSuffix(suffix)
+            spin.setValue(float(value))
+            spin.setFixedWidth(100)
+            row.addWidget(lbl)
+            row.addWidget(spin)
+            row.addStretch()
+            return row, spin
+
+        # Volume: armazenado como 0.0–1.0, exibido como 0–100 %
+        vol_row = QHBoxLayout()
+        vol_lbl = QLabel("Volume da música:")
+        vol_lbl.setFixedWidth(180)
+
+        _vol_tt = (
+            "Volume da música em relação à voz (1–50 %).\n"
+            "10–15 %: discreta, mal perceptível — ideal para pregações longas.\n"
+            "20–30 %: presente, boa para momentos de adoração.\n"
+            "Acima de 35 %: pode disputar atenção com a voz."
+        )
+        vol_lbl.setToolTip(_vol_tt)
+
+        self._bg_music_vol_slider = QSlider(Qt.Orientation.Horizontal)
+        self._bg_music_vol_slider.setRange(1, 50)   # 1–50 %
+        self._bg_music_vol_slider.setSingleStep(1)
+        self._bg_music_vol_slider.setValue(
+            max(1, min(50, round(audio_cfg.bg_music_volume * 100)))
+        )
+        self._bg_music_vol_slider.setFixedWidth(150)
+        self._bg_music_vol_slider.setToolTip(_vol_tt)
+
+        self._bg_music_vol_label = QLabel(
+            f"{self._bg_music_vol_slider.value()} %"
+        )
+        self._bg_music_vol_label.setFixedWidth(40)
+        self._bg_music_vol_label.setStyleSheet(
+            "font-family: Consolas, monospace; font-size: 11px;"
+        )
+        self._bg_music_vol_slider.valueChanged.connect(
+            lambda v: self._bg_music_vol_label.setText(f"{v} %")
+        )
+
+        vol_row.addWidget(vol_lbl)
+        vol_row.addWidget(self._bg_music_vol_slider)
+        vol_row.addWidget(self._bg_music_vol_label)
+        vol_row.addStretch()
+        params_layout.addLayout(vol_row)
+
+        delay_row, self._bg_music_delay_spin = _spin_row(
+            "Intro musical (s antes da voz):",
+            audio_cfg.bg_music_delay, 0.0, 60.0, 0.5, " s",
+        )
+        self._bg_music_delay_spin.setToolTip(
+            "Quantos segundos de música tocam sozinhos antes da voz começar.\n"
+            "Cria uma abertura musical antes do sermão.\n"
+            "0 = música e voz começam juntos desde o início."
+        )
+        params_layout.addLayout(delay_row)
+
+        fi_row, self._bg_music_fade_in_spin = _spin_row(
+            "Fade in:",
+            audio_cfg.bg_music_fade_in, 0.0, 30.0, 0.5, " s",
+        )
+        self._bg_music_fade_in_spin.setToolTip(
+            "A música sobe gradualmente do silêncio ao volume configurado\n"
+            "durante esse tempo (em segundos). 0 = começa no volume cheio."
+        )
+        params_layout.addLayout(fi_row)
+
+        fo_row, self._bg_music_fade_out_spin = _spin_row(
+            "Fade out:",
+            audio_cfg.bg_music_fade_out, 0.0, 30.0, 0.5, " s",
+        )
+        self._bg_music_fade_out_spin.setToolTip(
+            "A música diminui gradualmente até o silêncio nos últimos N segundos\n"
+            "do episódio. 0 = a música para abruptamente no final."
+        )
+        params_layout.addLayout(fo_row)
+
+        v.addWidget(params_frame)
+        return card
+
+    def _select_bg_music(self):
+        """Abre seletor de arquivo e copia a música para VINHETAS_DIR."""
+        import shutil
+
+        src, _ = QFileDialog.getOpenFileName(
+            self, "Selecionar música de fundo", "",
+            "Arquivos de áudio (*.mp3 *.m4a *.wav *.ogg *.flac);;Todos (*.*)",
+        )
+        if not src:
+            return
+
+        try:
+            os.makedirs(baixar_audio.VINHETAS_DIR, exist_ok=True)
+
+            # Remove arquivo anterior de música de fundo
+            import glob as _glob
+            for old in _glob.glob(
+                os.path.join(baixar_audio.VINHETAS_DIR, "bg_music.*")
+            ):
+                try:
+                    os.remove(old)
+                except Exception:
+                    pass
+
+            ext  = os.path.splitext(src)[1].lower() or ".mp3"
+            dest = os.path.join(baixar_audio.VINHETAS_DIR, f"bg_music{ext}")
+            shutil.copy2(src, dest)
+        except Exception as e:
+            self._bg_music_path_label.setText(f"⚠ Erro ao copiar: {e}")
+            self._bg_music_path_label.setStyleSheet(
+                f"color: {P.ERROR}; font-size: 11px;"
+            )
+            return
+
+        self._bg_music_path = dest
+        self._bg_music_path_label.setText(self._truncate(dest))
+        self._bg_music_path_label.setStyleSheet(
+            f"color: {P.HINT}; font-size: 11px;"
+        )
+        self._bg_music_btn_remove.setEnabled(True)
+
+    def _remove_bg_music(self):
+        """Remove a música de fundo selecionada."""
+        import glob as _glob
+        for f in _glob.glob(
+            os.path.join(baixar_audio.VINHETAS_DIR, "bg_music.*")
+        ):
+            try:
+                os.remove(f)
+            except Exception:
+                pass
+
+        self._bg_music_path = ""
+        self._bg_music_path_label.setText("Nenhum arquivo selecionado")
+        self._bg_music_path_label.setStyleSheet(f"color: {P.HINT}; font-size: 11px;")
+        self._bg_music_btn_remove.setEnabled(False)
+        self._bg_music_check.setChecked(False)
+
     def _build_vinheta_block(self, label, kind, initial_path, initial_overlap):
         """Bloco de uma vinheta (intro ou outro): label + path + ações + overlap."""
         block = QVBoxLayout()
@@ -3625,18 +4042,27 @@ class _AudioSettingsTab(QWidget):
         btn_select.setObjectName("gray_btn")
         btn_select.setFixedWidth(110)
         btn_select.clicked.connect(lambda: self._select_vinheta(kind))
+        _tt_vinheta = (
+            "Abre explorador de arquivos para escolher o arquivo de áudio da vinheta.\n"
+            "Formatos suportados: MP3, M4A, WAV, OGG, FLAC.\n"
+            "O arquivo é copiado para dentro do app — você pode mover o original depois."
+        )
+        btn_select.setToolTip(_tt_vinheta)
+        path_label.setToolTip(_tt_vinheta)
 
         btn_play = QPushButton("▶ Tocar")
         btn_play.setObjectName("gray_btn")
         btn_play.setFixedWidth(90)
         btn_play.clicked.connect(lambda: self._toggle_play_vinheta(kind))
         btn_play.setEnabled(bool(initial_path))
+        btn_play.setToolTip("Pré-escuta a vinheta selecionada.")
 
         btn_remove = QPushButton("Remover")
         btn_remove.setObjectName("gray_btn")
         btn_remove.setFixedWidth(90)
         btn_remove.clicked.connect(lambda: self._remove_vinheta(kind))
         btn_remove.setEnabled(bool(initial_path))
+        btn_remove.setToolTip("Remove a vinheta desta posição (o arquivo original não é apagado).")
 
         row.addWidget(path_label, stretch=1)
         row.addWidget(btn_select)
@@ -3644,8 +4070,15 @@ class _AudioSettingsTab(QWidget):
         row.addWidget(btn_remove)
         block.addLayout(row)
 
+        _overlap_tt = (
+            "Número de segundos em que a vinheta e o sermão tocam simultaneamente\n"
+            "antes da vinheta terminar (acrossfade). 0 = corte direto sem sobreposição.\n"
+            "Exemplo: 1,5 s cria uma transição suave sem silêncio entre os trechos."
+        )
+        overlap_lbl = QLabel("Sobreposição com áudio:")
+        overlap_lbl.setToolTip(_overlap_tt)
         overlap_row = QHBoxLayout()
-        overlap_row.addWidget(QLabel("Sobreposição com áudio:"))
+        overlap_row.addWidget(overlap_lbl)
         spin = QDoubleSpinBox()
         spin.setRange(0.0, 10.0)
         spin.setSingleStep(0.5)
@@ -3653,6 +4086,7 @@ class _AudioSettingsTab(QWidget):
         spin.setSuffix(" s")
         spin.setValue(float(initial_overlap or 0.0))
         spin.setFixedWidth(90)
+        spin.setToolTip(_overlap_tt)
         overlap_row.addWidget(spin)
         overlap_row.addStretch()
         block.addLayout(overlap_row)
@@ -3682,13 +4116,28 @@ class _AudioSettingsTab(QWidget):
 
         v.addWidget(self._section_label("Fade"))
 
+        hint_fade = QLabel(
+            "Aplica transições suaves de volume no início e/ou fim do áudio principal "
+            "(sem contar as vinhetas)."
+        )
+        hint_fade.setWordWrap(True)
+        hint_fade.setStyleSheet(f"color: {P.HINT}; font-size: 11px;")
+        v.addWidget(hint_fade)
+
         # Fade in
+        _fi_tt = (
+            "O áudio sobe gradualmente do silêncio ao volume normal.\n"
+            "Elimina cliques, chiados ou barulhos abruptos no início da gravação."
+        )
         row_in = QHBoxLayout()
         self._fade_in_check = QCheckBox("Fade in")
         self._fade_in_check.setChecked(audio_cfg.fade_in_enabled)
+        self._fade_in_check.setToolTip(_fi_tt)
         row_in.addWidget(self._fade_in_check)
         row_in.addSpacing(12)
-        row_in.addWidget(QLabel("Duração:"))
+        dur_in_lbl = QLabel("Duração:")
+        dur_in_lbl.setToolTip("Tempo da transição em segundos.")
+        row_in.addWidget(dur_in_lbl)
         self._fade_in_spin = QDoubleSpinBox()
         self._fade_in_spin.setRange(0.0, 10.0)
         self._fade_in_spin.setSingleStep(0.5)
@@ -3696,17 +4145,25 @@ class _AudioSettingsTab(QWidget):
         self._fade_in_spin.setSuffix(" s")
         self._fade_in_spin.setValue(float(audio_cfg.fade_in_secs))
         self._fade_in_spin.setFixedWidth(90)
+        self._fade_in_spin.setToolTip(_fi_tt)
         row_in.addWidget(self._fade_in_spin)
         row_in.addStretch()
         v.addLayout(row_in)
 
         # Fade out
+        _fo_tt = (
+            "O áudio diminui gradualmente até o silêncio no final.\n"
+            "Evita cortes bruscos ao término do sermão."
+        )
         row_out = QHBoxLayout()
         self._fade_out_check = QCheckBox("Fade out")
         self._fade_out_check.setChecked(audio_cfg.fade_out_enabled)
+        self._fade_out_check.setToolTip(_fo_tt)
         row_out.addWidget(self._fade_out_check)
         row_out.addSpacing(8)
-        row_out.addWidget(QLabel("Duração:"))
+        dur_out_lbl = QLabel("Duração:")
+        dur_out_lbl.setToolTip("Tempo da transição em segundos.")
+        row_out.addWidget(dur_out_lbl)
         self._fade_out_spin = QDoubleSpinBox()
         self._fade_out_spin.setRange(0.0, 10.0)
         self._fade_out_spin.setSingleStep(0.5)
@@ -3714,6 +4171,7 @@ class _AudioSettingsTab(QWidget):
         self._fade_out_spin.setSuffix(" s")
         self._fade_out_spin.setValue(float(audio_cfg.fade_out_secs))
         self._fade_out_spin.setFixedWidth(90)
+        self._fade_out_spin.setToolTip(_fo_tt)
         row_out.addWidget(self._fade_out_spin)
         row_out.addStretch()
         v.addLayout(row_out)
@@ -3738,6 +4196,11 @@ class _AudioSettingsTab(QWidget):
 
         self._eq_check = QCheckBox("Aplicar EQ")
         self._eq_check.setChecked(audio_cfg.eq_enabled)
+        self._eq_check.setToolTip(
+            "Equalização ajusta o tom do áudio em diferentes faixas de frequência.\n"
+            "O preset 'Voz Masculina' foi calibrado para pregações:\n"
+            "reduz graves que embolam a voz e realça médios-agudos para maior clareza."
+        )
         hdr.addWidget(self._eq_check)
 
         hdr.addSpacing(14)
@@ -3763,6 +4226,19 @@ class _AudioSettingsTab(QWidget):
 
         # Mapa freq → gain das bandas atuais
         bands_by_freq = {b.freq_hz: b.gain_db for b in audio_cfg.eq_bands}
+
+        _eq_freq_tips = {
+            80:   "80 Hz — Graves profundos\nReduz ronco de microfone, ruído de ventilação "
+                  "e 'bumps' de baixa frequência.\nPregação: leve corte melhora clareza.",
+            250:  "250 Hz — Graves médios\nExcesso deixa a voz 'embolada' ou 'abafada'.\n"
+                  "Corte suave aqui abre espaço para a voz respirar.",
+            1000: "1 kHz — Médios\nFrequência central da fala. Pequenos ajustes têm grande impacto.\n"
+                  "Corte excessivo deixa a voz 'vazia'; boost demais torna agressiva.",
+            4000: "4 kHz — Médios-agudos (presença)\nAumenta a inteligibilidade e 'projeção' da voz.\n"
+                  "Boost leve aqui faz o pregador 'chegar' melhor ao ouvinte.",
+            8000: "8 kHz — Agudos (brilho/ar)\nAdiciona 'ar' e abertura ao som.\n"
+                  "Exagero causa sibilo (sibilância) em consoantes 's' e 'ch'.",
+        }
 
         for freq in EQ_FREQS:
             col = QVBoxLayout()
@@ -3790,6 +4266,12 @@ class _AudioSettingsTab(QWidget):
             freq_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
             freq_lbl.setStyleSheet(f"color: {P.HINT}; font-size: 10px;")
 
+            _tip = _eq_freq_tips.get(freq, "")
+            if _tip:
+                slider.setToolTip(_tip)
+                freq_lbl.setToolTip(_tip)
+                value_lbl.setToolTip(_tip)
+
             col.addWidget(value_lbl)
             col.addWidget(slider, alignment=Qt.AlignmentFlag.AlignHCenter)
             col.addWidget(freq_lbl)
@@ -3804,6 +4286,10 @@ class _AudioSettingsTab(QWidget):
         btn_row.addStretch()
         btn_restore = QPushButton("Restaurar padrão Voz Masculina")
         btn_restore.setObjectName("gray_btn")
+        btn_restore.setToolTip(
+            "Redefine os 5 sliders para o preset otimizado para voz masculina em pregação:\n"
+            "corte em 80 Hz e 250 Hz, boost leve em 4 kHz."
+        )
         btn_restore.clicked.connect(self._restore_eq_default)
         btn_row.addWidget(btn_restore)
         v.addLayout(btn_row)
@@ -3824,16 +4310,41 @@ class _AudioSettingsTab(QWidget):
 
         self._noise_check = QCheckBox("Ativar")
         self._noise_check.setChecked(audio_cfg.noise_reduction_enabled)
+        self._noise_check.setToolTip(
+            "Remove ruídos de fundo constantes: ar-condicionado, ventilador,\n"
+            "chiado de microfone ou zumbido elétrico.\n"
+            "Não é eficaz contra ruídos intermitentes (tosses, vozes, etc.)."
+        )
         v.addWidget(self._noise_check)
 
+        _intensity_tips = {
+            "baixa": (
+                "Baixa — redução discreta.\n"
+                "Ideal para gravações com pouco ruído de fundo.\n"
+                "Preserva mais naturalidade na voz."
+            ),
+            "media": (
+                "Média — equilíbrio entre limpeza e naturalidade.\n"
+                "Boa para a maioria das situações em igrejas."
+            ),
+            "alta": (
+                "Alta — redução intensa.\n"
+                "Use somente quando o ruído for muito forte.\n"
+                "Pode causar efeito 'robótico' ou 'metalizado' na voz."
+            ),
+        }
+
         intensity_row = QHBoxLayout()
-        intensity_row.addWidget(QLabel("Intensidade:"))
+        intensity_lbl = QLabel("Intensidade:")
+        intensity_lbl.setToolTip("Força da redução de ruído aplicada.")
+        intensity_row.addWidget(intensity_lbl)
         intensity_row.addSpacing(8)
 
         self._noise_intensity_group = QButtonGroup(self)
         self._noise_intensity_radios = {}
         for i, label in enumerate(("baixa", "media", "alta")):
             rb = QRadioButton(label.capitalize())
+            rb.setToolTip(_intensity_tips[label])
             self._noise_intensity_group.addButton(rb, i)
             self._noise_intensity_radios[label] = rb
             intensity_row.addWidget(rb)
@@ -3877,6 +4388,11 @@ class _AudioSettingsTab(QWidget):
 
         self._norm_check = QCheckBox("Ativar")
         self._norm_check.setChecked(audio_cfg.volume_norm_enabled)
+        self._norm_check.setToolTip(
+            "Padroniza o volume do episódio para que todos os cultos fiquem\n"
+            "no mesmo nível sonoro (loudnorm EBU R128).\n"
+            "Útil quando alguns cultos foram gravados mais alto ou mais baixo."
+        )
         v.addWidget(self._norm_check)
 
         # ── Slider de LUFS ────────────────────────────────────────────────
@@ -3891,6 +4407,13 @@ class _AudioSettingsTab(QWidget):
         self._norm_slider.setTickPosition(QSlider.TickPosition.TicksBelow)
         self._norm_slider.setTickInterval(2)
         self._norm_slider.setValue(int(audio_cfg.volume_norm_lufs))
+        self._norm_slider.setToolTip(
+            "Define o alvo de loudness integrado (LUFS — Loudness Units Full Scale).\n"
+            "−16 LUFS: padrão para podcasts e streaming (Spotify, YouTube).\n"
+            "−24 LUFS: mais quieto — adequado se ouvido com fone em ambiente silencioso.\n"
+            "−10 LUFS: mais alto — bom para quem ouve em carro ou ambiente barulhento.\n"
+            "Valores próximos de 0 podem causar distorção (clipping)."
+        )
         slider_layout.addWidget(self._norm_slider)
 
         # Barra de marcadores de referência posicionados proporcionalmente
@@ -4507,6 +5030,13 @@ class _AudioSettingsTab(QWidget):
             noise_reduction_intensity = intensity,
             volume_norm_enabled       = bool(self._norm_check.isChecked()),
             volume_norm_lufs          = float(self._norm_slider.value()),
+            bg_music_path             = self._bg_music_path or None,
+            bg_music_enabled          = bool(self._bg_music_check.isChecked()),
+            bg_music_volume           = self._bg_music_vol_slider.value() / 100.0,
+            bg_music_delay            = float(self._bg_music_delay_spin.value()),
+            bg_music_fade_in          = float(self._bg_music_fade_in_spin.value()),
+            bg_music_fade_out         = float(self._bg_music_fade_out_spin.value()),
+            bg_music_loop             = bool(self._bg_music_loop_check.isChecked()),
         )
 
     def _section_label(self, text: str) -> QLabel:
@@ -4853,6 +5383,7 @@ if __name__ == "__main__":
         _setup_file_logging()
         _q = QApplication(sys.argv)
         _q.setStyle("Fusion")
+        _q.setPalette(_build_palette(dark=True))
         _q.setStyleSheet(_QSS_DARK)
         win = App()
         win.show()
