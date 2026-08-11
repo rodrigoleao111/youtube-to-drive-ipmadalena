@@ -15,6 +15,7 @@ import pytest
 from application.use_cases import (
     DownloadSegmentsUseCase,
     EditAudioUseCase,
+    FetchVideoUseCase,
     ListVideosUseCase,
     UploadAudioUseCase,
 )
@@ -136,6 +137,65 @@ class TestListVideosUseCase:
         source.list_videos.side_effect = OperacaoCancelada("cancelado")
         with pytest.raises(OperacaoCancelada):
             ListVideosUseCase(source=source).execute("19/04/2026", "url")
+
+
+# ===========================================================================
+# FetchVideoUseCase
+# ===========================================================================
+
+class TestFetchVideoUseCase:
+
+    URL = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+
+    def test_delega_para_source_fetch_video(self):
+        source = MagicMock()
+        source.fetch_video.return_value = _make_video()
+        FetchVideoUseCase(source=source).execute(self.URL)
+        source.fetch_video.assert_called_once()
+
+    def test_repassa_url(self):
+        source = MagicMock()
+        source.fetch_video.return_value = _make_video()
+        FetchVideoUseCase(source=source).execute(self.URL)
+        args, _ = source.fetch_video.call_args
+        assert args[0] == self.URL
+
+    def test_repassa_cancel_event(self):
+        source = MagicMock()
+        source.fetch_video.return_value = _make_video()
+        ev = threading.Event()
+        FetchVideoUseCase(source=source).execute(self.URL, cancel_event=ev)
+        _, kwargs = source.fetch_video.call_args
+        assert kwargs["cancel_event"] is ev
+
+    def test_repassa_on_log_e_on_status(self):
+        source = MagicMock()
+        source.fetch_video.return_value = _make_video()
+        log, status = MagicMock(), MagicMock()
+        FetchVideoUseCase(source=source).execute(
+            self.URL, on_log=log, on_status=status
+        )
+        _, kwargs = source.fetch_video.call_args
+        assert kwargs["on_log"] is log
+        assert kwargs["on_status"] is status
+
+    def test_retorna_video_do_source(self):
+        video = _make_video("xyz789", "Culto ao vivo", "20260503")
+        source = MagicMock()
+        source.fetch_video.return_value = video
+        assert FetchVideoUseCase(source=source).execute(self.URL) is video
+
+    def test_propaga_video_nao_encontrado(self):
+        source = MagicMock()
+        source.fetch_video.side_effect = VideoNaoEncontrado("link inválido")
+        with pytest.raises(VideoNaoEncontrado):
+            FetchVideoUseCase(source=source).execute(self.URL)
+
+    def test_propaga_operacao_cancelada(self):
+        source = MagicMock()
+        source.fetch_video.side_effect = OperacaoCancelada("cancelado")
+        with pytest.raises(OperacaoCancelada):
+            FetchVideoUseCase(source=source).execute(self.URL)
 
 
 # ===========================================================================

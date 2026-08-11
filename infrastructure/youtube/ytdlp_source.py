@@ -19,6 +19,7 @@ import subprocess
 import sys
 from datetime import datetime, timedelta
 from typing import Callable, List, Optional
+from urllib.parse import parse_qs, urlparse
 
 from domain.entities import AudioFile, Segment, Video
 from domain.exceptions import VideoNaoEncontrado
@@ -32,6 +33,93 @@ from infrastructure.youtube._utils import (
 
 def _noop(*_a, **_kw):
     pass
+
+
+# ---------------------------------------------------------------------------
+# Link do YouTube → ID do vídeo
+# ---------------------------------------------------------------------------
+
+_VIDEO_ID_RE = re.compile(r"^[A-Za-z0-9_-]{11}$")
+
+_YOUTUBE_HOSTS = {
+    "youtube.com",
+    "m.youtube.com",
+    "music.youtube.com",
+    "youtube-nocookie.com",
+    "youtu.be",
+}
+
+# Caminhos que carregam o ID no primeiro segmento após o prefixo:
+#   /live/<id>, /shorts/<id>, /embed/<id>, /v/<id>
+_PATH_PREFIXES = ("live", "shorts", "embed", "v")
+
+
+def extract_video_id(url: str) -> Optional[str]:
+    """
+    Extrai o ID de 11 caracteres de um link do YouTube.
+
+    Aceita as formas usadas pelo YouTube na prática::
+
+        https://www.youtube.com/watch?v=<id>       (com query extra: &t=, &list=)
+        https://youtu.be/<id>                      (com ?si=...)
+        https://www.youtube.com/live/<id>          (lives — formato dos cultos)
+        https://www.youtube.com/shorts/<id>
+        https://www.youtube.com/embed/<id>
+        <id>                                       (o ID cru, 11 caracteres)
+
+    Retorna ``None`` quando o texto não é um link de vídeo do YouTube
+    reconhecível — é assim que a UI valida a entrada antes de disparar
+    qualquer thread ou subprocess.
+    """
+    if not url:
+        return None
+
+    raw = url.strip()
+    if _VIDEO_ID_RE.match(raw):
+        return raw
+
+    # urlparse só identifica hostname quando há esquema
+    if "://" not in raw:
+        raw = "https://" + raw
+
+    try:
+        parsed = urlparse(raw)
+    except ValueError:
+        return None
+
+    host = (parsed.hostname or "").lower()
+    if host.startswith("www."):
+        host = host[4:]
+    if host not in _YOUTUBE_HOSTS:
+        return None
+
+    def _valid(candidate: str) -> Optional[str]:
+        candidate = (candidate or "").strip()
+        return candidate if _VIDEO_ID_RE.match(candidate) else None
+
+    parts = [p for p in parsed.path.split("/") if p]
+
+    if host == "youtu.be":
+        return _valid(parts[0]) if parts else None
+
+    if parsed.path.rstrip("/") == "/watch":
+        return _valid(parse_qs(parsed.query).get("v", [""])[0])
+
+    if len(parts) >= 2 and parts[0].lower() in _PATH_PREFIXES:
+        return _valid(parts[1])
+
+    return None
+
+
+def _normalize_upload_date(value: str) -> str:
+    """
+    Normaliza o upload_date vindo do yt-dlp.
+
+    O yt-dlp imprime ``NA`` quando o campo não está disponível; nesse caso
+    devolvemos string vazia para que o chamador possa aplicar seu fallback.
+    """
+    value = (value or "").strip()
+    return value if len(value) == 8 and value.isdigit() else ""
 
 
 # ---------------------------------------------------------------------------
@@ -113,6 +201,81 @@ class YtDlpVideoSource:
 
         log(f"{len(videos)} vídeo(s) encontrado(s).")
         return videos
+
+    def fetch_video(
+        self,
+        url: str,
+        *,
+        cancel_event=None,
+        on_log: Optional[Callable[[str], None]] = None,
+        on_status: Optional[Callable[[str], None]] = None,
+    ) -> Video:
+        """
+        Resolve um único vídeo a partir do link informado pelo usuário.
+
+        Usa o mesmo ``--print`` de list_videos() para reaproveitar o formato,
+        mas com ``--no-playlist`` (links de live costumam trazer ``&list=``)
+        e sem nenhum filtro de data — quem escolhe o vídeo é o usuário.
+
+        Implementa o contrato IVideoFetcher (duck typing / Protocol).
+
+        Lança VideoNaoEncontrado se o link for inválido ou o vídeo não puder
+        ser resolvido. Lança OperacaoCancelada se cancel_event for sinalizado.
+        """
+        log    = on_log    if callable(on_log)    else _noop
+        status = on_status if callable(on_status) else _noop
+
+        video_id = extract_video_id(url)
+        if not video_id:
+            raise VideoNaoEncontrado(
+                "Link do YouTube inválido.\n"
+                "Use um link de vídeo (ex.: https://www.youtube.com/watch?v=...)."
+            )
+
+        cmd = [
+            ytdlp_exe(),
+            "--simulate",
+            "--no-playlist",
+            "--print", "%(id)s|||%(title)s|||%(upload_date)s",
+            "--socket-timeout", "30",
+            "--encoding", "utf-8",
+            "--extractor-args", "youtube:player_client=ios,android,web",
+            f"https://www.youtube.com/watch?v={video_id}",
+        ]
+
+        status("Buscando vídeo no YouTube...")
+        log(f"Link: {url}")
+
+        process = start_process(cmd, cancel_event)
+
+        video: Optional[Video] = None
+        for line in process.stdout:
+            check_cancel(cancel_event)
+            line = line.rstrip()
+            if "|||" not in line:
+                continue
+            parts = line.split("|||", 2)
+            # Só a primeira linha interessa; o loop segue drenando o stdout
+            # para não travar o subprocess com o pipe cheio.
+            if len(parts) == 3 and video is None:
+                vid_id, title, upload_date = parts
+                video = Video(
+                    id          = vid_id.strip() or video_id,
+                    title       = title.strip(),
+                    upload_date = _normalize_upload_date(upload_date),
+                )
+
+        process.wait()
+        check_cancel(cancel_event)
+
+        if video is None or process.returncode != 0:
+            raise VideoNaoEncontrado(
+                "Não foi possível obter os dados do vídeo.\n"
+                "Verifique se o link está correto e se o vídeo está disponível."
+            )
+
+        log(f"Encontrado: {video.title}")
+        return video
 
     def get_chapters(
         self,

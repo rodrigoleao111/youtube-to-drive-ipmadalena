@@ -98,6 +98,32 @@ def _file_log(msg: str):
 
 
 # ---------------------------------------------------------------------------
+# Modos de entrada da tela de processamento
+# ---------------------------------------------------------------------------
+_SUB_BY_DATE = (
+    "Selecione a data e clique em Processar para buscar os cultos publicados"
+)
+_SUB_BY_LINK = (
+    "Cole o link do vídeo no YouTube — a busca por data é ignorada"
+)
+
+
+def _upload_date_to_br(upload_date: str) -> str:
+    """
+    Converte o ``upload_date`` do YouTube (YYYYMMDD) para DD/MM/AAAA.
+
+    É a data usada daqui para frente pelo fluxo por link: define a pasta do
+    mês no Drive e a chave do histórico — os mesmos papéis que a data digitada
+    tem no fluxo de busca. Quando o provedor não informa a data de publicação,
+    cai para a data de hoje (melhor que abortar o processamento).
+    """
+    try:
+        return datetime.strptime(upload_date, "%Y%m%d").strftime("%d/%m/%Y")
+    except (TypeError, ValueError):
+        return datetime.now().strftime("%d/%m/%Y")
+
+
+# ---------------------------------------------------------------------------
 # Paleta de cores — única fonte da verdade
 # ---------------------------------------------------------------------------
 class _Palette:
@@ -1534,11 +1560,9 @@ class App(QMainWindow):
         layout.addWidget(title)
         layout.addSpacing(2)
 
-        sub = QLabel(
-            "Selecione a data e clique em Processar para buscar os cultos publicados"
-        )
-        sub.setStyleSheet(f"color: {P.HINT}; font-size: 12px;")
-        layout.addWidget(sub)
+        self._processar_sub = QLabel(_SUB_BY_DATE)
+        self._processar_sub.setStyleSheet(f"color: {P.HINT}; font-size: 12px;")
+        layout.addWidget(self._processar_sub)
         layout.addSpacing(14)
 
         # ── Banner de atualização disponível ────────────────────────────────
@@ -1585,27 +1609,76 @@ class App(QMainWindow):
         self._auth_banner.hide()
         layout.addWidget(self._auth_banner)
 
-        # ── Card de data ───────────────────────────────────────────────────
+        # ── Card de origem (data OU link) ──────────────────────────────────
         date_frame = QFrame()
         date_frame.setObjectName("date_frame")
-        dr = QHBoxLayout(date_frame)
-        dr.setContentsMargins(16, 10, 16, 10)
+        card = QVBoxLayout(date_frame)
+        card.setContentsMargins(16, 10, 16, 10)
+        card.setSpacing(8)
+
+        # Linha 1 — escolha do modo de entrada
+        mode_row = QHBoxLayout()
+        mode_row.setSpacing(18)
+        self.mode_date_radio = QRadioButton("📅  Buscar por data")
+        self.mode_link_radio = QRadioButton("🔗  Link do vídeo")
+        self.mode_date_radio.setChecked(True)
+        self.mode_date_radio.setToolTip(
+            "Lista os vídeos publicados no canal na data informada."
+        )
+        self.mode_link_radio.setToolTip(
+            "Processa direto o vídeo do link — sem a etapa de busca."
+        )
+        self._mode_group = QButtonGroup(page)
+        self._mode_group.addButton(self.mode_date_radio, 0)
+        self._mode_group.addButton(self.mode_link_radio, 1)
+        self.mode_link_radio.toggled.connect(self._on_input_mode_changed)
+        mode_row.addWidget(self.mode_date_radio)
+        mode_row.addWidget(self.mode_link_radio)
+        mode_row.addStretch()
+        card.addLayout(mode_row)
+
+        # Linha 2 — entrada (empilhada) + botões de ação
+        dr = QHBoxLayout()
         dr.setSpacing(8)
 
-        dr.addWidget(QLabel("📅  Data do culto:"))
+        self._input_stack = QStackedWidget()
+
+        # Página 0 — data
+        date_page = QWidget()
+        dpl = QHBoxLayout(date_page)
+        dpl.setContentsMargins(0, 0, 0, 0)
+        dpl.setSpacing(8)
+        dpl.addWidget(QLabel("Data do culto:"))
 
         self.date_entry = QLineEdit()
         self.date_entry.setPlaceholderText("DD/MM/AAAA")
         self.date_entry.setFixedWidth(130)
-        dr.addWidget(self.date_entry)
+        dpl.addWidget(self.date_entry)
 
         cal_btn = QPushButton("📅")
         cal_btn.setObjectName("icon_btn")
         cal_btn.setFixedWidth(38)
         cal_btn.clicked.connect(self._open_calendar)
-        dr.addWidget(cal_btn)
+        dpl.addWidget(cal_btn)
+        dpl.addStretch()
 
-        dr.addStretch()
+        # Página 1 — link direto
+        link_page = QWidget()
+        lpl = QHBoxLayout(link_page)
+        lpl.setContentsMargins(0, 0, 0, 0)
+        lpl.setSpacing(8)
+        lpl.addWidget(QLabel("Link do vídeo:"))
+
+        self.link_entry = QLineEdit()
+        self.link_entry.setPlaceholderText(
+            "https://www.youtube.com/watch?v=..."
+        )
+        self.link_entry.setClearButtonEnabled(True)
+        lpl.addWidget(self.link_entry, stretch=1)
+
+        self._input_stack.addWidget(date_page)
+        self._input_stack.addWidget(link_page)
+        dr.addWidget(self._input_stack, stretch=1)
 
         self.cancel_btn = QPushButton("Cancelar")
         self.cancel_btn.setObjectName("cancel_btn")
@@ -1619,6 +1692,8 @@ class App(QMainWindow):
         self.run_btn.setFixedWidth(130)
         self.run_btn.clicked.connect(self._start)
         dr.addWidget(self.run_btn)
+
+        card.addLayout(dr)
 
         layout.addWidget(date_frame)
         layout.addSpacing(14)
@@ -2663,7 +2738,45 @@ class App(QMainWindow):
     # -----------------------------------------------------------------------
     # Iniciar / Cancelar
     # -----------------------------------------------------------------------
+    def _on_input_mode_changed(self, _checked: bool = False):
+        """Alterna a entrada visível (data ⇄ link) e o subtítulo da página."""
+        link_mode = self.mode_link_radio.isChecked()
+        self._input_stack.setCurrentIndex(1 if link_mode else 0)
+        self._processar_sub.setText(_SUB_BY_LINK if link_mode else _SUB_BY_DATE)
+
     def _start(self):
+        if self.mode_link_radio.isChecked():
+            return self._start_by_link()
+        return self._start_by_date()
+
+    def _start_by_link(self):
+        """Valida o link e dispara o fluxo que pula a busca por data."""
+        from infrastructure.youtube.ytdlp_source import extract_video_id
+
+        url = self.link_entry.text().strip()
+        if not url:
+            self._show_error("Informe o link do vídeo no YouTube.")
+            return
+        if extract_video_id(url) is None:
+            self._show_error(
+                "Link inválido.\n\n"
+                "Cole o link de um vídeo do YouTube, por exemplo:\n"
+                "https://www.youtube.com/watch?v=XXXXXXXXXXX\n"
+                "https://youtu.be/XXXXXXXXXXX\n"
+                "https://www.youtube.com/live/XXXXXXXXXXX"
+            )
+            return
+        if not self._prepare_run():
+            return
+
+        threading.Thread(
+            target=self._worker_preflight,
+            args=(None,),
+            kwargs={"video_url": url},
+            daemon=True,
+        ).start()
+
+    def _start_by_date(self):
         date_str = self.date_entry.text().strip()
         if not date_str:
             self._show_error("Informe a data do culto.")
@@ -2675,12 +2788,26 @@ class App(QMainWindow):
                 "Data inválida.\nUse o formato DD/MM/AAAA  (ex: 19/04/2026)."
             )
             return
+        if not self._prepare_run():
+            return
+
+        threading.Thread(
+            target=self._worker_preflight, args=(date_str,), daemon=True
+        ).start()
+
+    def _prepare_run(self) -> bool:
+        """
+        Checa autorização e prepara a UI para uma execução.
+
+        Retorna False (sem alterar a UI) quando o Drive não está autorizado —
+        os dois modos de entrada compartilham essa verificação.
+        """
         if not baixar_audio.check_auth_status():
             self._show_error(
                 "Google Drive não autorizado.\n\n"
                 "Clique em 'Autorizar' no banner acima ou acesse Configurações."
             )
-            return
+            return False
 
         self.log_box.clear()
         self._set_status("Verificando...", "running")
@@ -2689,10 +2816,7 @@ class App(QMainWindow):
         self._running = True
         self._show_bars()
         self._set_buttons_running(True)
-
-        threading.Thread(
-            target=self._worker_preflight, args=(date_str,), daemon=True
-        ).start()
+        return True
 
     def _cancel(self):
         if not self._running:
@@ -2723,7 +2847,14 @@ class App(QMainWindow):
             on_log=lambda m: self._queue.put(("log", m))
         )
 
-    def _worker_preflight(self, date_str: str):
+    def _worker_preflight(self, date_str: str, video_url: str = None):
+        """
+        Checagens prévias comuns aos dois modos (internet, disco).
+
+        No modo por data, segue para a checagem de histórico e a busca no
+        canal. No modo por link (``video_url`` preenchido), não há data ainda
+        — ela é derivada do próprio vídeo em ``_worker_link``.
+        """
         log = lambda m: self._queue.put(("log", m))
 
         log("Verificando conexão com a internet...")
@@ -2744,6 +2875,13 @@ class App(QMainWindow):
             ))
             return
         log(f"Espaço livre: {free_mb:.0f} MB — OK.")
+
+        if video_url:
+            self._queue.put(("status", "Buscando vídeo..."))
+            threading.Thread(
+                target=self._worker_link, args=(video_url,), daemon=True
+            ).start()
+            return
 
         history = baixar_audio.load_history()
         if date_str in history:
@@ -2776,6 +2914,45 @@ class App(QMainWindow):
                 on_status=lambda m: self._queue.put(("status", m)),
             )
             self._queue.put(("select_videos", (date_str, videos)))
+        except baixar_audio.OperacaoCancelada:
+            self._queue.put(("cancelled", None))
+        except Exception as e:
+            self._queue.put(("error", str(e)))
+
+    def _worker_link(self, url: str):
+        """
+        Fase 1 alternativa: resolve o vídeo do link e entra no fluxo comum.
+
+        Pula a listagem do canal e o popup de seleção — o vídeo já é conhecido.
+        A data usada daqui para frente (pasta do mês no Drive e histórico) vem
+        da data de publicação do próprio vídeo.
+        """
+        try:
+            video = self._build_presenter().fetch_video(
+                url,
+                cancel_event=self._cancel_event,
+                on_log=lambda m: self._queue.put(("log", m)),
+                on_status=lambda m: self._queue.put(("status", m)),
+            )
+            date_str = _upload_date_to_br(video.get("upload_date", ""))
+            self._queue.put((
+                "log",
+                f"Vídeo selecionado: {video['title']} — data {date_str}.",
+            ))
+
+            # No modo link o histórico não bloqueia: o usuário apontou o vídeo
+            # explicitamente. Apenas registra o aviso no log.
+            try:
+                if date_str in baixar_audio.load_history():
+                    self._queue.put((
+                        "log",
+                        f"Obs.: {date_str} já consta no histórico — "
+                        "processando mesmo assim.",
+                    ))
+            except Exception:
+                pass
+
+            self._queue.put(("check_chapters", (date_str, [video])))
         except baixar_audio.OperacaoCancelada:
             self._queue.put(("cancelled", None))
         except Exception as e:

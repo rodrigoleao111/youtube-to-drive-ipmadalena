@@ -86,6 +86,9 @@ def _reset_app_state(shared_app):
         pass
     # Limpa log box (QPlainTextEdit — setReadOnly não impede clear())
     app.log_box.clear()
+    # Volta ao modo de entrada padrão (busca por data)
+    app.mode_date_radio.setChecked(True)
+    app.link_entry.clear()
     # Drena a fila
     try:
         while True:
@@ -558,6 +561,239 @@ class TestInputValidation:
             application._start()
         mock_err.assert_called_once()
         MockThread.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Modo de entrada: data ⇄ link
+# ---------------------------------------------------------------------------
+
+class TestInputModeToggle:
+    """Alternância entre 'Buscar por data' e 'Link do vídeo' na tela Processar."""
+
+    def test_modo_padrao_e_busca_por_data(self, application):
+        assert application.mode_date_radio.isChecked() is True
+        assert application.mode_link_radio.isChecked() is False
+        assert application._input_stack.currentIndex() == 0
+
+    def test_selecionar_link_troca_a_pagina_de_entrada(self, application):
+        application.mode_link_radio.setChecked(True)
+        assert application._input_stack.currentIndex() == 1
+
+    def test_voltar_para_data_restaura_a_pagina(self, application):
+        application.mode_link_radio.setChecked(True)
+        application.mode_date_radio.setChecked(True)
+        assert application._input_stack.currentIndex() == 0
+
+    def test_subtitulo_acompanha_o_modo(self, application):
+        application.mode_link_radio.setChecked(True)
+        assert application._processar_sub.text() == app_module._SUB_BY_LINK
+        application.mode_date_radio.setChecked(True)
+        assert application._processar_sub.text() == app_module._SUB_BY_DATE
+
+    def test_modos_sao_mutuamente_exclusivos(self, application):
+        application.mode_link_radio.setChecked(True)
+        assert application.mode_date_radio.isChecked() is False
+
+
+# ---------------------------------------------------------------------------
+# _start() no modo link
+# ---------------------------------------------------------------------------
+
+class TestStartByLink:
+    URL = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+
+    def _link_mode(self, application, url):
+        application.mode_link_radio.setChecked(True)
+        application.link_entry.setText(url)
+
+    def test_link_vazio_mostra_erro_nao_inicia_worker(self, application):
+        self._link_mode(application, "")
+        with patch.object(application, "_show_error") as mock_err, \
+             patch("threading.Thread") as MockThread:
+            application._start()
+        mock_err.assert_called_once()
+        MockThread.assert_not_called()
+
+    def test_link_invalido_mostra_erro_nao_inicia_worker(self, application):
+        self._link_mode(application, "https://exemplo.com/video")
+        with patch.object(application, "_show_error") as mock_err, \
+             patch("threading.Thread") as MockThread:
+            application._start()
+        mock_err.assert_called_once()
+        MockThread.assert_not_called()
+
+    def test_link_valido_inicia_preflight_com_video_url(self, application):
+        self._link_mode(application, self.URL)
+        with patch("baixar_audio.check_auth_status", return_value=True), \
+             patch("threading.Thread") as MockThread:
+            mock_t = MagicMock()
+            MockThread.return_value = mock_t
+            application._start()
+        mock_t.start.assert_called_once()
+        kwargs = MockThread.call_args.kwargs
+        assert kwargs["target"] == application._worker_preflight
+        assert kwargs["args"] == (None,)                 # sem data no modo link
+        assert kwargs["kwargs"]["video_url"] == self.URL
+
+    def test_link_valido_seta_running_true(self, application):
+        self._link_mode(application, self.URL)
+        with patch("baixar_audio.check_auth_status", return_value=True), \
+             patch("threading.Thread"):
+            application._start()
+        assert application._running is True
+
+    def test_sem_autorizacao_mostra_erro_e_nao_inicia(self, application):
+        self._link_mode(application, self.URL)
+        with patch("baixar_audio.check_auth_status", return_value=False), \
+             patch.object(application, "_show_error") as mock_err, \
+             patch("threading.Thread") as MockThread:
+            application._start()
+        mock_err.assert_called_once()
+        MockThread.assert_not_called()
+
+    def test_data_vazia_nao_bloqueia_o_modo_link(self, application):
+        """A validação de data não se aplica quando a origem é o link."""
+        application.date_entry.clear()
+        self._link_mode(application, self.URL)
+        with patch("baixar_audio.check_auth_status", return_value=True), \
+             patch.object(application, "_show_error") as mock_err, \
+             patch("threading.Thread"):
+            application._start()
+        mock_err.assert_not_called()
+
+    def test_aceita_url_de_live(self, application):
+        self._link_mode(application, "https://www.youtube.com/live/dQw4w9WgXcQ")
+        with patch("baixar_audio.check_auth_status", return_value=True), \
+             patch.object(application, "_show_error") as mock_err, \
+             patch("threading.Thread"):
+            application._start()
+        mock_err.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# _worker_preflight + _worker_link no modo link
+# ---------------------------------------------------------------------------
+
+class TestWorkerLink:
+    URL = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+
+    def _drain(self, application):
+        msgs = []
+        try:
+            while True:
+                msgs.append(application._queue.get_nowait())
+        except queue.Empty:
+            pass
+        return msgs
+
+    # -- preflight ---------------------------------------------------------
+
+    def test_preflight_com_link_nao_consulta_historico(self, application):
+        with patch("baixar_audio.check_internet", return_value=True), \
+             patch("baixar_audio.check_disk_space", return_value=(True, 1000.0)), \
+             patch("baixar_audio.load_history") as mock_hist, \
+             patch("threading.Thread") as MockThread:
+            application._worker_preflight(None, video_url=self.URL)
+        mock_hist.assert_not_called()
+        assert MockThread.call_args.kwargs["target"] == application._worker_link
+
+    def test_preflight_sem_internet_falha_tambem_no_modo_link(self, application):
+        with patch("baixar_audio.check_internet", return_value=False), \
+             patch("baixar_audio.check_disk_space", return_value=(True, 1000.0)):
+            application._worker_preflight(None, video_url=self.URL)
+        kinds = [m[0] for m in self._drain(application)]
+        assert "preflight_error" in kinds
+
+    # -- _worker_link ------------------------------------------------------
+
+    def _run_link(self, application, video, history=None):
+        presenter = MagicMock()
+        presenter.fetch_video.return_value = video
+        with patch.object(application, "_build_presenter", return_value=presenter), \
+             patch("baixar_audio.load_history", return_value=history or {}):
+            application._worker_link(self.URL)
+        return presenter
+
+    def test_enfileira_check_chapters_com_o_video(self, application):
+        video = {"id": "dQw4w9WgXcQ", "title": "Culto", "upload_date": "20260419"}
+        self._run_link(application, video)
+        msgs = self._drain(application)
+        kinds = [m[0] for m in msgs]
+        assert "check_chapters" in kinds
+        date_str, videos = next(m[1] for m in msgs if m[0] == "check_chapters")
+        assert date_str == "19/04/2026"        # derivada do upload_date
+        assert videos == [video]
+
+    def test_nao_enfileira_select_videos(self, application):
+        """A etapa de busca/seleção é justamente o que o modo link pula."""
+        video = {"id": "abc", "title": "Culto", "upload_date": "20260419"}
+        self._run_link(application, video)
+        kinds = [m[0] for m in self._drain(application)]
+        assert "select_videos" not in kinds
+
+    def test_repassa_url_ao_presenter(self, application):
+        video = {"id": "abc", "title": "Culto", "upload_date": "20260419"}
+        presenter = self._run_link(application, video)
+        args, _ = presenter.fetch_video.call_args
+        assert args[0] == self.URL
+
+    def test_upload_date_ausente_usa_data_de_hoje(self, application):
+        from datetime import datetime
+        video = {"id": "abc", "title": "Culto", "upload_date": ""}
+        self._run_link(application, video)
+        msgs = self._drain(application)
+        date_str, _ = next(m[1] for m in msgs if m[0] == "check_chapters")
+        assert date_str == datetime.now().strftime("%d/%m/%Y")
+
+    def test_data_no_historico_apenas_avisa_e_prossegue(self, application):
+        video = {"id": "abc", "title": "Culto", "upload_date": "20260419"}
+        history = {"19/04/2026": {"processado_em": "2026-04-19T10:00:00", "videos": []}}
+        self._run_link(application, video, history=history)
+        msgs = self._drain(application)
+        kinds = [m[0] for m in msgs]
+        assert "history_warning" not in kinds
+        assert "check_chapters" in kinds
+        logs = [m[1] for m in msgs if m[0] == "log"]
+        assert any("histórico" in m.lower() for m in logs)
+
+    def test_cancelamento_enfileira_cancelled(self, application):
+        presenter = MagicMock()
+        presenter.fetch_video.side_effect = baixar_audio.OperacaoCancelada("cancelado")
+        with patch.object(application, "_build_presenter", return_value=presenter):
+            application._worker_link(self.URL)
+        kinds = [m[0] for m in self._drain(application)]
+        assert "cancelled" in kinds
+
+    def test_erro_enfileira_error_com_a_mensagem(self, application):
+        presenter = MagicMock()
+        presenter.fetch_video.side_effect = RuntimeError("vídeo indisponível")
+        with patch.object(application, "_build_presenter", return_value=presenter):
+            application._worker_link(self.URL)
+        msgs = self._drain(application)
+        assert "error" in [m[0] for m in msgs]
+        assert "indisponível" in next(m[1] for m in msgs if m[0] == "error")
+
+
+# ---------------------------------------------------------------------------
+# _upload_date_to_br
+# ---------------------------------------------------------------------------
+
+class TestUploadDateToBr:
+    def test_converte_yyyymmdd(self):
+        assert app_module._upload_date_to_br("20260419") == "19/04/2026"
+
+    def test_string_vazia_cai_para_hoje(self):
+        from datetime import datetime
+        assert app_module._upload_date_to_br("") == datetime.now().strftime("%d/%m/%Y")
+
+    def test_none_cai_para_hoje(self):
+        from datetime import datetime
+        assert app_module._upload_date_to_br(None) == datetime.now().strftime("%d/%m/%Y")
+
+    def test_data_invalida_cai_para_hoje(self):
+        from datetime import datetime
+        assert app_module._upload_date_to_br("20261345") == \
+               datetime.now().strftime("%d/%m/%Y")
 
 
 # ---------------------------------------------------------------------------

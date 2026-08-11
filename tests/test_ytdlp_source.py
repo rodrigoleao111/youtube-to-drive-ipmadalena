@@ -901,6 +901,205 @@ class TestYtDlpVideoSourceGetChapters:
         assert any("abc123" in m for m in logs)
 
 
+# ===========================================================================
+# extract_video_id
+# ===========================================================================
+
+class TestExtractVideoId:
+    """Formatos de link aceitos pelo modo 'link do vídeo' da tela Processar."""
+
+    def _extract(self, url):
+        from infrastructure.youtube.ytdlp_source import extract_video_id
+        return extract_video_id(url)
+
+    def test_watch_url_padrao(self):
+        assert self._extract(
+            "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+        ) == "dQw4w9WgXcQ"
+
+    def test_watch_url_com_parametros_extras(self):
+        assert self._extract(
+            "https://www.youtube.com/watch?v=dQw4w9WgXcQ&t=120s&list=PL123"
+        ) == "dQw4w9WgXcQ"
+
+    def test_youtu_be_curto(self):
+        assert self._extract("https://youtu.be/dQw4w9WgXcQ") == "dQw4w9WgXcQ"
+
+    def test_youtu_be_com_query_si(self):
+        assert self._extract(
+            "https://youtu.be/dQw4w9WgXcQ?si=AbCdEfGhIjK"
+        ) == "dQw4w9WgXcQ"
+
+    def test_url_de_live(self):
+        # Formato usado pelas transmissões dos cultos
+        assert self._extract(
+            "https://www.youtube.com/live/dQw4w9WgXcQ"
+        ) == "dQw4w9WgXcQ"
+
+    def test_url_de_shorts(self):
+        assert self._extract(
+            "https://www.youtube.com/shorts/dQw4w9WgXcQ"
+        ) == "dQw4w9WgXcQ"
+
+    def test_url_de_embed(self):
+        assert self._extract(
+            "https://www.youtube.com/embed/dQw4w9WgXcQ"
+        ) == "dQw4w9WgXcQ"
+
+    def test_sem_esquema(self):
+        assert self._extract("youtube.com/watch?v=dQw4w9WgXcQ") == "dQw4w9WgXcQ"
+
+    def test_mobile_e_music(self):
+        assert self._extract(
+            "https://m.youtube.com/watch?v=dQw4w9WgXcQ"
+        ) == "dQw4w9WgXcQ"
+        assert self._extract(
+            "https://music.youtube.com/watch?v=dQw4w9WgXcQ"
+        ) == "dQw4w9WgXcQ"
+
+    def test_id_cru_de_11_caracteres(self):
+        assert self._extract("dQw4w9WgXcQ") == "dQw4w9WgXcQ"
+
+    def test_espacos_em_volta_sao_ignorados(self):
+        assert self._extract(
+            "  https://www.youtube.com/watch?v=dQw4w9WgXcQ  "
+        ) == "dQw4w9WgXcQ"
+
+    def test_vazio_e_none_retornam_none(self):
+        assert self._extract("") is None
+        assert self._extract(None) is None
+
+    def test_outro_dominio_retorna_none(self):
+        assert self._extract("https://vimeo.com/watch?v=dQw4w9WgXcQ") is None
+
+    def test_url_de_canal_retorna_none(self):
+        assert self._extract("https://www.youtube.com/@IPMadalena/streams") is None
+
+    def test_id_com_tamanho_errado_retorna_none(self):
+        assert self._extract("https://www.youtube.com/watch?v=curto") is None
+
+    def test_texto_arbitrario_retorna_none(self):
+        assert self._extract("culto de domingo") is None
+
+
+# ===========================================================================
+# YtDlpVideoSource.fetch_video
+# ===========================================================================
+
+class TestYtDlpVideoSourceFetchVideo:
+    """Busca de um vídeo específico por link (subprocess mockado)."""
+
+    URL = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+
+    def _source(self):
+        return YtDlpVideoSource()
+
+    def test_retorna_video_com_dados_do_yt_dlp(self):
+        proc = _make_process(["dQw4w9WgXcQ|||Culto de Domingo|||20260419"])
+        with patch("infrastructure.youtube.ytdlp_source.start_process", return_value=proc):
+            video = self._source().fetch_video(self.URL)
+        assert isinstance(video, Video)
+        assert video.id == "dQw4w9WgXcQ"
+        assert video.title == "Culto de Domingo"
+        assert video.upload_date == "20260419"
+
+    def test_link_invalido_levanta_video_nao_encontrado_sem_subprocess(self):
+        with patch("infrastructure.youtube.ytdlp_source.start_process") as mock_sp:
+            with pytest.raises(VideoNaoEncontrado):
+                self._source().fetch_video("https://exemplo.com/nada")
+        mock_sp.assert_not_called()
+
+    def test_usa_no_playlist_e_url_canonica(self):
+        proc = _make_process(["dQw4w9WgXcQ|||Culto|||20260419"])
+        captured = []
+
+        def fake_start(cmd, *a, **kw):
+            captured.extend(cmd)
+            return proc
+
+        with patch("infrastructure.youtube.ytdlp_source.start_process",
+                   side_effect=fake_start):
+            # link com &list= — sem --no-playlist o yt-dlp baixaria a playlist
+            self._source().fetch_video(
+                "https://www.youtube.com/watch?v=dQw4w9WgXcQ&list=PLabc"
+            )
+        assert "--no-playlist" in captured
+        assert "https://www.youtube.com/watch?v=dQw4w9WgXcQ" in captured
+
+    def test_sem_saida_levanta_video_nao_encontrado(self):
+        proc = _make_process([])
+        with patch("infrastructure.youtube.ytdlp_source.start_process", return_value=proc):
+            with pytest.raises(VideoNaoEncontrado):
+                self._source().fetch_video(self.URL)
+
+    def test_returncode_diferente_de_zero_levanta(self):
+        proc = _make_process(
+            ["dQw4w9WgXcQ|||Culto|||20260419"], returncode=1
+        )
+        with patch("infrastructure.youtube.ytdlp_source.start_process", return_value=proc):
+            with pytest.raises(VideoNaoEncontrado):
+                self._source().fetch_video(self.URL)
+
+    def test_upload_date_indisponivel_vira_string_vazia(self):
+        # yt-dlp imprime "NA" quando o campo não existe
+        proc = _make_process(["dQw4w9WgXcQ|||Culto|||NA"])
+        with patch("infrastructure.youtube.ytdlp_source.start_process", return_value=proc):
+            video = self._source().fetch_video(self.URL)
+        assert video.upload_date == ""
+
+    def test_ignora_linhas_sem_separador(self):
+        proc = _make_process([
+            "[youtube] dQw4w9WgXcQ: Downloading webpage",
+            "dQw4w9WgXcQ|||Culto|||20260419",
+        ])
+        with patch("infrastructure.youtube.ytdlp_source.start_process", return_value=proc):
+            video = self._source().fetch_video(self.URL)
+        assert video.title == "Culto"
+
+    def test_usa_a_primeira_linha_quando_ha_varias(self):
+        proc = _make_process([
+            "dQw4w9WgXcQ|||Primeiro|||20260419",
+            "outro123456|||Segundo|||20260420",
+        ])
+        with patch("infrastructure.youtube.ytdlp_source.start_process", return_value=proc):
+            video = self._source().fetch_video(self.URL)
+        assert video.title == "Primeiro"
+
+    def test_chama_on_log_e_on_status(self):
+        proc = _make_process(["dQw4w9WgXcQ|||Culto|||20260419"])
+        logs, status = [], []
+        with patch("infrastructure.youtube.ytdlp_source.start_process", return_value=proc):
+            self._source().fetch_video(
+                self.URL, on_log=logs.append, on_status=status.append
+            )
+        assert any("Buscando" in m for m in status)
+        assert any("Culto" in m for m in logs)
+
+    def test_repassa_cancel_event_ao_start_process(self):
+        import threading
+        ev = threading.Event()
+        proc = _make_process(["dQw4w9WgXcQ|||Culto|||20260419"])
+        with patch("infrastructure.youtube.ytdlp_source.start_process",
+                   return_value=proc) as mock_sp:
+            self._source().fetch_video(self.URL, cancel_event=ev)
+        assert mock_sp.call_args.args[1] is ev
+
+    def test_cancelamento_levanta_operacao_cancelada(self):
+        import threading
+        ev = threading.Event()
+        ev.set()
+        proc = _make_process(["dQw4w9WgXcQ|||Culto|||20260419"])
+        with patch("infrastructure.youtube.ytdlp_source.start_process", return_value=proc):
+            with pytest.raises(OperacaoCancelada):
+                self._source().fetch_video(self.URL, cancel_event=ev)
+
+    def test_aceita_id_cru(self):
+        proc = _make_process(["dQw4w9WgXcQ|||Culto|||20260419"])
+        with patch("infrastructure.youtube.ytdlp_source.start_process", return_value=proc):
+            video = self._source().fetch_video("dQw4w9WgXcQ")
+        assert video.id == "dQw4w9WgXcQ"
+
+
 class TestSecondsToHms:
     def test_zero(self):
         from infrastructure.youtube.ytdlp_source import _seconds_to_hms

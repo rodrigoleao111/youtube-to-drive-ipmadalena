@@ -64,6 +64,59 @@ class IVideoSource(Protocol):
 
 
 # ---------------------------------------------------------------------------
+# Busca de um vídeo específico (por link)
+# ---------------------------------------------------------------------------
+
+@runtime_checkable
+class IVideoFetcher(Protocol):
+    """
+    Obtém os metadados de UM vídeo a partir do seu link.
+
+    Complementa IVideoSource: em vez de varrer o canal por data, resolve
+    diretamente o vídeo informado pelo usuário. Usado pelo modo "link" da
+    tela de processamento, que pula a etapa de busca.
+
+    Implementações: YtDlpVideoSource (infraestrutura/youtube)
+    """
+
+    def fetch_video(
+        self,
+        url: str,
+        *,
+        cancel_event=None,
+        on_log: Optional[Callable[[str], None]] = None,
+        on_status: Optional[Callable[[str], None]] = None,
+    ) -> Video:
+        """
+        Retorna o vídeo correspondente ao link informado.
+
+        Parameters
+        ----------
+        url:
+            Link do vídeo no YouTube (watch, youtu.be, live, shorts, embed)
+            ou o próprio ID de 11 caracteres.
+        cancel_event:
+            threading.Event opcional — lança OperacaoCancelada se sinalizado.
+        on_log:
+            Callback chamado com mensagens de log (textos informativos).
+        on_status:
+            Callback chamado com mensagens de status (texto exibido na UI).
+
+        Returns
+        -------
+        Video
+            Vídeo com ``id``, ``title`` e ``upload_date`` preenchidos.
+            ``upload_date`` pode vir vazio quando o provedor não informa.
+
+        Raises
+        ------
+        VideoNaoEncontrado
+            Se o link for inválido ou o vídeo não puder ser resolvido.
+        """
+        ...
+
+
+# ---------------------------------------------------------------------------
 # Fonte de capítulos de vídeo
 # ---------------------------------------------------------------------------
 
@@ -142,6 +195,58 @@ class IAudioDownloader(Protocol):
         -------
         List[AudioFile]
             Um AudioFile por segmento processado com sucesso.
+        """
+        ...
+
+
+# ---------------------------------------------------------------------------
+# Compactador de arquivos
+# ---------------------------------------------------------------------------
+
+@runtime_checkable
+class IArchiver(Protocol):
+    """
+    Empacota vários arquivos locais em um único arquivo compactado.
+
+    Usado antes do upload: o episódio sobe para a nuvem como um pacote único
+    (áudio + capa + descrição) em vez de arquivos soltos.
+
+    Implementações: ZipArchiver (infraestrutura/archive)
+    """
+
+    def create(
+        self,
+        files: List[str],
+        dest_path: str,
+        *,
+        on_log: Optional[Callable[[str], None]] = None,
+    ) -> str:
+        """
+        Cria o pacote em ``dest_path`` com os arquivos informados.
+
+        Os arquivos entram na raiz do pacote (sem estrutura de diretórios) e
+        na ordem recebida. Caminhos inexistentes são ignorados.
+
+        Parameters
+        ----------
+        files:
+            Caminhos absolutos dos arquivos a incluir.
+        dest_path:
+            Caminho do pacote a criar (sobrescrito se já existir).
+        on_log:
+            Callback chamado com mensagens de log.
+
+        Returns
+        -------
+        str
+            O próprio ``dest_path``.
+
+        Raises
+        ------
+        ValueError
+            Se nenhum dos arquivos informados existir.
+        OSError
+            Se a escrita do pacote falhar.
         """
         ...
 

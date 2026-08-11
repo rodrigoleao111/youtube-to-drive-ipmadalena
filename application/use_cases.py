@@ -23,6 +23,7 @@ from domain.ports import (
     ICloudStorage,
     IConfigRepository,
     IHistoryRepository,
+    IVideoFetcher,
     IVideoSource,
 )
 
@@ -79,6 +80,57 @@ class ListVideosUseCase:
         return self.source.list_videos(
             date_str,
             channel_url,
+            cancel_event=cancel_event,
+            on_log=on_log,
+            on_status=on_status,
+        )
+
+
+# ---------------------------------------------------------------------------
+# Fase 1 (alternativa): resolução de um vídeo a partir do link
+# ---------------------------------------------------------------------------
+
+@dataclass
+class FetchVideoUseCase:
+    """
+    Resolve um único vídeo a partir do link informado pelo usuário.
+
+    É a alternativa ao ListVideosUseCase quando o usuário já sabe qual vídeo
+    quer processar: em vez de varrer o canal por data, vai direto ao vídeo.
+    Delega para IVideoFetcher.
+    """
+
+    source: IVideoFetcher
+
+    def execute(
+        self,
+        url: str,
+        *,
+        cancel_event=None,
+        on_log: Optional[Callable[[str], None]] = None,
+        on_status: Optional[Callable[[str], None]] = None,
+    ) -> Video:
+        """
+        Retorna o Video correspondente ao link.
+
+        Parameters
+        ----------
+        url:
+            Link do vídeo no YouTube (ou o ID de 11 caracteres).
+        cancel_event:
+            threading.Event opcional — propaga OperacaoCancelada se sinalizado.
+        on_log / on_status:
+            Callbacks de feedback para a UI.
+
+        Raises
+        ------
+        VideoNaoEncontrado
+            Se o link for inválido ou o vídeo não puder ser resolvido.
+        OperacaoCancelada
+            Se cancel_event for sinalizado durante a busca.
+        """
+        return self.source.fetch_video(
+            url,
             cancel_event=cancel_event,
             on_log=on_log,
             on_status=on_status,

@@ -23,6 +23,7 @@ import baixar_audio
 from application.use_cases import (
     DownloadSegmentsUseCase,
     EditAudioUseCase,
+    FetchVideoUseCase,
     GetChaptersUseCase,
     ListVideosUseCase,
     UploadAudioUseCase,
@@ -77,6 +78,7 @@ def build_processing_presenter() -> ProcessingPresenter:
         ),
         upload_uc      = UploadAudioUseCase(storage=storage, history=history),
         chapters_uc    = GetChaptersUseCase(source=video_source),
+        fetch_video_uc = FetchVideoUseCase(source=video_source),
         channel_url    = cfg["channel_url"],
         download_dir   = baixar_audio.DOWNLOAD_DIR,
         upload_enabled = bool(cfg.get("upload_to_drive", True)),
