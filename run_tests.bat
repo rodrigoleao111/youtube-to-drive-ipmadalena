@@ -2,7 +2,8 @@
 setlocal
 
 set PYTHON=C:\Users\rasantos\AppData\Local\Programs\Python\Python312\python.exe
-set PROJECT=C:\Users\rasantos\youtube_to_drive
+set "PROJECT=%~dp0"
+if "%PROJECT:~-1%"=="\" set "PROJECT=%PROJECT:~0,-1%"
 
 echo.
 echo =========================================================
