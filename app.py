@@ -39,7 +39,7 @@ from setup_wizard import SetupWizard
 from player_window_qt import PlayerWindowQt as PlayerWindow
 
 
-APP_VERSION = "v3.4.0"
+APP_VERSION = "v3.5.0"
 
 # ---------------------------------------------------------------------------
 # Instância única — impede abrir dois apps ao mesmo tempo

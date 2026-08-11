@@ -6,6 +6,8 @@ A partir da v3.0.0, oferece também um **pipeline de edição de áudio** opcion
 
 A v3.2.0 introduz a **tela Início**: biblioteca local de áudios baixados com cards, badge de status de envio ao Drive, re-upload individual, ordenação e confirmação ao fechar durante operações em curso.
 
+A v3.5.0 traz duas novidades: a tela **Processar** aceita duas origens — buscar os vídeos do canal por data (padrão) ou **colar o link do vídeo** direto, pulando a etapa de busca — e o upload passa a subir um **pacote `.zip`** por episódio (áudio + capa + descrição) em vez de arquivos soltos.
+
 ---
 
 ## Instalação
@@ -67,6 +69,10 @@ Após a configuração, o token é salvo em `credentials/token.pkl` e renovado a
 python app.py
 ```
 
+Na tela **Processar** você escolhe de onde vem o vídeo:
+
+**📅 Buscar por data** (padrão)
+
 1. Informe a data do culto (DD/MM/AAAA) ou use o seletor de calendário 📅
 2. Clique em **Processar**
 3. Selecione os vídeos desejados no popup e clique em **Prosseguir**
@@ -74,6 +80,16 @@ python app.py
 5. Clique em **Confirmar trecho** (ou **Usar vídeo completo** para enviar sem corte)
 6. Acompanhe o progresso pelas barras de **Download**, **Conversão** (edição de áudio) e **Upload**
 7. Uma notificação desktop é exibida ao concluir
+
+**🔗 Link do vídeo**
+
+1. Marque **Link do vídeo** e cole o endereço do vídeo no YouTube
+2. Clique em **Processar** — a busca no canal e o popup de seleção são **pulados**; o app vai direto ao player
+3. Daí em diante o fluxo é idêntico (marcação do trecho → download → edição → upload)
+
+São aceitos os formatos `youtube.com/watch?v=...`, `youtu.be/...`, `youtube.com/live/...` (usado pelas transmissões), `shorts` e `embed` — parâmetros extras como `&t=` e `&list=` são ignorados.
+
+> A data usada para a pasta do mês no Drive e para o histórico vem da **data de publicação do próprio vídeo**. Nesse modo o aviso de "data já processada" não interrompe o processo — apenas registra uma linha no log.
 
 ### Edição de áudio (opcional, novidade da v3.0.0)
 
@@ -135,14 +151,17 @@ Clique no ícone ⚙ no canto superior direito para acessar a tela de configura�
 3. Avisa se a data já foi processada antes (pode prosseguir mesmo assim)
 4. Atualiza o yt-dlp em background ao iniciar
 5. Verifica se há nova versão do app no GitHub Releases e exibe banner verde quando disponível — permite baixar e instalar sem sair do app (apenas no instalador; em modo script exibe instrução para `git pull`)
-6. Busca os vídeos publicados na data informada no canal
-7. Exibe popup para selecionar quais vídeos processar
+6. Busca os vídeos publicados na data informada no canal (ou resolve direto o vídeo do link, quando esse modo é usado)
+7. Exibe popup para selecionar quais vídeos processar (pulado no modo link)
 8. Abre o player para marcar o trecho desejado (início/fim da pregação)
 9. Baixa apenas o trecho selecionado e converte para MP3
-10. Localiza a pasta do mês no Drive (ou cria se não existir)
-11. Faz o upload com progresso em tempo real
-12. Remove os arquivos locais após o upload (a menos que "Manter arquivos no dispositivo" esteja ativo)
-13. Salva histórico local e exibe notificação desktop
+10. Compacta o episódio (áudio + capa + descrição) num único `<nome do áudio>.zip`
+11. Localiza a pasta do mês no Drive (ou cria se não existir)
+12. Faz o upload do pacote com progresso em tempo real
+13. Remove os arquivos locais após o upload (a menos que "Manter arquivos no dispositivo" esteja ativo)
+14. Salva histórico local e exibe notificação desktop
+
+> **Pacote do episódio:** o que sobe para o Drive é um `.zip` com o nome do áudio, contendo o MP3, a `capa.jpg` e a `descricao.txt`. Se "Salvar vídeo (MP4)" estiver ativo, o vídeo sobe **ao lado** do pacote (zipar MP4 não reduz tamanho). O botão ↑ da tela Início envia o mesmo pacote.
 
 > **Transmissões ao vivo:** o YouTube pode registrar a data de publicação como o dia seguinte ao culto. O script lida com isso automaticamente.
 
@@ -157,17 +176,21 @@ youtube_to_drive/
 │
 ├── domain/                         ← núcleo de negócio (zero deps externas)
 │   ├── entities.py                 Video, Segment, AudioFile, ProcessingResult
-│   ├── ports.py                    Protocols: IVideoSource, ICloudStorage, ...
+│   ├── ports.py                    Protocols: IVideoSource, IVideoFetcher,
+│   │                               ICloudStorage, ...
 │   └── exceptions.py               OperacaoCancelada, VideoNaoEncontrado, ...
 │
 ├── infrastructure/                 ← adaptadores que implementam os ports
 │   ├── youtube/                    yt-dlp: listagem e download
+│   ├── audio/                      ffmpeg: edição do áudio
+│   ├── archive/                    zip do episódio (áudio+capa+descrição)
 │   ├── drive/                      Google Drive: OAuth + upload streaming
 │   ├── persistence/                JSON: history e config
 │   └── notification/               plyer: notificação desktop
 │
 ├── application/                    ← use cases (orquestradores do domínio)
-│   └── use_cases.py                ListVideos, DownloadSegments, UploadAudio
+│   └── use_cases.py                ListVideos, FetchVideo, GetChapters,
+│                                   DownloadSegments, EditAudio, UploadAudio
 │
 ├── presentation/                   ← adaptadores de UI
 │   └── processing_presenter.py     compõe use cases para a GUI
@@ -242,7 +265,7 @@ Detalhes técnicos completos (port-by-port, decisões de design, problemas conhe
 
 ## Testes
 
-Suíte com **701 testes** usando apenas `pytest` e `unittest.mock` — sem dependências adicionais:
+Suíte com **1010 testes** usando apenas `pytest` e `unittest.mock` — sem dependências adicionais:
 
 ```bash
 python -m pytest tests/
@@ -258,18 +281,19 @@ Distribuição por camada:
 
 | Arquivo | Testes | Cobertura |
 |---|---:|---|
-| `test_domain.py` | 87 | Entidades, exceções, Protocols (puro) |
-| `test_ffmpeg_editor.py` | 43 | FfmpegAudioEditor (subprocess mockado) |
-| `test_ytdlp_source.py` | 41 | Adaptadores yt-dlp (subprocess mockado) |
-| `test_gdrive_storage.py` | 38 | Drive OAuth + upload (HTTP/Drive API mockados) |
-| `test_use_cases.py` | 50 | Use cases da camada application (ports mockados) |
+| `test_domain.py` | 105 | Entidades, exceções, Protocols (puro) |
+| `test_zip_archiver.py` | 17 | ZipArchiver: pacote do episódio (I/O real em `tmp_path`) |
+| `test_ffmpeg_editor.py` | 101 | FfmpegAudioEditor: filtros, duração, fades, música de fundo (subprocess mockado) |
+| `test_ytdlp_source.py` | 139 | Adaptadores yt-dlp, `extract_video_id`, `fetch_video`, orçamento de MAX_PATH (subprocess mockado) |
+| `test_gdrive_storage.py` | 53 | Drive OAuth + upload (HTTP/Drive API mockados) |
+| `test_use_cases.py` | 57 | Use cases da camada application (ports mockados) |
 | `test_persistence.py` | 33 | Repositórios JSON (I/O real em `tmp_path`) |
-| `test_app.py` | 210 | Integração da GUI (Home, Processar, Config, Player) |
+| `test_app.py` | 273 | Integração da GUI (Home, Processar, modo link, Config, Player) |
 | `test_github_updater.py` | 19 | Auto-update via GitHub Releases (HTTP mockado) |
 | `test_baixar_audio.py` | 38 | Utilidades + CLI + auth wrappers |
-| `test_presenter.py` | 30 | ProcessingPresenter (use cases mockados) |
+| `test_presenter.py` | 58 | ProcessingPresenter + pacote de upload (use cases mockados) |
 | `test_player_window_qt.py` | 29 | PlayerWindowQt |
-| `test_composition_root.py` | 22 | Wiring/DI |
+| `test_composition_root.py` | 27 | Wiring/DI |
 | `test_audio_test_presenter.py` | 17 | AudioTestPresenter |
 | `test_player_window.py` | 34 | PlayerWindow + utilitários de tempo |
 | `test_plyer_notifier.py` | 10 | PlyerNotifier (plyer mockado) |
@@ -310,3 +334,4 @@ O script cuida de tudo automaticamente em 4 passos:
 | App abre duas vezes | Somente uma instância é permitida — feche a anterior |
 | Sem espaço em disco | O app avisa antes de começar; libere pelo menos 500 MB |
 | `yt-dlp: command not found` | Execute `pip install yt-dlp` ou reinstale via `instalar.bat` |
+| `Cannot write video description file` / yt-dlp código 1 | Caminho passou dos 260 caracteres do Windows. O app já encurta o nome automaticamente; se voltar a acontecer, instale o app numa pasta mais próxima da raiz (ex.: `C:\IPMadalena`) |

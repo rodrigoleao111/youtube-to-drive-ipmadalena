@@ -43,7 +43,8 @@ youtube_to_drive/
 │   ├── entities.py                 Video, Segment, AudioFile, ProcessingResult,
 │   │                                EqBand, AudioEditConfig, PodcastEpisode
 │   ├── audio_presets.py            EQ_FREQS, EQ_PRESET_VOZ_MASCULINA, NOISE_INTENSITIES
-│   ├── ports.py                    IVideoSource, IAudioDownloader, IAudioEditor,
+│   ├── ports.py                    IVideoSource, IVideoFetcher, IChapterSource,
+│   │                                IAudioDownloader, IAudioEditor, IArchiver,
 │   │                                ICloudStorage, IHistoryRepository,
 │   │                                IConfigRepository, INotifier
 │   └── exceptions.py               IPMadalenaError, OperacaoCancelada, DomainError, ...
@@ -55,6 +56,8 @@ youtube_to_drive/
 │   ├── audio/
 │   │   ├── _utils.py               ffmpeg_exe(), ffprobe_exe(), start_process()
 │   │   └── ffmpeg_editor.py        FfmpegAudioEditor (denoise/EQ/fade/concat de vinhetas)
+│   ├── archive/
+│   │   └── zip_archiver.py         ZipArchiver (pacote .zip do episódio)
 │   ├── drive/
 │   │   └── gdrive_storage.py       GoogleDriveStorage, _ProgressFile
 │   ├── persistence/
@@ -65,7 +68,8 @@ youtube_to_drive/
 │       └── github_updater.py       check_latest_version, download_release
 │
 ├── application/                    ← use cases (orquestradores de domínio)
-│   └── use_cases.py                ListVideosUseCase, DownloadSegmentsUseCase,
+│   └── use_cases.py                ListVideosUseCase, FetchVideoUseCase,
+│                                    GetChaptersUseCase, DownloadSegmentsUseCase,
 │                                    EditAudioUseCase, UploadAudioUseCase
 │
 ├── presentation/                   ← adaptadores de UI
@@ -77,6 +81,8 @@ youtube_to_drive/
 │
 ├── app.py                          interface gráfica (PyQt6) com SettingsDialog
 │                                    em duas subpáginas (Geral / Edição de áudio)
+│                                    e tela Processar com 2 modos de entrada
+│                                    (busca por data | link direto do vídeo)
 ├── baixar_audio.py                 constantes, utilidades de SO, OAuth config, CLI
 ├── setup_wizard.py                 wizard de primeira execução
 ├── player_window_qt.py             launcher do player Qt (subprocess)
@@ -144,8 +150,11 @@ Todos os Protocols do domínio têm implementação concreta em `infrastructure/
 | Protocol (`domain/ports.py`) | Implementação |
 |---|---|
 | `IVideoSource` | `infrastructure.youtube.ytdlp_source.YtDlpVideoSource` |
+| `IVideoFetcher` | `infrastructure.youtube.ytdlp_source.YtDlpVideoSource` |
+| `IChapterSource` | `infrastructure.youtube.ytdlp_source.YtDlpVideoSource` |
 | `IAudioDownloader` | `infrastructure.youtube.ytdlp_source.YtDlpAudioDownloader` |
 | `IAudioEditor` | `infrastructure.audio.ffmpeg_editor.FfmpegAudioEditor` |
+| `IArchiver` | `infrastructure.archive.zip_archiver.ZipArchiver` |
 | `ICloudStorage` | `infrastructure.drive.gdrive_storage.GoogleDriveStorage` |
 | `IHistoryRepository` | `infrastructure.persistence.json_repositories.JsonHistoryRepository` |
 | `IConfigRepository` | `infrastructure.persistence.json_repositories.JsonConfigRepository` |
@@ -153,18 +162,42 @@ Todos os Protocols do domínio têm implementação concreta em `infrastructure/
 
 ## Fluxo de execução (GUI)
 
+A tela Processar tem **dois modos de entrada** (rádios no card de origem): busca
+por data (padrão) ou link direto do vídeo. O modo link pula a listagem do canal
+e o popup de seleção — o resto do pipeline é idêntico.
+
 ```
-App._start(date_str)
-  └─> _worker_preflight (thread)              [internet, disco, histórico]
-       └─> _worker (thread)                    [delega → ProcessingPresenter.list_videos]
-            └─> popup de seleção de vídeos     [interação humana]
-                 └─> PlayerWindow              [marcação de trechos]
-                      └─> _worker_phase2       [delega → ProcessingPresenter.process_segments]
-                           ├─> DownloadSegmentsUseCase
-                           ├─> EditAudioUseCase  (no-op rápido se nada habilitado)
-                           ├─> UploadAudioUseCase  (grava histórico via IHistoryRepository)
-                           └─> _on_done           [notificação via INotifier]
+App._start()
+  ├─ modo data → _start_by_date(date_str)
+  │    └─> _worker_preflight (thread)          [internet, disco, histórico]
+  │         └─> _worker (thread)                [delega → Presenter.list_videos]
+  │              └─> popup de seleção de vídeos [interação humana]
+  │                   └─> ("check_chapters", …)
+  │
+  └─ modo link → _start_by_link(url)           [valida via extract_video_id]
+       └─> _worker_preflight(None, video_url)  [internet, disco — sem histórico]
+            └─> _worker_link (thread)           [delega → Presenter.fetch_video]
+                 └─> ("check_chapters", …)      [data derivada do upload_date]
+
+  ("check_chapters") ─> _worker_check_chapters  [capítulo automático, se configurado]
+       └─> PlayerWindow                         [marcação de trechos]
+            └─> _worker_phase2                  [delega → Presenter.process_segments]
+                 ├─> DownloadSegmentsUseCase
+                 ├─> EditAudioUseCase  (no-op rápido se nada habilitado)
+                 ├─> _build_upload_list  (zip: áudio + capa + descrição)
+                 ├─> UploadAudioUseCase  (grava histórico via IHistoryRepository)
+                 └─> _on_done           [notificação via INotifier]
 ```
+
+### Modo link — de onde vem a data
+
+O fluxo inteiro a jusante é indexado por `date_str` (pasta do mês no Drive e
+chave do `historico.json`). No modo link não há data digitada, então ela é
+derivada do `upload_date` do próprio vídeo por `app._upload_date_to_br()`
+(`YYYYMMDD` → `DD/MM/AAAA`); se o provedor não informar a data, cai para a data
+de hoje em vez de abortar. O aviso bloqueante de "data já processada" **não**
+se aplica aqui — o usuário apontou o vídeo explicitamente; apenas uma linha de
+log registra que a data já constava no histórico.
 
 ### Pipeline de edição de áudio (`EditAudioUseCase` → `FfmpegAudioEditor`)
 
@@ -193,6 +226,71 @@ vinheta são persistidos como **basename** (ex.: `"intro.mp3"`) e expandidos
 em runtime para `assets/vinhetas/intro.mp3` via `audio_edit_resolve_paths` —
 isso torna a config portátil entre instalações (mover a pasta do app não
 quebra a referência).
+
+### Duração medida — o pipeline inteiro depende dela
+
+`FfmpegAudioEditor._probe_duration()` mede o áudio principal e as vinhetas.
+Tudo que é ancorado no **fim** do arquivo depende desse número: `afade=t=out`
+(`st = duração − fade`) e o `atrim`/fade out da música de fundo.
+
+Quando a medição falhava (retornava `0.0`), o filter graph saía destrutivo:
+`afade=t=out:st=0` silenciava o episódio a partir do primeiro segundo e
+`atrim=end=0.001+intro_musical` fazia a música sumir logo depois da abertura.
+Foi exatamente esse o sintoma de "a música de fundo sumiu após 8 segundos" —
+o usuário tinha 8 s de intro musical configurados.
+
+A causa era o `build_app.spec` empacotar **apenas `ffmpeg.exe`**: sem
+`ffprobe.exe` no bundle, toda medição falhava no app instalado (em modo script
+funcionava, porque o `ffmpeg/bin/` local costuma ter os dois). Correções:
+
+1. `_probe_duration` tenta o ffprobe e **cai para o próprio ffmpeg**, lendo a
+   linha `Duration: HH:MM:SS.ss` (`_RE_DURATION`, que já existia no código e
+   nunca era usada);
+2. `build_app.spec` passou a empacotar `ffprobe.exe`;
+3. sem duração medida, as etapas ancoradas no fim são **puladas com aviso no
+   log** — nunca emitidas com `st=0`/`atrim` curto.
+
+### Regras do trecho de música de fundo
+
+- **`amix=inputs=2:duration=first` com o episódio como primeiro input.** A saída
+  passa a ter sempre o comprimento do episódio (+ intro musical), com a música
+  em loop infinito ou com uma faixa curta que acaba antes. O par
+  `shortest`/`longest` anterior só funcionava enquanto bg e episódio tivessem a
+  mesma duração medida.
+- **`-stream_loop -1` é opção de INPUT** — tem de vir imediatamente antes do
+  `-i` da música, depois dos inputs das vinhetas.
+- **`bg_music_delay` é intro musical**: a música começa em 0 e o **episódio** é
+  empurrado com `adelay`. A saída fica `episódio + delay`.
+- **`_bg_end(config, output_dur, bg_dur)` é a âncora do fade out.** Com o loop
+  ligado a música é infinita e o fim é o da saída; com o loop **desligado** ela
+  acaba na própria duração (`bg_dur`, medida por `_probe_duration`) e é aí que a
+  rampa precisa fechar. Ancorar sempre no fim do episódio — como era feito —
+  agendava o fade para um ponto onde já não havia música: **defeito visto em
+  produção** (log de 31/08/2025, faixa de poucos minutos num culto de 48 min,
+  `afade=t=out:st=2904` inaudível e a música cortando seca no meio). Quando a
+  faixa é mais curta que o episódio e o loop está desligado, o log explica o que
+  vai acontecer e sugere marcar "Repetir em loop".
+- **`_fit_bg_fades(fade_in, fade_out, bg_end)`** é a única fonte da verdade dos
+  fades da música, usada tanto pelo filter graph quanto pelo log. O orçamento é
+  o trecho que a música **de fato ocupa** (`bg_end`), não a saída inteira.
+  Quando a soma pedida não cabe, reduz os dois pelo **mesmo fator** (mantém a
+  proporção escolhida e faz as rampas se encostarem). Corrige três defeitos:
+  fade out maior que o áudio era **descartado inteiro** (a música parava seca)
+  enquanto o fade in era encurtado; o fade in tinha um teto arbitrário e
+  silencioso de 40 % da saída; e `fade_in + fade_out > output_dur` fazia as
+  rampas se sobreporem, com a música nunca alcançando o volume configurado.
+  `st=0` no fade out é válido (cobre a faixa toda) e não deve ser filtrado.
+
+### Sobreposição das vinhetas (acrossfade)
+
+`acrossfade=d=X` consome X segundos do fim de um stream e do início do outro.
+Com X maior que a vinheta o ffmpeg **não** reclama: engole a vinheta inteira e
+ainda come o começo do sermão (vinheta de 4 s com sobreposição de 10 s devorava
+6 s de pregação). O painel permite até 10 s, então `_clamp_overlaps()` limita
+cada sobreposição à peça mais curta do cruzamento e avisa no log.
+
+`process()` também descarta assets que sumiram do disco (`_drop_missing_assets`)
+antes de decidir o fast path — um input inexistente abortaria a edição inteira.
 
 **Cuidado com a flag `-f mp3`:** o ffmpeg grava em `arquivo.mp3.tmp` (sufixo
 necessário para `os.replace` atômico) mas a extensão `.tmp` impede o ffmpeg
@@ -277,7 +375,7 @@ Esta seção é a **norma para qualquer mudança ou adição** ao projeto. Segui
 
 ## 6. Antes de fazer push
 
-1. `python -m pytest tests/` — DEVE passar 100% (atualmente 701/701).
+1. `python -m pytest tests/` — DEVE passar 100% (atualmente 1010/1010).
 2. Atualizar `CLAUDE.md` se a arquitetura, convenções ou estrutura mudaram.
 3. Atualizar `README.md` se o comportamento visível ao usuário/dev mudou.
 4. Mensagem de commit em formato convencional: `feat:`, `fix:`, `refactor:`, `docs:`, `test:`, `chore:`.
@@ -314,9 +412,16 @@ Módulo "raiz" do projeto: hospeda constantes, configuração OAuth, utilidades 
 - **`check_cancel(cancel_event)`:** levanta `OperacaoCancelada` se evento sinalizado; passa silenciosamente se `None`.
 
 ### `ytdlp_source.py`
+- **`extract_video_id(url) -> str | None`:** pura, sem I/O. Aceita `watch?v=`, `youtu.be/`, `/live/`, `/shorts/`, `/embed/`, `/v/`, hosts `m.`/`music.`/`youtube-nocookie`, URL sem esquema e o ID cru de 11 caracteres; ignora query extra (`&t=`, `&list=`, `?si=`). Retorna `None` para qualquer outra coisa — é o validador que `app._start_by_link()` usa **antes** de abrir thread ou subprocess.
+- **`YtDlpVideoSource.fetch_video(url)`:** resolve UM vídeo pelo link (modo link da tela Processar). Mesmo `--print` de `list_videos` (formato reaproveitado), mas com `--no-playlist` (links de live vêm com `&list=`) e sem filtro de data. Usa só a primeira linha com `|||`, mas continua drenando o stdout para não travar o subprocess com o pipe cheio. Levanta `VideoNaoEncontrado` se o link for inválido (sem chamar yt-dlp), se não houver saída ou se o returncode for != 0.
+- **`_normalize_upload_date(value)`:** o yt-dlp imprime `NA` quando não há data de publicação; vira string vazia para o chamador aplicar seu fallback.
 - **`YtDlpVideoSource.list_videos`:** `--simulate --print "%(id)s|||%(title)s|||%(upload_date)s"` + `--dateafter (data-1d)` + `--break-on-reject` (o canal tem ~1300 vídeos — sem isso varre tudo). Filtra `upload_date ∈ {data_alvo, data_alvo+1}` (lives publicadas com data posterior ao culto). `--socket-timeout 30`. Levanta `VideoNaoEncontrado` se nenhum vídeo bate.
-- **`YtDlpAudioDownloader.download`:** fluxo MP4-first — para cada segmento: (1) cria subpasta `output_dir/{título sanitizado}/`, (2) baixa MP4 via yt-dlp com `-f bestvideo[ext=mp4]+bestaudio[ext=m4a]/... --merge-output-format mp4`, (3) salva `capa.jpg` via CDN do YouTube e `descricao.txt` via `metadata_fetcher` (best-effort), (4) converte MP4 → MP3 via `subprocess.run` com ffmpeg (`-vn -acodec libmp3lame -q:a 0 -f mp3`), (5) se `save_video=False` (default), remove o MP4. Retorna `AudioFile` com `subfolder` preenchido. Caminho do MP4 resolvido: linha `[Merger] Merging formats into "..."` > `[download] Destination: *.mp4` > glob `*.mp4` na subpasta.
-- **`sanitize_folder_name(title) -> str`:** remove caracteres proibidos no Windows (`\\/:*?"<>|`), colapsa espaços, remove `.` e espaços no final, trunca a 150 chars. Exportada publicamente (usada pelo `_worker_phase2` do `app.py` para derivar o path da subpasta).
+- **`YtDlpAudioDownloader.download`:** fluxo MP4-first — para cada segmento: (1) cria subpasta `output_dir/{nome de build_output_names}/`, (2) baixa MP4 via yt-dlp com `-f bestvideo[ext=mp4]+bestaudio[ext=m4a]/... --merge-output-format mp4`, (3) salva `capa.jpg` via CDN do YouTube e `descricao.txt` via `metadata_fetcher` (best-effort), (4) converte MP4 → MP3 via `subprocess.run` com ffmpeg (`-vn -acodec libmp3lame -q:a 0 -f mp3`), (5) se `save_video=False` (default), remove o MP4. Retorna `AudioFile` com `subfolder` preenchido. Caminho do MP4 resolvido: linha `[Merger] Merging formats into "..."` > `[download] Destination: *.mp4` > glob `*.mp4` na subpasta.
+- **`sanitize_folder_name(title) -> str`:** remove caracteres proibidos no Windows (`\\/:*?"<>|`), colapsa espaços, remove `.` e espaços no final, trunca a 150 chars.
+- **`build_output_names(output_dir, title) -> (pasta, arquivo)`:** aplica o **orçamento de `MAX_PATH`** (260 chars sem `LongPathsEnabled`) e devolve o mesmo nome para a subpasta e para os arquivos dentro dela — o nome entra **duas vezes** no caminho (`output_dir\<nome>\<nome><sufixo>`), então o limite por nome é `(260 − len(output_dir) − 2 − 20) // 2`, com piso de 24 chars. Os 20 chars de folga cobrem os sufixos que o pipeline acrescenta (`.description`, `.mp4.part`, `.f251.webm`, `.mp3.tmp`, `.zip`).
+  **Por que existe:** o template de saída era `%(title)s`, que ignora esse orçamento e reintroduz caracteres de largura total (`｜`, `：`) no lugar de `|` e `:`. Um culto com título de 99 chars num `downloads/` a 70 chars da raiz gerava um caminho de 273 chars e o yt-dlp abortava com `ERROR: Cannot write video description file ...` + código 1 — sem nenhuma pista de que a causa era o tamanho do caminho (log de 14/09/2025). Títulos que já cabiam continuam com o nome intacto.
+  `%` do título é escapado como `%%` no template — um `%` solto quebraria o parsing do `-o`.
+  **`app._worker_phase2` usa esta função** (não `sanitize_folder_name`) para derivar a subpasta do Spotify: com o nome encurtado, o sanitize sozinho aponta para uma pasta que não existe.
 - **`_save_extras(video_id, subfolder, *, on_log)`:** salva `capa.jpg` via CDN YouTube (5 qualidades: maxresdefault → default; descarta placeholders < 500 bytes via `urllib.request` com SSL sem verify) e `descricao.txt` via `metadata_fetcher` injetado. Tudo best-effort — falhas silenciadas.
 - **`_convert_to_mp3(mp4_path, mp3_path, *, ffdir, on_log)`:** `subprocess.run` com `CREATE_NO_WINDOW` no Windows. Lança `RuntimeError` se ffmpeg retornar código != 0 (inclui stderr nas últimas 500 chars).
 - **Encoding do subprocess yt-dlp standalone:** `PYTHONUTF8=1` é IGNORADO pelo standalone (PyInstaller próprio). Por isso usamos `--encoding utf-8` direto nos comandos yt-dlp.
@@ -338,8 +443,8 @@ Módulo "raiz" do projeto: hospeda constantes, configuração OAuth, utilidades 
   - Label de stats na GUI atualizado a cada 1 MB (taxa instantânea do último chunk).
   - Log de texto apenas nos marcos 25 %, 50 %, 75 % (taxa média acumulada) + linha final.
   - Guard contra divisão por zero quando `_size == 0`.
-- **`_mime_for_path(file_path) -> str`:** detecta MIME type pela extensão (`.mp3` → `audio/mpeg`, `.mp4` → `video/mp4`, `.jpg`/`.jpeg` → `image/jpeg`, `.txt` → `text/plain`, `.png` → `image/png`, outros → `application/octet-stream`). Substitui o hardcoded `"audio/mpeg"` anterior — necessário para fazer upload de MP4, capa.jpg e descricao.txt.
-- **`upload()`:** orquestra duplicate-check → upload streaming → remove arquivo local se `delete_after_upload=True` → remove subpastas vazias (itera `AudioFile.subfolder`, chama `os.rmdir` se vazio). Retorna `ProcessingResult(uploaded_files, skipped_files)`. **Progresso normalizado:** o callback `on_progress` recebido externamente (0–100) é envolto por `_norm_progress` que distribui o intervalo equitativamente entre todos os arquivos do lote — evita o ciclo 0→100 por arquivo quando a subpasta contém MP3 + capa.jpg + descricao.txt (+ MP4 opcional).
+- **`_mime_for_path(file_path) -> str`:** detecta MIME type pela extensão (`.mp3` → `audio/mpeg`, `.mp4` → `video/mp4`, `.jpg`/`.jpeg` → `image/jpeg`, `.txt` → `text/plain`, `.png` → `image/png`, `.zip` → `application/zip`, outros → `application/octet-stream`). Substitui o hardcoded `"audio/mpeg"` anterior — necessário para fazer upload de MP4, capa.jpg e descricao.txt.
+- **`upload()`:** orquestra duplicate-check → upload streaming → remove arquivo local se `delete_after_upload=True` → limpa as subpastas. **A limpeza apaga também os arquivos que ficaram na subpasta**, não só os enviados: com o upload em pacote, o que sobe é o `.zip` e o MP3/capa/descrição que o geraram continuariam no disco para sempre (`delete_after_upload=True` significa "não manter nada local"). Depois de esvaziar, `os.rmdir` remove a subpasta. Retorna `ProcessingResult(uploaded_files, skipped_files)`. **Progresso normalizado:** o callback `on_progress` recebido externamente (0–100) é envolto por `_norm_progress` que distribui o intervalo equitativamente entre todos os arquivos do lote — evita o ciclo 0→100 por arquivo quando a subpasta contém MP3 + capa.jpg + descricao.txt (+ MP4 opcional).
 - **`delete_after_upload`** é controlado pelo `composition_root` (reflete `sys.frozen`). Em modo script, arquivos ficam em `downloads/` e linha `[DEBUG] Arquivo mantido em: ...` é logada.
 
 ## `infrastructure/persistence/json_repositories.py`
@@ -361,30 +466,39 @@ Módulo "raiz" do projeto: hospeda constantes, configuração OAuth, utilidades 
 ## `application/use_cases.py`
 
 - **`ListVideosUseCase(source: IVideoSource)`:** wrapper fino sobre `IVideoSource.list_videos()`. Existe para isolar callers da implementação concreta.
+- **`FetchVideoUseCase(source: IVideoFetcher)`:** wrapper fino sobre `IVideoFetcher.fetch_video()`. Alternativa ao `ListVideosUseCase` quando o usuário já sabe qual vídeo quer (modo link).
 - **`DownloadSegmentsUseCase(downloader: IAudioDownloader)`:** wrapper fino sobre `IAudioDownloader.download()`.
 - **`UploadAudioUseCase(storage: ICloudStorage, history: IHistoryRepository)`:** orquestra `storage.upload()` + `history.record()`. Grava histórico apenas quando `result.uploaded_files` é não vazio. Aceita `**extra_storage_kwargs` para repassar callbacks específicos do storage (ex.: `on_upload_stats`).
 
 ## `presentation/processing_presenter.py`
 
-- **`ProcessingPresenter`** (dataclass) compõe os três use cases em duas operações de alto nível:
+- **`ProcessingPresenter`** (dataclass) compõe os use cases em operações de alto nível:
   - `list_videos(date_str, *, cancel_event, on_log, on_status) -> List[dict]` — fase 1.
+  - `fetch_video(url, *, cancel_event, on_log, on_status) -> dict` — fase 1 alternativa (modo link). Retorna o **mesmo formato** dos itens de `list_videos` (`id`, `title`, `upload_date`), para que a View trate os dois modos com o mesmo código a partir daí. `VideoNaoEncontrado` → `RuntimeError` (igual a `list_videos`).
   - `process_segments(date_str, segments_data, *, cancel_event, on_log, on_status, on_download_progress, on_upload_progress, on_upload_stats) -> List[str]` — fase 2 (download → edit → `_build_upload_list` → upload).
 - Campo `upload_enabled: bool = True` — quando `False`, o passo de upload (`UploadAudioUseCase`) é pulado e o áudio fica apenas local. Configurado pelo composition root a partir de `upload_to_drive` no `config.json`.
-- **`_build_upload_list(audio_files) -> List[AudioFile]`:** para cada AudioFile com `subfolder` preenchido e existente, coleta todos os arquivos da subpasta (MP3, MP4, capa.jpg, descricao.txt) em ordem alfabética. AudioFiles sem subfolder passam direto (retrocompat). Subpastas duplicadas são ignoradas.
+- Campo `fetch_video_uc: Optional[FetchVideoUseCase] = None` — tem default apenas para não obrigar quem usa só o fluxo por data a montá-lo; o composition root sempre injeta. `fetch_video()` levanta `RuntimeError` se estiver ausente.
+- **`_build_upload_list(audio_files, *, on_log) -> List[AudioFile]`:** para cada AudioFile com `subfolder` preenchido e existente, compacta os artefatos do episódio em **um único `<nome do áudio>.zip`** (via `IArchiver`) — é o pacote que sobe para o Drive, não os arquivos soltos. Regras:
+  - o nome do zip vem do **arquivo de áudio** (`af.path`), já sanitizado pelo yt-dlp, não do título do segmento;
+  - **vídeos** (`.mp4`/`.mkv`/`.webm`) ficam **fora** do pacote e sobem ao lado — zipar formato já comprimido de centenas de MB não reduz nada;
+  - `.zip` e `.tmp` de execuções anteriores são **ignorados por completo** (não entram no pacote nem sobem soltos; um zip antigo duplicaria o episódio no Drive);
+  - sem `archiver` injetado, cai no comportamento antigo (arquivos individuais);
+  - AudioFiles sem subfolder passam direto (retrocompat) e subpastas duplicadas são ignoradas.
+- **`build_upload_package(audio, *, on_log) -> List[AudioFile]`:** versão pública para UM áudio, usada pelo re-envio manual da tela Início — sem ela o Drive ficaria com uma mistura de pacotes e MP3 soltos para o mesmo episódio.
 - Conversão `Video → dict` (saída) e `dict → Segment` (entrada) acontece no presenter, isolando a View dos tipos de domínio.
 - `VideoNaoEncontrado` é convertido para `RuntimeError` (mantém contrato histórico de `baixar_audio.list_videos()`).
 - Não conhece Qt/Tk — recebe os use cases via DI e expõe callbacks que a View aciona.
 
 ## `composition_root.py`
 
-- **`build_processing_presenter()`:** constrói um `ProcessingPresenter` fresco com toda a infraestrutura wired. Reconstruir a cada chamada permite refletir mudanças em `drive_folder_id`/`channel_url` que o usuário tenha feito desde a última invocação. Lê config via `baixar_audio.load_config()` (público).
+- **`build_processing_presenter()`:** constrói um `ProcessingPresenter` fresco com toda a infraestrutura wired. `list_videos_uc`, `chapters_uc` e `fetch_video_uc` compartilham a MESMA instância de `YtDlpVideoSource` (é stateless). Reconstruir a cada chamada permite refletir mudanças em `drive_folder_id`/`channel_url` que o usuário tenha feito desde a última invocação. Lê config via `baixar_audio.load_config()` (público).
 - **`build_notifier()`:** retorna um `PlyerNotifier`.
 - Único módulo do projeto que conhece todas as camadas. Eliminou a duplicação de wiring que existia entre `app._build_presenter()` e `baixar_audio.run()`.
 
 ## `app.py`
 
 - **Framework:** PyQt6. **Janela:** `QMainWindow` com sidebar à esquerda + `QStackedWidget` à direita (4 páginas: Início / Processar / Histórico / Configurações).
-- **`APP_VERSION`:** constante de módulo (`"v3.4.0"`) usada na sidebar e no rodapé da aba Configurações. Bumpar aqui ao fechar cada versão.
+- **`APP_VERSION`:** constante de módulo (`"v3.5.0"`) usada na sidebar e no rodapé da aba Configurações. Bumpar aqui ao fechar cada versão — e **também o `#define AppVersion` do `installer.iss`**, que ficou parado no 3.0.0 por quatro versões.
 - **`_build_palette(dark: bool) -> QPalette`:** constrói a QPalette correta para modo escuro/claro. Chamada no startup (`_q.setPalette(...)`) e em `_toggle_theme`. Necessária porque o QSS global **não** define mais `background-color` na regra `QWidget` — o Fusion style usa a QPalette para pintar controles (`QComboBox`, `QDoubleSpinBox`, `QTabBar`, etc.) que não têm regra QSS explícita.
 - **Página Início (`_build_home_page`):** lista arquivos MP3 em `DOWNLOAD_DIR` como cards (220×262 px). Topbar com `QComboBox` de ordenação ("Mais recentes" / "A–Z"). Estado vazio com ícone grande + instrução de ação. Subtítulo mostra contagem e tamanho total. Badge "✓ Enviado ao Drive" (verde) ou "● Local" (cinza) detectado pelo título do arquivo vs. `historico.json`. Botão "↑" (SP_ArrowUp) dispara re-upload individual em thread daemon; botão lixeira (SP_TrashIcon) exclui local com confirmação em português.
 - **`_reupload_file(fpath, btn)`:** constrói `AudioFile(video_id="")` com `mtime` como `date_str`, chama `upload_uc.execute()` em thread, atualiza badge via `QTimer.singleShot(0, _refresh_home)`.
@@ -413,7 +527,11 @@ Módulo "raiz" do projeto: hospeda constantes, configuração OAuth, utilidades 
 - **Dispatcher cross-thread (`_AudioPreviewDispatcher(QObject)`):** ponte thread→GUI para o worker do preview de teste. Razão: `QTimer.singleShot(0, callable)` chamado de uma `threading.Thread` Python NÃO dispara — não há event loop nessa thread. Solução: sinais `pyqtSignal` num `QObject` criado na thread principal; Qt entrega via `QueuedConnection` automático. Sinais: `log_received(str)`, `progress_changed(float)`, `completed(str)`, `cancelled()`, `failed(str)`.
 - **`_build_presenter()`:** delega ao `composition_root.build_processing_presenter()`. Reconstrói a cada operação para refletir mudanças nas configurações.
 - **`_worker()` (Fase 1) e `_worker_phase2()` (Fase 2):** delegam ao presenter; convertem `OperacaoCancelada` em `("cancelled", None)`, exceções genéricas em `("error", str(e))`.
-- **`_worker_preflight`:** chama `baixar_audio.check_internet()`, `check_disk_space()`, `cleanup_downloads()`, `load_history()` diretamente (utilidades, não use cases).
+- **`_worker_preflight(date_str, video_url=None)`:** chama `baixar_audio.check_internet()`, `check_disk_space()`, `load_history()` diretamente (utilidades, não use cases). Com `video_url` preenchido (modo link) pula a checagem de histórico — não há data ainda — e dispara `_worker_link`.
+- **Card de origem (data ⇄ link):** `mode_date_radio` / `mode_link_radio` num `QButtonGroup`, com as duas entradas num `QStackedWidget` (`_input_stack`: índice 0 = data + calendário, 1 = `link_entry`). `_on_input_mode_changed()` troca a página e o subtítulo da tela (`_SUB_BY_DATE` / `_SUB_BY_LINK`). Os botões Processar/Cancelar ficam FORA do stack — são compartilhados pelos dois modos.
+- **`_start()`** apenas despacha para `_start_by_date()` ou `_start_by_link()`; a preparação comum (checagem de auth + reset da UI + `_running=True`) vive em **`_prepare_run() -> bool`**, que retorna `False` sem tocar na UI quando o Drive não está autorizado.
+- **`_start_by_link()`:** valida com `extract_video_id` antes de qualquer thread; erro de link mostra exemplos dos formatos aceitos.
+- **`_worker_link(url)`:** delega a `Presenter.fetch_video`, deriva `date_str` de `_upload_date_to_br(video["upload_date"])` e enfileira `("check_chapters", (date_str, [video]))` — reaproveitando todo o fluxo a partir da detecção de capítulos. Mesmas conversões de exceção dos outros workers.
 - **`_on_done()`:** salva histórico (`baixar_audio.save_history`) + notificação via `self._notifier.notify(...)` (instância de `PlyerNotifier`). Se `_spotify_pending` for não-None, agenda `_show_spotify_predialog` via `QTimer.singleShot(800, ...)` e zera o campo.
 - **Spotify publishing:** `_worker_phase2` popula `_spotify_pending` (dict com `show_id`, `video_id`, `title`, `description`, `date_str`, `tags`, `cover_image_path`) quando `show_id` está configurado. A descrição e `cover_image_path` são derivados dos arquivos `descricao.txt` e `capa.jpg` da subpasta do segmento (via `sanitize_folder_name`). `_show_spotify_predialog` localiza o MP3 mais recente em `DOWNLOAD_DIR` — busca em `*.mp3` e `*/*.mp3` (subpastas do novo fluxo) e abre `_SpotifyPrePublishDialog`. `_SpotifyPrePublishDialog`: modal com campos editáveis de título, descrição (pré-preenchida) e tags; ao confirmar, armazena a janela em `parent_app._spotify_window` para evitar GC e abre `_SpotifyPublishWindow`. `_SpotifyPublishWindow(QMainWindow)`: WebView apontando para `https://podcasters.spotify.com/pod/show/{show_id}/episodes/new`; após load injeta `_SPOTIFY_FILL_JS` com `window._spotifyTitle` e `window._spotifyDescription`. `_SpotifyPage` (inner class lazy): sobrescreve `chooseFiles()` detectando MIME `audio/*` vs `image/*` para retornar o arquivo correto automaticamente. **Nota:** `QApplication.setAttribute(AA_ShareOpenGLContexts)` deve ser chamado antes de `QApplication(sys.argv)` para que o `QWebEngineView` funcione no processo principal.
 - **Mensagens da fila:** `log`, `status`, `progress`, `download_progress`, `edit_progress`, `upload_stats`, `done`, `cancelled`, `error`, `preflight_error`, `history_warning`, `auth_done`, `auth_error`, `select_videos`, `open_player`.
@@ -452,24 +570,29 @@ Cultos ao vivo podem ser publicados no YouTube com a data do dia seguinte ao eve
 ```
 tests/
 ├── conftest.py                ← sys.path + fixture shared_app (sessão)
-├── test_domain.py             ← 91 testes puros do domínio
-├── test_ytdlp_source.py       ← 90 testes da infra YouTube (subprocess mockado)
-├── test_ffmpeg_editor.py      ← 43 testes do FfmpegAudioEditor (subprocess mockado)
-├── test_gdrive_storage.py     ← 51 testes do adaptador Drive (HTTP/Drive API mockados)
+├── test_domain.py             ← 105 testes puros do domínio
+├── test_ytdlp_source.py       ← 139 testes da infra YouTube (subprocess mockado)
+├── test_ffmpeg_editor.py      ← 101 testes do FfmpegAudioEditor (subprocess mockado)
+├── test_gdrive_storage.py     ← 53 testes do adaptador Drive (HTTP/Drive API mockados)
+├── test_zip_archiver.py       ← 17 testes do ZipArchiver (I/O real em tmp_path)
 ├── test_persistence.py        ← 33 testes dos repositórios JSON (I/O real em tmp_path)
 ├── test_plyer_notifier.py     ← 10 testes do PlyerNotifier (plyer mockado)
-├── test_use_cases.py          ← 50 testes dos use cases (ports mockados)
-├── test_presenter.py          ← 41 testes do ProcessingPresenter (use cases mockados)
+├── test_use_cases.py          ← 57 testes dos use cases (ports mockados)
+├── test_presenter.py          ← 58 testes do ProcessingPresenter (use cases mockados)
 ├── test_audio_test_presenter.py ← 17 testes do AudioTestPresenter
-├── test_composition_root.py   ← 25 testes do composition root (DI/wiring)
+├── test_composition_root.py   ← 27 testes do composition root (DI/wiring)
 ├── test_baixar_audio.py       ← 38 testes de utilidades + auth wrappers + update_ytdlp
-├── test_app.py                ← 247 testes de integração da GUI
+├── test_app.py                ← 273 testes de integração da GUI
 ├── test_github_updater.py     ← 19 testes do módulo de auto-update (HTTP mockado)
 ├── test_player_window.py      ← 34 testes do PlayerWindow
 └── test_player_window_qt.py   ← 29 testes do PlayerWindowQt
 ```
 
-**Total: 860 testes.**
+**Total: 1010 testes.**
+
+> O `_reset_app_state` (autouse) devolve a tela Processar ao modo "busca por
+> data" e limpa o `link_entry` antes de cada teste — sem isso, um teste que
+> muda o modo de entrada contaminaria os seguintes (o `App` é de escopo sessão).
 
 **Como rodar:**
 ```bash
@@ -592,12 +715,16 @@ python -m pytest tests/ -q
 
 Não prosseguir se houver falhas. Corrigir antes de continuar.
 
-## Passo 3 — Atualizar a constante de versão em `app.py`
+## Passo 3 — Atualizar a versão em `app.py` e no `installer.iss`
 
-Localizar e atualizar a linha:
+Localizar e atualizar as duas linhas:
 
 ```python
-APP_VERSION = "vX.Y.Z"   # → nova versão
+APP_VERSION = "vX.Y.Z"   # app.py — sidebar, rodapé e auto-update
+```
+
+```
+#define AppVersion   "X.Y.Z"   ; installer.iss — sem o "v"
 ```
 
 ## Passo 4 — Atualizar documentação
@@ -659,7 +786,7 @@ O asset `IPMadalena_Setup.exe` fica anexado ao release e é o arquivo que o auto
 | Etapa | Comando / Ação |
 |---|---|
 | ✅ Testes 100% | `python -m pytest tests/ -q` |
-| ✅ Bumpar versão | `APP_VERSION` em `app.py` |
+| ✅ Bumpar versão | `APP_VERSION` em `app.py` **e** `AppVersion` em `installer.iss` |
 | ✅ Atualizar docs | `CLAUDE.md`, `README.md` |
 | ✅ Commit + push | `git commit` → `git push` |
 | ✅ Tag + push | `git tag vX.Y.Z` → `git push origin vX.Y.Z` |
@@ -724,4 +851,5 @@ App baixa formato 18 e extrai áudio via ffmpeg → MP3. Resultado final equival
 - `pickle.dump` falhava em primeira execução com `credentials/` ausente → `_save_token()` cria diretório se não existir.
 - `YtDlpAudioDownloader.download()` retornava arquivos errados (glob promíscuo) → fluxo MP4-first com subpasta por segmento; caminho do MP4 capturado de `[Merger]` > `[download] Destination: *.mp4` > glob dentro da subpasta; preserva ordem dos segments e `video_id` do Segment original.
 - Barra de upload ciclava 0→100 % por arquivo quando subpasta continha MP3 + capa.jpg + descricao.txt → `_norm_progress` em `GoogleDriveStorage.upload()` distribui o intervalo 0–100 igualmente entre todos os arquivos do lote: `int((_i - 1 + pct / 100) / _n * 100)`.
+- `ERROR: Cannot write video description file ...` + `yt-dlp encerrou com código 1` em títulos longos → caminho passava dos 260 chars do Windows (`MAX_PATH`); o template `%(title)s` repetia o título dentro da subpasta já nomeada com ele. Resolvido com `build_output_names()` (orçamento de caminho). Alternativa de sistema, **não usada**: `LongPathsEnabled=1` no registro — depende de cada executável declarar `longPathAware` no manifesto, e o yt-dlp.exe empacotado não garante isso.
 - Texto de labels (hints, títulos de card) e `QCheckBox` apareciam com fundo mais escuro que o card → raiz: `QWidget { background-color: #1e1e1e; }` no QSS global forçava `autoFillBackground=True` em **todos** os widgets. Dentro de cards com fundo `#222222`, esses widgets pintavam `#1e1e1e` por cima. Solução: removido `background-color` da regra `QMainWindow, QWidget { … }` (mantido só `color` e `font`); adicionado `QMainWindow { background-color: … }` isoladamente; `QLabel { color: … }` sem regra de background. QPalette dark/light setada via `_build_palette(dark)` no startup e em `_toggle_theme` para que controles Fusion-style continuem com cores corretas. Corrigido também `_on_upload_toggle`: quando `checked=True`, usar `card.setGraphicsEffect(None)` em vez de opacity=1.0 — mesmo opacity=1.0 ativa rendering off-screen que causava artefatos de compositing em filhos com background transparente.
