@@ -1475,9 +1475,21 @@ class App(QMainWindow):
                 title = os.path.splitext(fname)[0]
                 mtime = datetime.fromtimestamp(os.path.getmtime(fpath))
                 date_str = mtime.strftime("%d/%m/%Y")
-                audio_file = AudioFile(path=fpath, title=title, video_id="")
+
+                # MP3 dentro de downloads/<pasta>/ → sobe como pacote (zip com
+                # capa e descrição), igual ao fluxo normal. MP3 solto na raiz
+                # de downloads/ não tem artefatos irmãos: sobe sozinho.
+                pasta = os.path.dirname(os.path.abspath(fpath))
+                subfolder = (
+                    None
+                    if pasta == os.path.abspath(baixar_audio.DOWNLOAD_DIR)
+                    else pasta
+                )
+                audio_file = AudioFile(
+                    path=fpath, title=title, video_id="", subfolder=subfolder,
+                )
                 presenter.upload_uc.execute(
-                    audio_files=[audio_file],
+                    audio_files=presenter.build_upload_package(audio_file),
                     date_str=date_str,
                     on_log=lambda m: None,
                     on_status=lambda s: None,

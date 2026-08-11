@@ -39,6 +39,7 @@ _MIME_MAP = {
     ".jpeg": "image/jpeg",
     ".txt":  "text/plain",
     ".png":  "image/png",
+    ".zip":  "application/zip",
 }
 
 
@@ -504,18 +505,32 @@ class GoogleDriveStorage:
             else:
                 log(f"[DEBUG] Arquivo mantido em: {audio_file.path}")
 
-        # Remove subpastas que ficaram vazias após apagar os arquivos
+        # Limpa as subpastas dos arquivos enviados.
+        # Com o upload em pacote, o que sobe é o .zip — o MP3, a capa e a
+        # descrição que o geraram continuam na subpasta e não seriam removidos
+        # pelo os.remove do laço acima. `delete_after_upload` significa "não
+        # manter nada local", então os restos vão embora junto.
         if self._delete_after_upload:
             seen: set = set()
             for audio_file in files:
                 sf = audio_file.subfolder
-                if sf and sf not in seen:
-                    seen.add(sf)
-                    try:
-                        if os.path.isdir(sf) and not os.listdir(sf):
-                            os.rmdir(sf)
-                    except Exception:
-                        pass
+                if not sf or sf in seen:
+                    continue
+                seen.add(sf)
+                try:
+                    if not os.path.isdir(sf):
+                        continue
+                    for fname in os.listdir(sf):
+                        fpath = os.path.join(sf, fname)
+                        if os.path.isfile(fpath):
+                            try:
+                                os.remove(fpath)
+                            except Exception:
+                                pass
+                    if not os.listdir(sf):
+                        os.rmdir(sf)
+                except Exception:
+                    pass
 
         status("Concluído!")
         log(f"✓ {total} arquivo(s) enviado(s) para o Drive.")

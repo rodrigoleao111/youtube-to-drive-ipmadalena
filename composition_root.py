@@ -28,6 +28,7 @@ from application.use_cases import (
     ListVideosUseCase,
     UploadAudioUseCase,
 )
+from infrastructure.archive.zip_archiver import ZipArchiver
 from infrastructure.audio.ffmpeg_editor import FfmpegAudioEditor
 from infrastructure.drive.gdrive_storage import GoogleDriveStorage
 from infrastructure.notification.plyer_notifier import PlyerNotifier
@@ -79,6 +80,8 @@ def build_processing_presenter() -> ProcessingPresenter:
         upload_uc      = UploadAudioUseCase(storage=storage, history=history),
         chapters_uc    = GetChaptersUseCase(source=video_source),
         fetch_video_uc = FetchVideoUseCase(source=video_source),
+        # Episódio sobe para o Drive como um pacote único (áudio+capa+descrição)
+        archiver       = ZipArchiver(),
         channel_url    = cfg["channel_url"],
         download_dir   = baixar_audio.DOWNLOAD_DIR,
         upload_enabled = bool(cfg.get("upload_to_drive", True)),

@@ -31,6 +31,7 @@ from domain.exceptions import (
     VideoNaoEncontrado,
 )
 from domain.ports import (
+    IArchiver,
     IAudioDownloader,
     IAudioEditor,
     ICloudStorage,
@@ -320,6 +321,19 @@ class TestPorts:
         class FakeNotifier:
             def notify(self, title, message, **kwargs): pass
         return FakeNotifier()
+
+    def _make_archiver(self):
+        class FakeArchiver:
+            def create(self, files, dest_path, **kwargs): return dest_path
+        return FakeArchiver()
+
+    def test_iarchiver_isinstance(self):
+        assert isinstance(self._make_archiver(), IArchiver)
+
+    def test_objeto_sem_metodos_nao_implementa_iarchiver(self):
+        class Vazio:
+            pass
+        assert not isinstance(Vazio(), IArchiver)
 
     def test_ivideo_source_isinstance(self):
         assert isinstance(self._make_video_source(), IVideoSource)

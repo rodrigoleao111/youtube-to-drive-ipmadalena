@@ -15,6 +15,7 @@ import pytest
 
 from domain.entities import AudioFile, ProcessingResult, Segment, Video
 from domain.exceptions import OperacaoCancelada, VideoNaoEncontrado
+from infrastructure.archive.zip_archiver import ZipArchiver
 from presentation.processing_presenter import ProcessingPresenter
 
 
@@ -30,9 +31,12 @@ def _make_audio(path="/tmp/culto.mp3", title="Culto", vid="abc123") -> AudioFile
     return AudioFile(path=path, title=title, video_id=vid)
 
 
+_SEM_ARCHIVER = object()   # sentinela: distingue "default" de "sem compactador"
+
+
 def _make_presenter(
     *, list_uc=None, download_uc=None, edit_uc=None, upload_uc=None,
-    chapters_uc=None,
+    chapters_uc=None, fetch_video_uc=None, archiver=_SEM_ARCHIVER,
     channel_url="https://youtube.com/@IPMadalena/streams",
     download_dir="/tmp/downloads",
 ) -> ProcessingPresenter:
@@ -40,6 +44,10 @@ def _make_presenter(
     if edit_uc is None:
         edit_uc = MagicMock()
         edit_uc.execute.side_effect = lambda audio_files, **kw: audio_files
+    # Compactador real (I/O local em tmp_path) — é o que o composition root
+    # injeta em produção. Passe archiver=None para exercitar o fallback.
+    if archiver is _SEM_ARCHIVER:
+        archiver = ZipArchiver()
     return ProcessingPresenter(
         list_videos_uc=list_uc or MagicMock(),
         download_uc=download_uc or MagicMock(),
@@ -48,6 +56,8 @@ def _make_presenter(
         chapters_uc=chapters_uc or MagicMock(),
         channel_url=channel_url,
         download_dir=download_dir,
+        fetch_video_uc=fetch_video_uc or MagicMock(),
+        archiver=archiver,
     )
 
 
@@ -108,6 +118,72 @@ class TestPresenterListVideos:
         list_uc.execute.side_effect = OperacaoCancelada("cancelado")
         with pytest.raises(OperacaoCancelada):
             _make_presenter(list_uc=list_uc).list_videos("19/04/2026")
+
+
+# ===========================================================================
+# fetch_video()
+# ===========================================================================
+
+class TestPresenterFetchVideo:
+
+    URL = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+
+    def test_delega_para_fetch_video_uc_com_a_url(self):
+        uc = MagicMock()
+        uc.execute.return_value = _make_video()
+        _make_presenter(fetch_video_uc=uc).fetch_video(self.URL)
+        args, _ = uc.execute.call_args
+        assert args[0] == self.URL
+
+    def test_retorna_dict_no_formato_de_list_videos(self):
+        uc = MagicMock()
+        uc.execute.return_value = _make_video("xyz789", "Culto ao vivo", "20260503")
+        result = _make_presenter(fetch_video_uc=uc).fetch_video(self.URL)
+        assert result == {
+            "id": "xyz789",
+            "title": "Culto ao vivo",
+            "upload_date": "20260503",
+        }
+
+    def test_repassa_cancel_event_e_callbacks(self):
+        uc = MagicMock()
+        uc.execute.return_value = _make_video()
+        ev = threading.Event()
+        log, status = MagicMock(), MagicMock()
+        _make_presenter(fetch_video_uc=uc).fetch_video(
+            self.URL, cancel_event=ev, on_log=log, on_status=status
+        )
+        _, kwargs = uc.execute.call_args
+        assert kwargs["cancel_event"] is ev
+        assert kwargs["on_log"] is log
+        assert kwargs["on_status"] is status
+
+    def test_converte_video_nao_encontrado_em_runtime_error(self):
+        uc = MagicMock()
+        uc.execute.side_effect = VideoNaoEncontrado("Link do YouTube inválido.")
+        with pytest.raises(RuntimeError, match="inválido"):
+            _make_presenter(fetch_video_uc=uc).fetch_video(self.URL)
+
+    def test_propaga_operacao_cancelada(self):
+        uc = MagicMock()
+        uc.execute.side_effect = OperacaoCancelada("cancelado")
+        with pytest.raises(OperacaoCancelada):
+            _make_presenter(fetch_video_uc=uc).fetch_video(self.URL)
+
+    def test_sem_use_case_levanta_runtime_error(self):
+        # Presenter montado sem o modo link (default None)
+        p = ProcessingPresenter(
+            list_videos_uc=MagicMock(),
+            download_uc=MagicMock(),
+            edit_uc=MagicMock(),
+            upload_uc=MagicMock(),
+            chapters_uc=MagicMock(),
+            channel_url="https://canal",
+            download_dir="/tmp",
+        )
+        assert p.fetch_video_uc is None
+        with pytest.raises(RuntimeError):
+            p.fetch_video(self.URL)
 
 
 # ===========================================================================
@@ -512,12 +588,21 @@ class TestBuildUploadList:
     """
     Testa ProcessingPresenter._build_upload_list():
       - AudioFile sem subfolder → passa diretamente (retrocompat.)
-      - AudioFile com subfolder → coleta todos os arquivos da pasta em ordem alfa.
-      - Subpasta duplicada → ignorada (evita duplicação de artefatos).
+      - AudioFile com subfolder → áudio + capa + descrição viram UM zip
+      - Vídeos ficam fora do pacote e sobem ao lado
+      - Subpasta duplicada → ignorada (evita duplicação de artefatos)
     """
 
-    def _presenter(self):
-        return _make_presenter()
+    def _presenter(self, **kw):
+        return _make_presenter(**kw)
+
+    def _sub_completa(self, tmp_path, nome="Culto"):
+        sub = tmp_path / nome
+        sub.mkdir()
+        (sub / f"{nome}.mp3").write_bytes(b"mp3")
+        (sub / "capa.jpg").write_bytes(b"jpg")
+        (sub / "descricao.txt").write_text("desc", encoding="utf-8")
+        return sub
 
     def test_audio_file_sem_subfolder_passa_direto(self):
         """AudioFile com subfolder=None vai direto para a upload list (retrocompat)."""
@@ -526,84 +611,189 @@ class TestBuildUploadList:
         result = p._build_upload_list([af])
         assert result == [af]
 
-    def test_subfolder_coleta_todos_os_arquivos(self, tmp_path):
-        """Arquivos dentro da subpasta são coletados em ordem alfabética."""
-        sub = tmp_path / "Culto"
+    def test_subfolder_gera_um_unico_zip(self, tmp_path):
+        sub = self._sub_completa(tmp_path)
+        af = AudioFile(path=str(sub / "Culto.mp3"), title="Culto",
+                       video_id="v1", subfolder=str(sub))
+
+        result = self._presenter()._build_upload_list([af])
+
+        assert len(result) == 1
+        assert os.path.basename(result[0].path) == "Culto.zip"
+        assert os.path.isfile(result[0].path)
+
+    def test_zip_leva_o_nome_do_arquivo_de_audio(self, tmp_path):
+        """O nome do pacote vem do áudio, não do título do segmento."""
+        sub = tmp_path / "pasta"
         sub.mkdir()
-        (sub / "Culto.mp3").write_bytes(b"mp3")
+        (sub / "Culto da Manha 19-04.mp3").write_bytes(b"mp3")
         (sub / "capa.jpg").write_bytes(b"jpg")
-        (sub / "descricao.txt").write_text("desc", encoding="utf-8")
+
+        af = AudioFile(path=str(sub / "Culto da Manha 19-04.mp3"),
+                       title="titulo diferente", video_id="v1",
+                       subfolder=str(sub))
+        result = self._presenter()._build_upload_list([af])
+
+        assert os.path.basename(result[0].path) == "Culto da Manha 19-04.zip"
+        assert result[0].title == "Culto da Manha 19-04"
+
+    def test_zip_contem_audio_capa_e_descricao(self, tmp_path):
+        import zipfile
+        sub = self._sub_completa(tmp_path)
+        af = AudioFile(path=str(sub / "Culto.mp3"), title="Culto",
+                       video_id="v1", subfolder=str(sub))
+
+        result = self._presenter()._build_upload_list([af])
+
+        with zipfile.ZipFile(result[0].path) as zf:
+            nomes = sorted(zf.namelist())
+        assert nomes == ["Culto.mp3", "capa.jpg", "descricao.txt"]
+
+    def test_zip_nao_tem_estrutura_de_pastas(self, tmp_path):
+        import zipfile
+        sub = self._sub_completa(tmp_path)
+        af = AudioFile(path=str(sub / "Culto.mp3"), title="Culto",
+                       video_id="v1", subfolder=str(sub))
+
+        result = self._presenter()._build_upload_list([af])
+        with zipfile.ZipFile(result[0].path) as zf:
+            assert all("/" not in n for n in zf.namelist())
+
+    def test_mp4_fica_fora_do_zip_e_sobe_ao_lado(self, tmp_path):
+        """
+        Zipar MP4 (já comprimido, centenas de MB) não reduz nada; com
+        save_video=True o vídeo sobe solto ao lado do pacote.
+        """
+        import zipfile
+        sub = self._sub_completa(tmp_path)
+        (sub / "Culto.mp4").write_bytes(b"mp4")
 
         af = AudioFile(path=str(sub / "Culto.mp3"), title="Culto",
                        video_id="v1", subfolder=str(sub))
-        p  = self._presenter()
-        result = p._build_upload_list([af])
+        result = self._presenter()._build_upload_list([af])
 
-        fnames = [os.path.basename(r.path) for r in result]
-        assert sorted(fnames) == fnames                # ordem alfabética
-        assert "Culto.mp3"     in fnames
-        assert "capa.jpg"      in fnames
-        assert "descricao.txt" in fnames
+        exts = sorted(os.path.splitext(r.path)[1] for r in result)
+        assert exts == [".mp4", ".zip"]
+        with zipfile.ZipFile(next(r.path for r in result
+                                  if r.path.endswith(".zip"))) as zf:
+            assert not any(n.endswith(".mp4") for n in zf.namelist())
+
+    def test_zip_anterior_nao_entra_no_pacote_nem_sobe_solto(self, tmp_path):
+        """
+        Reprocessar a mesma pasta não deve aninhar o zip antigo nem enviá-lo
+        como arquivo separado (duplicaria o episódio no Drive).
+        """
+        import zipfile
+        sub = self._sub_completa(tmp_path)
+        (sub / "antigo.zip").write_bytes(b"PK\x03\x04")
+
+        af = AudioFile(path=str(sub / "Culto.mp3"), title="Culto",
+                       video_id="v1", subfolder=str(sub))
+        result = self._presenter()._build_upload_list([af])
+
+        enviados = [os.path.basename(r.path) for r in result]
+        assert enviados == ["Culto.zip"]
+        with zipfile.ZipFile(result[0].path) as zf:
+            assert not any(n.endswith(".zip") for n in zf.namelist())
+
+    def test_temporarios_nao_entram_no_pacote(self, tmp_path):
+        """`.tmp` de uma edição interrompida não deve ir para o Drive."""
+        import zipfile
+        sub = self._sub_completa(tmp_path)
+        (sub / "Culto.mp3.tmp").write_bytes(b"parcial")
+
+        af = AudioFile(path=str(sub / "Culto.mp3"), title="Culto",
+                       video_id="v1", subfolder=str(sub))
+        result = self._presenter()._build_upload_list([af])
+
+        assert [os.path.basename(r.path) for r in result] == ["Culto.zip"]
+        with zipfile.ZipFile(result[0].path) as zf:
+            assert not any(n.endswith(".tmp") for n in zf.namelist())
+
+    def test_build_upload_package_e_publico_e_empacota(self, tmp_path):
+        """API usada pelo re-envio da tela Início."""
+        sub = self._sub_completa(tmp_path)
+        af = AudioFile(path=str(sub / "Culto.mp3"), title="Culto",
+                       video_id="", subfolder=str(sub))
+        result = self._presenter().build_upload_package(af)
+        assert [os.path.basename(r.path) for r in result] == ["Culto.zip"]
+
+    def test_build_upload_package_sem_subpasta_sobe_o_arquivo(self, tmp_path):
+        mp3 = tmp_path / "solto.mp3"
+        mp3.write_bytes(b"mp3")
+        af = AudioFile(path=str(mp3), title="solto", video_id="")
+        result = self._presenter().build_upload_package(af)
+        assert result == [af]
 
     def test_subfolder_duplicada_ignorada(self, tmp_path):
         """Dois AudioFiles apontando para a mesma subpasta só processam uma vez."""
-        sub = tmp_path / "Culto"
-        sub.mkdir()
-        (sub / "Culto.mp3").write_bytes(b"mp3")
-
+        sub = self._sub_completa(tmp_path)
         af1 = AudioFile(path=str(sub / "Culto.mp3"), title="Culto",
                         video_id="v1", subfolder=str(sub))
         af2 = AudioFile(path=str(sub / "Culto.mp3"), title="Culto",
                         video_id="v1", subfolder=str(sub))
 
-        p      = self._presenter()
-        result = p._build_upload_list([af1, af2])
-        # Arquivo da subpasta aparece apenas uma vez
+        result = self._presenter()._build_upload_list([af1, af2])
         assert len(result) == 1
 
     def test_subfolder_inexistente_cai_em_retrocompat(self):
         """Se subfolder está definido mas não existe, trata como sem subfolder."""
         af = AudioFile(path="/tmp/culto.mp3", title="Culto",
                        video_id="v1", subfolder="/caminho/inexistente")
-        p  = self._presenter()
-        result = p._build_upload_list([af])
+        result = self._presenter()._build_upload_list([af])
         assert result == [af]
 
     def test_lista_vazia_retorna_lista_vazia(self):
-        p = self._presenter()
-        assert p._build_upload_list([]) == []
+        assert self._presenter()._build_upload_list([]) == []
 
-    def test_video_id_preservado_nos_artefatos(self, tmp_path):
-        """Artefatos coletados da subpasta preservam o video_id do AudioFile pai."""
-        sub = tmp_path / "Culto"
-        sub.mkdir()
-        (sub / "Culto.mp3").write_bytes(b"mp3")
-
+    def test_video_id_preservado_no_pacote(self, tmp_path):
+        sub = self._sub_completa(tmp_path)
         af = AudioFile(path=str(sub / "Culto.mp3"), title="Culto",
                        video_id="vid123", subfolder=str(sub))
-        p  = self._presenter()
-        result = p._build_upload_list([af])
+        result = self._presenter()._build_upload_list([af])
         assert all(r.video_id == "vid123" for r in result)
 
-    def test_mp4_incluido_na_lista_quando_save_video_true(self, tmp_path):
-        """
-        Mudança de sessão: quando save_video=True o MP4 fica na subpasta;
-        _build_upload_list deve incluí-lo junto com MP3, capa.jpg e descricao.txt.
-        """
-        sub = tmp_path / "Culto"
-        sub.mkdir()
-        (sub / "Culto.mp3").write_bytes(b"mp3")
-        (sub / "Culto.mp4").write_bytes(b"mp4")   # mantido com save_video=True
-        (sub / "capa.jpg").write_bytes(b"jpg")
-        (sub / "descricao.txt").write_text("desc", encoding="utf-8")
-
+    def test_subfolder_preservado_no_pacote(self, tmp_path):
+        """A subpasta segue no AudioFile — o storage a usa para a limpeza local."""
+        sub = self._sub_completa(tmp_path)
         af = AudioFile(path=str(sub / "Culto.mp3"), title="Culto",
                        video_id="v1", subfolder=str(sub))
-        p      = self._presenter()
-        result = p._build_upload_list([af])
+        result = self._presenter()._build_upload_list([af])
+        assert result[0].subfolder == str(sub)
 
-        exts = [os.path.splitext(r.path)[1] for r in result]
-        assert ".mp4" in exts, "MP4 deve ser incluído quando salvo na subpasta"
-        assert ".mp3" in exts
-        assert ".jpg" in exts
-        assert ".txt" in exts
+    def test_log_informa_o_pacote_criado(self, tmp_path):
+        sub = self._sub_completa(tmp_path)
+        af = AudioFile(path=str(sub / "Culto.mp3"), title="Culto",
+                       video_id="v1", subfolder=str(sub))
+        logs = []
+        self._presenter()._build_upload_list([af], on_log=logs.append)
+        assert any("Culto.zip" in m for m in logs)
+
+    # -- fallback sem compactador -------------------------------------------
+
+    def test_sem_archiver_envia_arquivos_soltos(self, tmp_path):
+        sub = self._sub_completa(tmp_path)
+        af = AudioFile(path=str(sub / "Culto.mp3"), title="Culto",
+                       video_id="v1", subfolder=str(sub))
+
+        result = self._presenter(archiver=None)._build_upload_list([af])
+
+        fnames = sorted(os.path.basename(r.path) for r in result)
+        assert fnames == ["Culto.mp3", "capa.jpg", "descricao.txt"]
+        assert not any(r.path.endswith(".zip") for r in result)
+
+    def test_process_segments_empacota_antes_do_upload(self, tmp_path):
+        """O upload recebe o zip, não os arquivos soltos."""
+        sub = self._sub_completa(tmp_path)
+        audio = AudioFile(path=str(sub / "Culto.mp3"), title="Culto",
+                          video_id="v1", subfolder=str(sub))
+
+        download_uc = MagicMock()
+        download_uc.execute.return_value = [audio]
+        upload_uc = MagicMock()
+
+        p = _make_presenter(download_uc=download_uc, upload_uc=upload_uc)
+        p.process_segments("19/04/2026", [{"id": "v1", "title": "Culto"}])
+
+        enviados = upload_uc.execute.call_args.args[1]
+        assert [os.path.basename(a.path) for a in enviados] == ["Culto.zip"]

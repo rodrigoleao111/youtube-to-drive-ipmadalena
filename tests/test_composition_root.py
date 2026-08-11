@@ -20,6 +20,7 @@ import baixar_audio
 from application.use_cases import (
     DownloadSegmentsUseCase,
     EditAudioUseCase,
+    FetchVideoUseCase,
     GetChaptersUseCase,
     ListVideosUseCase,
     UploadAudioUseCase,
@@ -68,6 +69,24 @@ class TestBuildProcessingPresenter:
         assert isinstance(p.edit_uc,        EditAudioUseCase)
         assert isinstance(p.upload_uc,      UploadAudioUseCase)
         assert isinstance(p.chapters_uc,    GetChaptersUseCase)
+        assert isinstance(p.fetch_video_uc, FetchVideoUseCase)
+
+    def test_archiver_e_um_zip_archiver(self):
+        """Sem archiver o episódio subiria em arquivos soltos."""
+        from infrastructure.archive.zip_archiver import ZipArchiver
+        with patch("baixar_audio.load_config", return_value={
+            "channel_url": "x", "drive_folder_id": "y",
+        }):
+            p = build_processing_presenter()
+        assert isinstance(p.archiver, ZipArchiver)
+
+    def test_fetch_video_uc_usa_o_mesmo_yt_dlp_video_source(self):
+        with patch("baixar_audio.load_config", return_value={
+            "channel_url": "x", "drive_folder_id": "y",
+        }):
+            p = build_processing_presenter()
+        assert isinstance(p.fetch_video_uc.source, YtDlpVideoSource)
+        assert p.fetch_video_uc.source is p.list_videos_uc.source
 
     def test_chapters_uc_usa_yt_dlp_video_source(self):
         with patch("baixar_audio.load_config", return_value={

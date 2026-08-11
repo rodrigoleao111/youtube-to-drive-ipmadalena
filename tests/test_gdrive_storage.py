@@ -741,17 +741,29 @@ class TestSubfolderCleanupAfterUpload:
     realmente somem.
     """
 
-    def _run_upload(self, tmp_path, *, delete_after_upload: bool):
+    def _run_upload(self, tmp_path, *, delete_after_upload: bool,
+                    restos: bool = False):
         """
         Configura e executa upload() com um AudioFile em subpasta real.
         Retorna a subpasta para o teste verificar se foi removida.
+
+        ``restos=True`` simula o fluxo de upload em pacote: o que sobe é o
+        .zip, e o MP3/capa/descrição que o geraram continuam na subpasta.
         """
         sub = tmp_path / "Culto"
         sub.mkdir()
         mp3 = sub / "Culto.mp3"
         mp3.write_bytes(b"mp3-data")
 
-        af = AudioFile(path=str(mp3), title="Culto", video_id="abc", subfolder=str(sub))
+        enviado = mp3
+        if restos:
+            enviado = sub / "Culto.zip"
+            enviado.write_bytes(b"mp3-data")
+            (sub / "capa.jpg").write_bytes(b"jpg")
+            (sub / "descricao.txt").write_text("desc", encoding="utf-8")
+
+        af = AudioFile(path=str(enviado), title="Culto", video_id="abc",
+                       subfolder=str(sub))
 
         storage = _storage(delete_after_upload=delete_after_upload)
 
@@ -795,3 +807,18 @@ class TestSubfolderCleanupAfterUpload:
         """
         sub = self._run_upload(tmp_path, delete_after_upload=False)
         assert sub.exists()
+
+    def test_fontes_do_pacote_tambem_sao_removidas(self, tmp_path):
+        """
+        Upload em pacote: sobe o .zip, mas o MP3/capa/descrição que o geraram
+        continuam no disco. Com delete_after_upload=True ("não manter nada
+        local") esses restos precisam ir embora junto — senão a subpasta nunca
+        esvazia e o downloads/ cresce indefinidamente.
+        """
+        sub = self._run_upload(tmp_path, delete_after_upload=True, restos=True)
+        assert not sub.exists()
+
+    def test_restos_preservados_quando_delete_after_upload_false(self, tmp_path):
+        sub = self._run_upload(tmp_path, delete_after_upload=False, restos=True)
+        assert (sub / "Culto.mp3").exists()
+        assert (sub / "capa.jpg").exists()
