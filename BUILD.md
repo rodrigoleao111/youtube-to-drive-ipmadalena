@@ -9,9 +9,15 @@
 | Inno Setup 6 | 6.x | `C:\Users\rasantos\AppData\Local\Programs\Inno Setup 6\ISCC.exe` |
 | yt-dlp standalone | qualquer | `.\yt-dlp.exe` (na raiz do projeto) |
 | ffmpeg | qualquer | `.\ffmpeg\bin\ffmpeg.exe` (na raiz do projeto) |
+| ffprobe | qualquer | `.\ffmpeg\bin\ffprobe.exe` (na raiz do projeto) |
 
-> **yt-dlp.exe e ffmpeg devem estar presentes na raiz do projeto antes do build.**
+> **yt-dlp.exe, ffmpeg e ffprobe devem estar presentes na raiz do projeto antes do build.**
 > Use `build_installer.bat` para baixá-los automaticamente, ou coloque manualmente.
+>
+> O `ffprobe.exe` vem no mesmo pacote do ffmpeg e **precisa ir para o bundle**:
+> é ele que mede a duração do áudio para o pipeline de edição. Sem ele o app
+> instalado cai no fallback (medição via `ffmpeg -i`, mais lenta); versões
+> anteriores ao fallback produziam fade out e música de fundo quebrados.
 
 ---
 

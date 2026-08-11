@@ -387,16 +387,21 @@ class TestProcessFluxo:
         assert "linha_irrelevante_0" not in msg
         assert "linha_irrelevante_5" not in msg
 
-    def test_logs_emitidos_um_por_etapa_habilitada(self, audio_file):
+    def test_logs_emitidos_um_por_etapa_habilitada(self, audio_file, tmp_path):
         editor = FfmpegAudioEditor()
         log = MagicMock()
         proc = _make_proc_mock(stdout_lines=["progress=end\n"], returncode=0)
+
+        # A vinheta precisa EXISTIR: um caminho inválido seria descartado por
+        # _drop_missing_assets e o log de concatenação nunca sairia.
+        intro = tmp_path / "intro.mp3"
+        intro.write_bytes(b"fake")
 
         cfg = AudioEditConfig(
             noise_reduction_enabled=True,
             eq_enabled=True,
             fade_in_enabled=True,
-            intro_path="/tmp/intro.mp3",
+            intro_path=str(intro),
         )
         with patch("infrastructure.audio.ffmpeg_editor.start_process",
                    return_value=proc), \
@@ -408,7 +413,7 @@ class TestProcessFluxo:
         assert "redução de ruído" in msgs
         assert "equalização" in msgs
         assert "fade" in msgs
-        assert "vinheta" in msgs
+        assert "concatenando vinhetas" in msgs
         assert "concluído" in msgs
 
     def test_cancelamento_levanta_operacao_cancelada(self, audio_file):
@@ -552,17 +557,20 @@ class TestBuildFilterComplexVolumeNorm:
 
 
 # ===========================================================================
-# Música de fundo — _mix_background_music
+# Música de fundo integrada à passagem única
 # ===========================================================================
 
-class TestMixBackgroundMusic:
-    """Testa a segunda passagem de música de fundo."""
+class TestBuildFilterComplexBgMusic:
+    """Trecho de música de fundo do filter graph (passagem única)."""
 
-    _BG_PATH = "/tmp/music.mp3"
+    _BG = "/tmp/music.mp3"
+
+    def _editor(self):
+        return FfmpegAudioEditor()
 
     def _cfg(self, **kw):
         defaults = dict(
-            bg_music_path=self._BG_PATH,
+            bg_music_path=self._BG,
             bg_music_enabled=True,
             bg_music_volume=0.12,
             bg_music_delay=0.0,
@@ -572,190 +580,549 @@ class TestMixBackgroundMusic:
         defaults.update(kw)
         return AudioEditConfig(**defaults)
 
-    def _run(self, cfg, audio_file, returncode=0, extra_lines=None):
-        proc = _make_proc_mock(
-            stdout_lines=(extra_lines or []) + ["progress=end\n"],
-            returncode=returncode,
+    def _fc(self, cfg, input_dur=60.0, total_dur=60.0, bg_dur=0.0):
+        fc, _ = self._editor()._build_filter_complex(
+            cfg, input_dur, total_dur, bg_enabled=True, bg_dur=bg_dur
         )
-        logs = []
-        with patch("infrastructure.audio.ffmpeg_editor.start_process",
-                   return_value=proc) as sp, \
-             patch.object(FfmpegAudioEditor, "_probe_duration", return_value=60.0), \
-             patch("os.path.isfile", return_value=True), \
-             patch("os.replace"):
-            FfmpegAudioEditor()._mix_background_music(
-                audio_file.path, cfg,
-                on_log=logs.append,
-            )
-        return sp, logs
+        return fc
 
-    def test_comando_inclui_stream_loop(self, audio_file):
-        sp, _ = self._run(self._cfg(), audio_file)
-        cmd = sp.call_args[0][0]
-        assert "-stream_loop" in cmd
-        assert "-1" in cmd
+    def test_volume_aplicado_na_musica(self):
+        assert "volume=0.1500" in self._fc(self._cfg(bg_music_volume=0.15))
 
-    def test_comando_inclui_dois_inputs(self, audio_file):
-        sp, _ = self._run(self._cfg(), audio_file)
-        cmd = sp.call_args[0][0]
-        idx = cmd.index("-i")
-        assert cmd[idx + 1] == self._BG_PATH
-        # segundo -i = arquivo do episódio
-        idx2 = cmd.index("-i", idx + 1)
-        assert cmd[idx2 + 1] == audio_file.path
+    def test_atrim_usa_episodio_mais_intro_musical(self):
+        # 60 s de episódio + 5 s de intro musical → 65 s
+        assert "atrim=end=65.000" in self._fc(self._cfg(bg_music_delay=5.0))
 
-    def test_filter_complex_inclui_volume(self, audio_file):
-        sp, _ = self._run(self._cfg(bg_music_volume=0.15), audio_file)
-        cmd = sp.call_args[0][0]
-        fc = cmd[cmd.index("-filter_complex") + 1]
-        assert "volume=0.1500" in fc
+    def test_adelay_atrasa_o_episodio_nao_a_musica(self):
+        fc = self._fc(self._cfg(bg_music_delay=3.0))
+        assert "[episode]adelay=3000|3000[ep_delayed]" in fc
 
-    def test_filter_complex_inclui_fade_in(self, audio_file):
-        sp, _ = self._run(self._cfg(bg_music_fade_in=4.0), audio_file)
-        cmd = sp.call_args[0][0]
-        fc = cmd[cmd.index("-filter_complex") + 1]
-        assert "afade=t=in" in fc
+    def test_sem_adelay_quando_delay_zero(self):
+        assert "adelay" not in self._fc(self._cfg(bg_music_delay=0.0))
 
-    def test_filter_complex_inclui_fade_out(self, audio_file):
-        sp, _ = self._run(self._cfg(bg_music_fade_out=5.0), audio_file)
-        cmd = sp.call_args[0][0]
-        fc = cmd[cmd.index("-filter_complex") + 1]
-        assert "afade=t=out" in fc
+    def test_fade_in_e_fade_out_da_musica(self):
+        fc = self._fc(self._cfg(bg_music_fade_in=4.0, bg_music_fade_out=6.0))
+        assert "afade=t=in:st=0:d=4.00" in fc
+        # fim em 60 s → fade out começa em 54 s
+        assert "afade=t=out:st=54.000:d=6.00" in fc
 
-    def test_filter_complex_inclui_adelay_no_episodio_quando_delay_positivo(self, audio_file):
-        """Delay>0: o EPISÓDIO é atrasado (adelay no [1:a]), não a música."""
-        sp, _ = self._run(self._cfg(bg_music_delay=3.0), audio_file)
-        cmd = sp.call_args[0][0]
-        fc = cmd[cmd.index("-filter_complex") + 1]
-        # 3s = 3000 ms
-        assert "adelay=3000" in fc
-        # O adelay é aplicado sobre [1:a] (episódio), não sobre [0:a] (música)
-        assert "[1:a]adelay=3000" in fc
+    def test_amix_usa_duration_first_com_episodio_na_frente(self):
+        """
+        `duration=first` + episódio como primeiro input faz a saída ter sempre
+        o comprimento do episódio — com a música em loop infinito ou com uma
+        faixa curta que acaba antes. Regressão: shortest/longest dependia de
+        bg e episódio terem a mesma duração medida.
+        """
+        fc = self._fc(self._cfg())
+        assert "[episode][bg]amix=inputs=2:duration=first" in fc
 
-    def test_filter_complex_sem_adelay_quando_delay_zero(self, audio_file):
-        sp, _ = self._run(self._cfg(bg_music_delay=0.0), audio_file)
-        cmd = sp.call_args[0][0]
-        fc = cmd[cmd.index("-filter_complex") + 1]
-        assert "adelay" not in fc
+    def test_duration_first_independe_do_loop(self):
+        assert "duration=first" in self._fc(self._cfg(bg_music_loop=True))
+        assert "duration=first" in self._fc(self._cfg(bg_music_loop=False))
 
-    def test_atrim_usa_output_dur_quando_delay_positivo(self, audio_file):
-        """output_dur = episode_dur + delay; atrim deve cortar a música nesse valor."""
-        # episode=60s, delay=5s → output=65s → atrim=end=65.000
-        sp, _ = self._run(self._cfg(bg_music_delay=5.0), audio_file)
-        cmd = sp.call_args[0][0]
-        fc = cmd[cmd.index("-filter_complex") + 1]
-        assert "atrim=end=65.000" in fc
+    def test_indice_do_input_de_bg_vem_depois_das_vinhetas(self):
+        fc = self._fc(self._cfg(intro_path="/tmp/i.mp3", outro_path="/tmp/o.mp3"))
+        # 0=principal, 1=intro, 2=outro, 3=música
+        assert "[3:a]atrim=end=" in fc
 
-    def test_log_emitido_com_nome_arquivo(self, audio_file):
-        _, logs = self._run(self._cfg(), audio_file)
-        combined = " ".join(logs).lower()
-        assert "music.mp3" in combined or "música" in combined
+    # -- duração desconhecida (ffprobe e ffmpeg indisponíveis) --------------
 
-    def test_nao_roda_quando_path_ausente(self, audio_file):
-        cfg = AudioEditConfig(bg_music_enabled=True, bg_music_path=None)
-        with patch("infrastructure.audio.ffmpeg_editor.start_process") as sp, \
-             patch.object(FfmpegAudioEditor, "_probe_duration", return_value=60.0):
-            FfmpegAudioEditor()._mix_background_music(audio_file.path, cfg)
-        sp.assert_not_called()
+    def test_sem_duracao_nao_corta_a_musica(self):
+        """
+        Regressão do bug 'a música sumiu após 8 s': com duração 0 o atrim caía
+        em `end=<intro musical>` e a música morria logo depois da abertura.
+        """
+        fc = self._fc(self._cfg(bg_music_delay=8.0), input_dur=0.0, total_dur=0.0)
+        assert "atrim" not in fc
+        assert "volume=0.1200" in fc
+        # o episódio segue sendo atrasado normalmente
+        assert "adelay=8000" in fc
 
-    def test_nao_roda_quando_arquivo_nao_existe(self, audio_file):
-        cfg = self._cfg()
-        with patch("infrastructure.audio.ffmpeg_editor.start_process") as sp, \
-             patch.object(FfmpegAudioEditor, "_probe_duration", return_value=60.0), \
-             patch("os.path.isfile", return_value=False):
-            FfmpegAudioEditor()._mix_background_music(audio_file.path, cfg)
-        sp.assert_not_called()
+    def test_sem_duracao_ainda_aplica_fade_in(self):
+        fc = self._fc(self._cfg(bg_music_fade_in=3.0),
+                      input_dur=0.0, total_dur=0.0)
+        assert "afade=t=in:st=0:d=3.00" in fc
 
-    def test_delay_grande_estende_saida_nao_bloqueia(self, audio_file):
-        """Delay grande é válido — apenas estende o output (episódio = 60 + delay)."""
-        sp, _ = self._run(self._cfg(bg_music_delay=120.0), audio_file)
-        cmd = sp.call_args[0][0]
-        fc = cmd[cmd.index("-filter_complex") + 1]
-        # output_dur = 60 + 120 = 180s
-        assert "atrim=end=180.000" in fc
+    def test_sem_duracao_pula_fade_out_da_musica(self):
+        fc = self._fc(self._cfg(bg_music_fade_out=6.0),
+                      input_dur=0.0, total_dur=0.0)
+        assert "afade=t=out" not in fc
 
-    def test_levanta_runtime_error_quando_ffmpeg_falha(self, audio_file):
-        with pytest.raises(RuntimeError, match="ffmpeg falhou"):
-            self._run(self._cfg(), audio_file, returncode=1)
+    # -- fades que não cabem na saída --------------------------------------
 
-    def test_process_integra_bg_music_na_passagem_principal(self, audio_file):
-        """Melhoria de performance: BG music deve estar no mesmo comando ffmpeg
-        que os demais filtros — passagem única, sem 2ª chamada separada."""
+    def test_fade_out_maior_que_o_audio_e_encurtado_nao_descartado(self):
+        """
+        Antes: `fade_out_st > 0` era falso e o fade out sumia do filter graph
+        inteiro — a música parava seca no volume cheio.
+        """
+        fc = self._fc(self._cfg(bg_music_fade_in=0.0, bg_music_fade_out=6.0),
+                      input_dur=4.0, total_dur=4.0)
+        assert "afade=t=out:st=0.000:d=4.00" in fc
+
+    def test_fade_in_maior_que_o_audio_usa_o_audio_inteiro(self):
+        """Antes era cortado em 40 % da saída (1.6 s de 4 s), sem avisar."""
+        fc = self._fc(self._cfg(bg_music_fade_in=10.0, bg_music_fade_out=0.0),
+                      input_dur=4.0, total_dur=4.0)
+        assert "afade=t=in:st=0:d=4.00" in fc
+
+    def test_fades_que_nao_cabem_sao_reduzidos_proporcionalmente(self):
+        # pedidos 3 + 6 = 9 s numa saída de 8 s → fator 8/9
+        fc = self._fc(self._cfg(bg_music_fade_in=3.0, bg_music_fade_out=6.0),
+                      input_dur=8.0, total_dur=8.0)
+        assert "afade=t=in:st=0:d=2.67" in fc
+        assert "afade=t=out:st=2.667:d=5.33" in fc
+
+    def test_rampas_nao_se_sobrepoem(self):
+        """
+        O fade out não pode começar antes do fade in terminar — senão a música
+        nunca alcança o volume configurado.
+        """
+        fc = self._fc(self._cfg(bg_music_fade_in=5.0, bg_music_fade_out=5.0),
+                      input_dur=6.0, total_dur=6.0)
+        d_in = float(fc.split("afade=t=in:st=0:d=")[1].split(",")[0].split("[")[0])
+        st_out = float(fc.split("afade=t=out:st=")[1].split(":")[0])
+        assert st_out >= d_in - 0.01
+
+
+# ===========================================================================
+# Fim efetivo da música — âncora do fade out
+# ===========================================================================
+
+class TestBgEnd:
+    """
+    Onde a música realmente termina dentro da saída.
+
+    Regressão de produção (log de 31/08/2025): faixa de poucos minutos, loop
+    DESLIGADO, episódio de 48 min. O fade out saía com `st=2904` — o fim do
+    episódio — mas a música já tinha acabado muito antes: a faixa cortava seca
+    no meio e o fade out nunca era ouvido.
+    """
+
+    def _cfg(self, loop):
+        return AudioEditConfig(bg_music_path="/tmp/m.mp3", bg_music_enabled=True,
+                               bg_music_loop=loop)
+
+    def _end(self, loop, output_dur, bg_dur):
+        return FfmpegAudioEditor._bg_end(self._cfg(loop), output_dur, bg_dur)
+
+    def test_com_loop_cobre_a_saida_inteira(self):
+        assert self._end(True, 2912.0, 120.0) == 2912.0
+
+    def test_sem_loop_termina_na_duracao_da_faixa(self):
+        assert self._end(False, 2912.0, 120.0) == 120.0
+
+    def test_sem_loop_faixa_mais_longa_que_a_saida_para_na_saida(self):
+        assert self._end(False, 600.0, 3600.0) == 600.0
+
+    def test_sem_loop_e_sem_medida_da_faixa_assume_o_fim_da_saida(self):
+        assert self._end(False, 600.0, 0.0) == 600.0
+
+    def test_episodio_desconhecido_mas_faixa_medida_usa_a_faixa(self):
+        """A faixa ainda é uma âncora válida sem saber a duração do episódio."""
+        assert self._end(False, 0.0, 120.0) == 120.0
+
+    def test_tudo_desconhecido_retorna_zero(self):
+        assert self._end(False, 0.0, 0.0) == 0.0
+        assert self._end(True, 0.0, 0.0) == 0.0
+
+
+class TestFadeOutAncoradoNaMusica:
+
+    _BG = "/tmp/music.mp3"
+
+    def _fc(self, *, loop, bg_dur, fade_out=8.0, output=2912.0):
         cfg = AudioEditConfig(
-            eq_enabled=True,
-            bg_music_path=self._BG_PATH,
-            bg_music_enabled=True,
+            bg_music_path=self._BG, bg_music_enabled=True,
+            bg_music_fade_in=3.0, bg_music_fade_out=fade_out,
+            bg_music_loop=loop,
+        )
+        fc, _ = FfmpegAudioEditor()._build_filter_complex(
+            cfg, output, output, bg_enabled=True, bg_dur=bg_dur
+        )
+        return fc
+
+    def test_sem_loop_fade_out_fecha_no_fim_da_faixa(self):
+        # faixa de 120 s → fade out de 8 s começa em 112 s
+        fc = self._fc(loop=False, bg_dur=120.0)
+        assert "afade=t=out:st=112.000:d=8.00" in fc
+
+    def test_com_loop_fade_out_fecha_no_fim_do_episodio(self):
+        fc = self._fc(loop=True, bg_dur=120.0)
+        assert "afade=t=out:st=2904.000:d=8.00" in fc
+
+    def test_fade_in_nao_muda_com_o_loop(self):
+        for loop in (True, False):
+            assert "afade=t=in:st=0:d=3.00" in self._fc(loop=loop, bg_dur=120.0)
+
+    def test_sem_loop_fades_cabem_no_espaco_da_faixa(self):
+        """
+        Faixa de 8 s com fade in 3 + fade out 8 pedidos: o orçamento é a faixa
+        (8 s), não o episódio inteiro.
+        """
+        fc = self._fc(loop=False, bg_dur=8.0, fade_out=8.0)
+        assert "afade=t=in:st=0:d=2.18" in fc     # 8 * 3/11
+        assert "afade=t=out:st=2.182:d=5.82" in fc
+
+    def test_log_avisa_quando_a_faixa_acaba_antes(self, audio_file):
+        cfg = AudioEditConfig(
+            bg_music_path=self._BG, bg_music_enabled=True,
+            bg_music_fade_out=8.0, bg_music_loop=False,
         )
         proc = _make_proc_mock(stdout_lines=["progress=end\n"], returncode=0)
-        captured: list = []
-
+        logs = []
         with patch("infrastructure.audio.ffmpeg_editor.start_process",
-                   side_effect=lambda cmd, **kw: (captured.append(cmd[:]), proc)[1]), \
-             patch.object(FfmpegAudioEditor, "_probe_duration", return_value=60.0), \
-             patch.object(FfmpegAudioEditor, "_mix_background_music") as mock_bg, \
+                   return_value=proc), \
+             patch.object(FfmpegAudioEditor, "_probe_duration",
+                          side_effect=lambda p: 120.0 if p == self._BG else 2900.0), \
+             patch("os.path.isfile", return_value=True), \
+             patch("os.replace"):
+            FfmpegAudioEditor().process(audio_file, cfg, on_log=logs.append)
+
+        msgs = " ".join(logs)
+        assert "loop desligado" in msgs
+        assert "Repetir em loop" in msgs
+
+    def test_sem_aviso_quando_a_faixa_cobre_o_episodio(self, audio_file):
+        cfg = AudioEditConfig(
+            bg_music_path=self._BG, bg_music_enabled=True,
+            bg_music_fade_out=8.0, bg_music_loop=False,
+        )
+        proc = _make_proc_mock(stdout_lines=["progress=end\n"], returncode=0)
+        logs = []
+        with patch("infrastructure.audio.ffmpeg_editor.start_process",
+                   return_value=proc), \
+             patch.object(FfmpegAudioEditor, "_probe_duration", return_value=600.0), \
+             patch("os.path.isfile", return_value=True), \
+             patch("os.replace"):
+            FfmpegAudioEditor().process(audio_file, cfg, on_log=logs.append)
+
+        assert "loop desligado" not in " ".join(logs)
+
+    def test_duracao_da_musica_e_medida_uma_vez(self, audio_file):
+        cfg = AudioEditConfig(
+            bg_music_path=self._BG, bg_music_enabled=True, bg_music_loop=False,
+        )
+        proc = _make_proc_mock(stdout_lines=["progress=end\n"], returncode=0)
+        with patch("infrastructure.audio.ffmpeg_editor.start_process",
+                   return_value=proc), \
+             patch.object(FfmpegAudioEditor, "_probe_duration",
+                          return_value=120.0) as probe, \
              patch("os.path.isfile", return_value=True), \
              patch("os.replace"):
             FfmpegAudioEditor().process(audio_file, cfg)
 
-        # Exatamente UMA chamada ao ffmpeg
-        assert len(captured) == 1, "Esperado 1 chamada ffmpeg (passagem única)"
-        # _mix_background_music NÃO deve ser chamado separadamente
-        mock_bg.assert_not_called()
-        # Arquivo de BG music presente nos inputs do comando único
-        assert self._BG_PATH in captured[0]
-        # filter_complex deve conter amix
+        medidos = [c.args[0] for c in probe.call_args_list]
+        assert medidos.count(self._BG) == 1
+
+
+# ===========================================================================
+# _fit_bg_fades — orçamento de fade da música
+# ===========================================================================
+
+class TestFitBgFades:
+
+    def _fit(self, fi, fo, dur):
+        return FfmpegAudioEditor._fit_bg_fades(fi, fo, dur)
+
+    def test_fades_que_cabem_ficam_intactos(self):
+        assert self._fit(3.0, 6.0, 60.0) == (3.0, 6.0)
+
+    def test_soma_exata_fica_intacta(self):
+        assert self._fit(4.0, 6.0, 10.0) == (4.0, 6.0)
+
+    def test_reducao_mantem_a_proporcao_e_preenche_a_saida(self):
+        fi, fo = self._fit(3.0, 6.0, 8.0)
+        assert fi == pytest.approx(8 * 3 / 9)
+        assert fo == pytest.approx(8 * 6 / 9)
+        assert fi + fo == pytest.approx(8.0)
+        # proporção preservada (fade out continua sendo o dobro do fade in)
+        assert fo / fi == pytest.approx(2.0)
+
+    def test_somente_fade_out_ocupa_a_saida_inteira(self):
+        assert self._fit(0.0, 6.0, 4.0) == (0.0, 4.0)
+
+    def test_somente_fade_in_ocupa_a_saida_inteira(self):
+        assert self._fit(10.0, 0.0, 4.0) == (4.0, 0.0)
+
+    def test_sem_duracao_zera_o_fade_out(self):
+        assert self._fit(3.0, 6.0, 0.0) == (3.0, 0.0)
+
+    def test_valores_negativos_viram_zero(self):
+        assert self._fit(-2.0, -5.0, 30.0) == (0.0, 0.0)
+
+    def test_zero_zero_permanece_zero(self):
+        assert self._fit(0.0, 0.0, 30.0) == (0.0, 0.0)
+
+
+# ===========================================================================
+# Guardas de duração desconhecida no áudio principal
+# ===========================================================================
+
+class TestDuracaoDesconhecida:
+
+    def test_fade_out_e_pulado_quando_duracao_e_zero(self):
+        """
+        Sem duração, `st` cairia em 0 e o afade silenciaria o episódio inteiro
+        a partir do segundo 3 — pior que não aplicar o efeito.
+        """
+        cfg = AudioEditConfig(fade_out_enabled=True, fade_out_secs=3.0)
+        fc, _ = FfmpegAudioEditor()._build_filter_complex(cfg, input_dur=0.0)
+        assert "afade=t=out" not in fc
+
+    def test_fade_in_continua_sendo_aplicado(self):
+        """fade in é ancorado no início — não depende de saber a duração."""
+        cfg = AudioEditConfig(fade_in_enabled=True, fade_in_secs=2.0)
+        fc, _ = FfmpegAudioEditor()._build_filter_complex(cfg, input_dur=0.0)
+        assert "afade=t=in:st=0:d=2.0" in fc
+
+    def test_aviso_no_log_quando_duracao_desconhecida(self, audio_file):
+        proc = _make_proc_mock(stdout_lines=["progress=end\n"], returncode=0)
+        logs = []
+        cfg = AudioEditConfig(eq_enabled=True)
+        with patch("infrastructure.audio.ffmpeg_editor.start_process",
+                   return_value=proc), \
+             patch.object(FfmpegAudioEditor, "_probe_duration", return_value=0.0), \
+             patch("os.replace"):
+            FfmpegAudioEditor().process(audio_file, cfg, on_log=logs.append)
+        assert any("duração" in m.lower() for m in logs)
+
+
+# ===========================================================================
+# _probe_duration — ffprobe com fallback para o ffmpeg
+# ===========================================================================
+
+class TestProbeDuration:
+
+    def test_usa_ffprobe_quando_disponivel(self):
+        ed = FfmpegAudioEditor()
+        with patch.object(FfmpegAudioEditor, "_run_probe") as run:
+            run.return_value = MagicMock(returncode=0, stdout="123.45\n", stderr="")
+            assert ed._probe_duration("/tmp/a.mp3") == pytest.approx(123.45)
+        assert run.call_count == 1     # não precisou do fallback
+
+    def test_cai_para_ffmpeg_quando_ffprobe_indisponivel(self):
+        """
+        O bundle do PyInstaller já saiu sem `ffprobe.exe`; sem este fallback
+        toda duração virava 0 e o pipeline se autodestruía.
+        """
+        ed = FfmpegAudioEditor()
+        saida_ffmpeg = (
+            "Input #0, mp3, from 'a.mp3':\n"
+            "  Duration: 00:41:07.25, start: 0.000000, bitrate: 192 kb/s\n"
+        )
+
+        def _fake(cmd):
+            if "ffprobe" in cmd[0]:
+                raise FileNotFoundError("ffprobe.exe não encontrado")
+            return MagicMock(returncode=1, stdout="", stderr=saida_ffmpeg)
+
+        with patch.object(FfmpegAudioEditor, "_run_probe", side_effect=_fake):
+            dur = ed._probe_duration("/tmp/a.mp3")
+        # 41 min 7,25 s = 2467,25 s
+        assert dur == pytest.approx(2467.25)
+
+    def test_retorna_zero_quando_nenhum_dos_dois_funciona(self):
+        ed = FfmpegAudioEditor()
+        with patch.object(FfmpegAudioEditor, "_run_probe",
+                          side_effect=FileNotFoundError("nada")):
+            assert ed._probe_duration("/tmp/a.mp3") == 0.0
+
+    def test_ffprobe_com_saida_vazia_cai_para_ffmpeg(self):
+        ed = FfmpegAudioEditor()
+
+        def _fake(cmd):
+            if "ffprobe" in cmd[0]:
+                return MagicMock(returncode=0, stdout="\n", stderr="")
+            return MagicMock(returncode=1, stdout="",
+                             stderr="  Duration: 00:00:30.00, start: 0.0\n")
+
+        with patch.object(FfmpegAudioEditor, "_run_probe", side_effect=_fake):
+            assert ed._probe_duration("/tmp/a.mp3") == pytest.approx(30.0)
+
+
+# ===========================================================================
+# Saneamento de assets ausentes
+# ===========================================================================
+
+class TestDropMissingAssets:
+
+    def _logs_e_cfg(self, cfg):
+        logs = []
+        novo = FfmpegAudioEditor()._drop_missing_assets(cfg, logs.append)
+        return novo, logs
+
+    def test_vinheta_inexistente_e_descartada(self):
+        cfg = AudioEditConfig(intro_path="/nao/existe/intro.mp3", eq_enabled=True)
+        novo, logs = self._logs_e_cfg(cfg)
+        assert novo.intro_path is None
+        assert any("não encontrada" in m.lower() for m in logs)
+
+    def test_outro_inexistente_e_descartada(self):
+        cfg = AudioEditConfig(outro_path="/nao/existe/outro.mp3")
+        novo, _ = self._logs_e_cfg(cfg)
+        assert novo.outro_path is None
+
+    def test_musica_inexistente_desabilita_bg(self):
+        cfg = AudioEditConfig(bg_music_enabled=True,
+                              bg_music_path="/nao/existe/mus.mp3")
+        novo, logs = self._logs_e_cfg(cfg)
+        assert novo.bg_music_enabled is False
+        assert any("música de fundo" in m.lower() for m in logs)
+
+    def test_arquivos_existentes_sao_preservados(self, tmp_path):
+        intro = tmp_path / "intro.mp3"
+        intro.write_bytes(b"x")
+        cfg = AudioEditConfig(intro_path=str(intro))
+        novo, logs = self._logs_e_cfg(cfg)
+        assert novo.intro_path == str(intro)
+        assert novo is cfg          # sem mudanças → mesma instância
+        assert logs == []
+
+    def test_process_vira_no_op_quando_unica_etapa_sumiu(self, audio_file):
+        """Vinheta apagada era a única etapa: nada a fazer, sem chamar ffmpeg."""
+        cfg = AudioEditConfig(intro_path="/nao/existe/intro.mp3")
+        with patch("infrastructure.audio.ffmpeg_editor.start_process") as sp, \
+             patch.object(FfmpegAudioEditor, "_probe_duration", return_value=60.0):
+            FfmpegAudioEditor().process(audio_file, cfg)
+        sp.assert_not_called()
+
+
+# ===========================================================================
+# process() — integração da música de fundo em uma única passagem
+# ===========================================================================
+
+class TestProcessBgMusic:
+
+    _BG = "/tmp/music.mp3"
+
+    def _run(self, cfg, audio_file, probe=60.0):
+        proc = _make_proc_mock(stdout_lines=["progress=end\n"], returncode=0)
+        captured: list = []
+        with patch("infrastructure.audio.ffmpeg_editor.start_process",
+                   side_effect=lambda cmd, **kw: (captured.append(cmd[:]), proc)[1]), \
+             patch.object(FfmpegAudioEditor, "_probe_duration", return_value=probe), \
+             patch("os.path.isfile", return_value=True), \
+             patch("os.replace"):
+            FfmpegAudioEditor().process(audio_file, cfg)
+        return captured
+
+    def test_uma_unica_chamada_ao_ffmpeg(self, audio_file):
+        cfg = AudioEditConfig(eq_enabled=True, bg_music_path=self._BG,
+                              bg_music_enabled=True)
+        captured = self._run(cfg, audio_file)
+        assert len(captured) == 1
+        assert self._BG in captured[0]
         fc = captured[0][captured[0].index("-filter_complex") + 1]
         assert "amix" in fc
 
-    def test_process_bg_nao_inclui_amix_quando_desabilitado(self, audio_file):
-        """Quando BG disabled, nenhum amix no filter_complex."""
+    def test_stream_loop_presente_apenas_com_loop_ligado(self, audio_file):
+        cfg_on = AudioEditConfig(bg_music_path=self._BG, bg_music_enabled=True,
+                                 bg_music_loop=True)
+        cfg_off = AudioEditConfig(bg_music_path=self._BG, bg_music_enabled=True,
+                                  bg_music_loop=False)
+        assert "-stream_loop" in self._run(cfg_on, audio_file)[0]
+        assert "-stream_loop" not in self._run(cfg_off, audio_file)[0]
+
+    def test_stream_loop_vem_imediatamente_antes_do_input_da_musica(self, audio_file):
+        """`-stream_loop` é opção de INPUT: precisa preceder o -i da música."""
+        cfg = AudioEditConfig(bg_music_path=self._BG, bg_music_enabled=True,
+                              bg_music_loop=True, intro_path="/tmp/i.mp3")
+        cmd = self._run(cfg, audio_file)[0]
+        i = cmd.index("-stream_loop")
+        assert cmd[i + 1] == "-1"
+        assert cmd[i + 2] == "-i"
+        assert cmd[i + 3] == self._BG
+
+    def test_sem_amix_quando_bg_desabilitado(self, audio_file):
         cfg = AudioEditConfig(eq_enabled=True, bg_music_enabled=False)
-        proc = _make_proc_mock(stdout_lines=["progress=end\n"], returncode=0)
-        captured: list = []
-
-        with patch("infrastructure.audio.ffmpeg_editor.start_process",
-                   side_effect=lambda cmd, **kw: (captured.append(cmd[:]), proc)[1]), \
-             patch.object(FfmpegAudioEditor, "_probe_duration", return_value=60.0), \
-             patch("os.replace"):
-            FfmpegAudioEditor().process(audio_file, cfg)
-
-        assert len(captured) == 1
-        fc = captured[0][captured[0].index("-filter_complex") + 1]
+        cmd = self._run(cfg, audio_file)[0]
+        fc = cmd[cmd.index("-filter_complex") + 1]
         assert "amix" not in fc
 
-    def test_stream_loop_presente_quando_loop_true(self, audio_file):
-        sp, _ = self._run(self._cfg(bg_music_loop=True), audio_file)
-        cmd = sp.call_args[0][0]
-        assert "-stream_loop" in cmd
-
-    def test_stream_loop_ausente_quando_loop_false(self, audio_file):
-        sp, _ = self._run(self._cfg(bg_music_loop=False), audio_file)
-        cmd = sp.call_args[0][0]
-        assert "-stream_loop" not in cmd
-
-    def test_amix_duration_shortest_quando_loop_true(self, audio_file):
-        sp, _ = self._run(self._cfg(bg_music_loop=True), audio_file)
-        cmd = sp.call_args[0][0]
-        fc = cmd[cmd.index("-filter_complex") + 1]
-        assert "duration=shortest" in fc
-
-    def test_amix_duration_longest_quando_loop_false(self, audio_file):
-        """Sem loop, a saída dura até o stream mais longo (episódio delayed)."""
-        sp, _ = self._run(self._cfg(bg_music_loop=False), audio_file)
-        cmd = sp.call_args[0][0]
-        fc = cmd[cmd.index("-filter_complex") + 1]
-        assert "duration=longest" in fc
-
-    def test_process_nao_inclui_bg_music_quando_desabilitado(self, audio_file):
-        """Quando bg_music_enabled=False, BG music não entra no comando ffmpeg."""
-        cfg = AudioEditConfig(eq_enabled=True, bg_music_enabled=False)
+    def test_sobreposicao_maior_que_a_vinheta_e_limitada(self, audio_file):
+        """
+        `acrossfade=d` maior que a vinheta engole a vinheta inteira E o começo
+        do sermão (ffmpeg aceita sem reclamar). O limite é a peça mais curta.
+        """
+        cfg = AudioEditConfig(intro_path="/tmp/i.mp3", intro_overlap_secs=10.0)
+        logs = []
         proc = _make_proc_mock(stdout_lines=["progress=end\n"], returncode=0)
-
+        captured: list = []
         with patch("infrastructure.audio.ffmpeg_editor.start_process",
-                   return_value=proc), \
-             patch.object(FfmpegAudioEditor, "_probe_duration", return_value=60.0), \
+                   side_effect=lambda cmd, **kw: (captured.append(cmd[:]), proc)[1]), \
+             patch.object(FfmpegAudioEditor, "_probe_duration",
+                          side_effect=lambda p: 4.0 if p == "/tmp/i.mp3" else 60.0), \
+             patch("os.path.isfile", return_value=True), \
+             patch("os.replace"):
+            FfmpegAudioEditor().process(audio_file, cfg, on_log=logs.append)
+
+        fc = captured[0][captured[0].index("-filter_complex") + 1]
+        assert "acrossfade=d=4.0" in fc
+        assert any("sobreposição" in m.lower() for m in logs)
+
+    def test_sobreposicao_dentro_do_limite_nao_e_alterada(self, audio_file):
+        cfg = AudioEditConfig(intro_path="/tmp/i.mp3", intro_overlap_secs=2.0)
+        proc = _make_proc_mock(stdout_lines=["progress=end\n"], returncode=0)
+        captured: list = []
+        with patch("infrastructure.audio.ffmpeg_editor.start_process",
+                   side_effect=lambda cmd, **kw: (captured.append(cmd[:]), proc)[1]), \
+             patch.object(FfmpegAudioEditor, "_probe_duration",
+                          side_effect=lambda p: 4.0 if p == "/tmp/i.mp3" else 60.0), \
+             patch("os.path.isfile", return_value=True), \
              patch("os.replace"):
             FfmpegAudioEditor().process(audio_file, cfg)
 
-        # Apenas UMA chamada ao ffmpeg, sem BG music
-        assert "start_process" or True  # verifica implicitamente via ausência de mock_bg
+        fc = captured[0][captured[0].index("-filter_complex") + 1]
+        assert "acrossfade=d=2.0" in fc
+
+    def test_log_informa_fades_efetivos_quando_reduzidos(self, audio_file):
+        cfg = AudioEditConfig(
+            bg_music_path=self._BG, bg_music_enabled=True,
+            bg_music_fade_in=3.0, bg_music_fade_out=6.0,
+        )
+        proc = _make_proc_mock(stdout_lines=["progress=end\n"], returncode=0)
+        logs = []
+        with patch("infrastructure.audio.ffmpeg_editor.start_process",
+                   return_value=proc), \
+             patch.object(FfmpegAudioEditor, "_probe_duration", return_value=8.0), \
+             patch("os.path.isfile", return_value=True), \
+             patch("os.replace"):
+            FfmpegAudioEditor().process(audio_file, cfg, on_log=logs.append)
+
+        msgs = " ".join(logs)
+        assert "reduzidos" in msgs
+        # o log principal mostra os valores EFETIVOS, não os pedidos
+        assert "fade‑in=2.7s" in msgs
+        assert "fade‑out=5.3s" in msgs
+
+    def test_log_nao_menciona_reducao_quando_os_fades_cabem(self, audio_file):
+        cfg = AudioEditConfig(
+            bg_music_path=self._BG, bg_music_enabled=True,
+            bg_music_fade_in=3.0, bg_music_fade_out=6.0,
+        )
+        proc = _make_proc_mock(stdout_lines=["progress=end\n"], returncode=0)
+        logs = []
+        with patch("infrastructure.audio.ffmpeg_editor.start_process",
+                   return_value=proc), \
+             patch.object(FfmpegAudioEditor, "_probe_duration", return_value=600.0), \
+             patch("os.path.isfile", return_value=True), \
+             patch("os.replace"):
+            FfmpegAudioEditor().process(audio_file, cfg, on_log=logs.append)
+
+        assert "reduzidos" not in " ".join(logs)
+
+    def test_duracao_total_desconta_as_sobreposicoes(self, audio_file):
+        """
+        Com acrossfade a saída é menor que a soma das peças; sem descontar as
+        sobreposições, o fade out da música cairia depois do fim real.
+        """
+        cfg = AudioEditConfig(
+            bg_music_path=self._BG, bg_music_enabled=True,
+            intro_path="/tmp/i.mp3", outro_path="/tmp/o.mp3",
+            intro_overlap_secs=2.0, outro_overlap_secs=3.0,
+        )
+        # cada peça mede 10 s (probe fixo) → 30 - 2 - 3 = 25 s
+        cmd = self._run(cfg, audio_file, probe=10.0)[0]
+        fc = cmd[cmd.index("-filter_complex") + 1]
+        assert "atrim=end=25.000" in fc
+

@@ -38,6 +38,16 @@ if os.path.exists(_ffmpeg):
 else:
     print("AVISO: ffmpeg nao encontrado em ffmpeg/bin/ffmpeg.exe")
 
+# ffprobe: usado pelo FfmpegAudioEditor para medir a duracao do audio.
+# Sem ele o pipeline de edicao nao sabe onde e o fim do arquivo (fade out e
+# musica de fundo dependem disso). O editor tem fallback via ffmpeg, mas o
+# ffprobe e o caminho rapido e deve ir no bundle.
+_ffprobe = os.path.join("ffmpeg", "bin", "ffprobe.exe")
+if os.path.exists(_ffprobe):
+    extra_binaries.append((_ffprobe, os.path.join("ffmpeg", "bin")))
+else:
+    print("AVISO: ffprobe nao encontrado em ffmpeg/bin/ffprobe.exe")
+
 # ── PyQt6 WebEngine: collect_all aciona os hooks do pyinstaller-hooks-contrib ─
 # Inclui QtWebEngineProcess.exe, plugins Qt, locales, resources, DLLs ICU.
 qt6_we_d,  qt6_we_b,  qt6_we_h  = collect_all("PyQt6.QtWebEngineWidgets")

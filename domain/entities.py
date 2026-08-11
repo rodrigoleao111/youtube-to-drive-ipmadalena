@@ -219,7 +219,13 @@ class AudioEditConfig:
     """Volume da música em relação ao áudio principal (0.0–1.0). Default 12%."""
 
     bg_music_delay: float = 0.0
-    """Segundos de espera até a música começar após o início do episódio."""
+    """
+    Intro musical: segundos em que a música toca SOZINHA antes da voz começar.
+
+    A música arranca no segundo 0 e é o episódio que é empurrado para frente
+    (`adelay`), então a saída fica `duração do episódio + este valor`.
+    0 = música e voz começam juntas.
+    """
 
     bg_music_fade_in: float = 3.0
     """Duração (s) do fade in da música de fundo."""

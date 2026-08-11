@@ -21,6 +21,7 @@ import re
 import subprocess
 import sys
 from collections import deque
+from dataclasses import replace
 from typing import Callable, List, Optional, Tuple
 
 from domain.entities import AudioEditConfig, AudioFile
@@ -91,6 +92,12 @@ class FfmpegAudioEditor:
         log      = on_log      if callable(on_log)      else _noop
         progress = on_progress if callable(on_progress) else _noop
 
+        # ---------- Descarta assets ausentes (vinhetas / música) ----------
+        # Feito ANTES do fast path: se a única etapa habilitada era uma vinheta
+        # que sumiu do disco, o pipeline inteiro vira no-op em vez de quebrar o
+        # ffmpeg com um input inexistente.
+        config = self._drop_missing_assets(config, log)
+
         # ---------- Fast path: nada a fazer ----------
         if not config.has_any_filter_enabled:
             log("[Edição] Nenhum filtro habilitado — pulando edição.")
@@ -104,27 +111,58 @@ class FfmpegAudioEditor:
         input_dur = self._probe_duration(audio.path)
         intro_dur = self._probe_duration(config.intro_path) if config.intro_path else 0.0
         outro_dur = self._probe_duration(config.outro_path) if config.outro_path else 0.0
-        total_dur = max(0.001, input_dur + intro_dur + outro_dur)
+
+        # A duração só é confiável se TODAS as peças foram medidas: uma vinheta
+        # não medida deslocaria o fim do episódio e desalinharia o fade out da
+        # música de fundo.
+        duration_known = input_dur > 0 and not (
+            (config.intro_path and intro_dur <= 0)
+            or (config.outro_path and outro_dur <= 0)
+        )
+
+        # A sobreposição não pode passar da peça mais curta do cruzamento.
+        config = self._clamp_overlaps(config, input_dur, intro_dur, outro_dur, log)
+
+        # acrossfade encurta a saída: as sobreposições não são tempo somado.
+        overlap = 0.0
+        if config.intro_path:
+            overlap += max(0.0, config.intro_overlap_secs)
+        if config.outro_path:
+            overlap += max(0.0, config.outro_overlap_secs)
+
+        total_dur = (
+            max(0.0, input_dur + intro_dur + outro_dur - overlap)
+            if duration_known else 0.0
+        )
 
         _log.info(
-            "duracoes: input=%.2fs intro=%.2fs outro=%.2fs total=%.2fs",
-            input_dur, intro_dur, outro_dur, total_dur,
+            "duracoes: input=%.2fs intro=%.2fs outro=%.2fs overlap=%.2fs "
+            "total=%.2fs (conhecida=%s)",
+            input_dur, intro_dur, outro_dur, overlap, total_dur, duration_known,
         )
 
-        # ---------- Verifica disponibilidade da música de fundo ----------
+        if not duration_known:
+            # Sem duração não dá para ancorar nada no FIM do áudio. Seguimos
+            # com o resto do pipeline, mas avisando: silenciar o episódio (fade
+            # out em st=0) ou cortar a música seria pior que não aplicá-los.
+            log("[Edição] Não foi possível medir a duração do áudio "
+                "(ffprobe/ffmpeg indisponível) — fade out e fade out da "
+                "música de fundo serão ignorados nesta execução.")
+            _log.warning("duracao desconhecida para %s", audio.path)
+
         # bg_active=True → integra BG na mesma passagem ffmpeg (sem 2ª chamada).
-        # bg_active=False → BG ausente/não encontrado; pipeline roda sem ele.
-        bg_active = (
-            config.bg_music_enabled
-            and bool(config.bg_music_path)
-            and os.path.isfile(config.bg_music_path)
-        )
-        if config.bg_music_enabled and not bg_active:
-            log(f"[Música de fundo] Arquivo não encontrado: "
-                f"{config.bg_music_path} — pulando.")
+        bg_active = config.bg_music_enabled and bool(config.bg_music_path)
 
         # Duração total da saída (maior quando BG music adiciona intro musical)
-        output_dur = max(0.001, total_dur + (config.bg_music_delay if bg_active else 0.0))
+        output_dur = (
+            total_dur + (config.bg_music_delay if bg_active else 0.0)
+            if duration_known else 0.0
+        )
+
+        # Duração da própria faixa de música: define até onde ela toca quando o
+        # loop está desligado — e, portanto, onde o fade out precisa começar.
+        bg_dur = self._probe_duration(config.bg_music_path) if bg_active else 0.0
+        bg_end = self._bg_end(config, output_dur, bg_dur)
 
         # ---------- Logs por etapa do pipeline ----------
         if config.noise_reduction_enabled:
@@ -149,13 +187,48 @@ class FfmpegAudioEditor:
         if config.volume_norm_enabled:
             log(f"[Edição] Nivelando volume ({config.volume_norm_lufs:.0f} LUFS — loudnorm)...")
         if bg_active:
+            # Fades EFETIVOS: o orçamento é o trecho que a música realmente
+            # ocupa (bg_end), não a saída inteira.
+            fade_in_ef, fade_out_ef = self._fit_bg_fades(
+                config.bg_music_fade_in,
+                config.bg_music_fade_out,
+                bg_end,
+            )
             log(
                 f"[Música de fundo] Mixando "
                 f"'{os.path.basename(config.bg_music_path)}' "
                 f"— vol={config.bg_music_volume:.0%}  "
                 f"intro={config.bg_music_delay:.1f}s  "
-                f"fade‑in={config.bg_music_fade_in:.1f}s  "
-                f"fade‑out={config.bg_music_fade_out:.1f}s"
+                f"fade‑in={fade_in_ef:.1f}s  "
+                f"fade‑out={fade_out_ef:.1f}s"
+            )
+            if (
+                not config.bg_music_loop
+                and bg_dur > 0
+                and output_dur > 0
+                and bg_dur < output_dur
+            ):
+                log(
+                    "[Música de fundo] A faixa tem "
+                    f"{bg_dur / 60:.1f} min e o episódio {output_dur / 60:.1f} min, "
+                    "com o loop desligado — a música termina em "
+                    f"{bg_end / 60:.1f} min (o fade out fecha nesse ponto). "
+                    "Marque 'Repetir em loop' para cobrir o episódio inteiro."
+                )
+            if (
+                abs(fade_in_ef - config.bg_music_fade_in) > 0.05
+                or abs(fade_out_ef - config.bg_music_fade_out) > 0.05
+            ):
+                log(
+                    "[Música de fundo] Fades reduzidos para caber em "
+                    f"{bg_end:.1f}s de música (pedidos: "
+                    f"{config.bg_music_fade_in:.1f}s / "
+                    f"{config.bg_music_fade_out:.1f}s)."
+                )
+            _log.info(
+                "bg_music: dur=%.2fs loop=%s fim_efetivo=%.2fs "
+                "fade_in=%.2fs fade_out=%.2fs",
+                bg_dur, config.bg_music_loop, bg_end, fade_in_ef, fade_out_ef,
             )
             _log.info(
                 "bg_music integrado: path=%s total=%.2fs delay=%.2fs output=%.2fs",
@@ -166,7 +239,7 @@ class FfmpegAudioEditor:
         tmp_path = audio.path + ".tmp"
         cmd = self._build_cmd(
             audio, config, input_dur, tmp_path,
-            total_dur, bg_enabled=bg_active,
+            total_dur, bg_enabled=bg_active, bg_dur=bg_dur,
         )
         _log.info("ffmpeg cmd: %s", " ".join(cmd))
 
@@ -218,157 +291,153 @@ class FfmpegAudioEditor:
             raise
 
     # -----------------------------------------------------------------------
-    # Passagem de música de fundo (amix em passagem separada)
+    # Saneamento da configuração
     # -----------------------------------------------------------------------
 
-    def _mix_background_music(
+    def _drop_missing_assets(
         self,
-        audio_path: str,
         config: AudioEditConfig,
-        *,
-        on_log=None,
-        on_progress=None,
-        cancel_event=None,
-    ) -> None:
+        log: Callable[[str], None],
+    ) -> AudioEditConfig:
         """
-        Mistura música de fundo ao arquivo ``audio_path`` (in-place, via .bgtmp).
+        Devolve a config sem os arquivos que não existem mais no disco.
 
-        Pipeline:
-          - ``bg_music_delay`` segundos de música tocam ANTES do episódio começar
-            (intro musical): o episódio é atrasado via ``adelay``; a saída fica
-            ``episode_duration + delay`` segundos de comprimento.
-          - Faz loop da música (se ``bg_music_loop``) para cobrir a saída inteira.
-          - Aplica fade in / fade out na música.
-          - Reduz o volume da música ao nível configurado.
-          - Mixa com ``amix normalize=0`` para preservar os volumes relativos
-            (voz em nível total, música reduzida).
+        Vinhetas e música de fundo são copiadas para ``assets/vinhetas/``, mas
+        o usuário pode apagar/mover a pasta entre configurar e processar. Passar
+        um input inexistente ao ffmpeg aborta a edição inteira — melhor ignorar
+        a peça ausente e avisar no log, como já era feito só para a música.
         """
-        log      = on_log      if callable(on_log)      else _noop
-        progress = on_progress if callable(on_progress) else _noop
+        updates: dict = {}
 
-        if not config.bg_music_path or not os.path.isfile(config.bg_music_path):
-            log(f"[Música de fundo] Arquivo não encontrado: {config.bg_music_path}")
-            return
+        for campo, rotulo in (
+            ("intro_path", "Vinheta de entrada"),
+            ("outro_path", "Vinheta de saída"),
+        ):
+            caminho = getattr(config, campo)
+            if caminho and not os.path.isfile(caminho):
+                log(f"[Edição] {rotulo} não encontrada: {caminho} — ignorando.")
+                _log.warning("%s ausente: %s", rotulo, caminho)
+                updates[campo] = None
 
-        self._check_cancel(cancel_event)
+        if config.bg_music_enabled and not (
+            config.bg_music_path and os.path.isfile(config.bg_music_path)
+        ):
+            log("[Música de fundo] Arquivo não encontrado: "
+                f"{config.bg_music_path} — pulando.")
+            _log.warning("bg_music ausente: %s", config.bg_music_path)
+            updates["bg_music_enabled"] = False
 
-        episode_dur = self._probe_duration(audio_path)
-        if episode_dur <= 0.0:
-            log("[Música de fundo] Não foi possível determinar duração — pulando.")
-            return
+        return replace(config, **updates) if updates else config
 
-        delay      = max(0.0, config.bg_music_delay)
-        # Duração total da saída: intro musical + episódio
-        output_dur = episode_dur + delay
-        fade_out_st = max(0.0, output_dur - config.bg_music_fade_out)
-        delay_ms    = int(delay * 1000)
+    @staticmethod
+    def _bg_end(
+        config: AudioEditConfig,
+        output_dur: float,
+        bg_dur: float,
+    ) -> float:
+        """
+        Instante (em segundos) em que a música de fundo realmente termina.
 
-        log(
-            f"[Música de fundo] Mixando '{os.path.basename(config.bg_music_path)}' "
-            f"— vol={config.bg_music_volume:.0%}  intro={delay:.1f}s  "
-            f"fade‑in={config.bg_music_fade_in:.1f}s  fade‑out={config.bg_music_fade_out:.1f}s"
-        )
-        _log.info(
-            "bg_music: path=%s episode=%.2fs delay=%.2fs output=%.2fs vol=%.3f",
-            config.bg_music_path, episode_dur, delay, output_dur, config.bg_music_volume,
-        )
+        Com o loop ligado a música é infinita (`-stream_loop -1`) e cobre a
+        saída toda. Com o loop DESLIGADO ela acaba na própria duração — e é aí
+        que o fade out precisa fechar. Ancorar no fim do episódio, como era
+        feito, deixava a rampa agendada para um ponto onde já não havia música:
+        a faixa cortava seca no meio do episódio e o fade out sumia.
 
-        # ── Filtro da trilha de música (input 0) ────────────────────────────
-        # Música cobre output_dur inteiro (começa no segundo 0).
-        bg_parts: list = [
-            f"atrim=end={output_dur:.3f}",
-            "asetpts=N/SR/TB",
-            f"volume={config.bg_music_volume:.4f}",
-        ]
-        if config.bg_music_fade_in > 0:
-            fi = min(config.bg_music_fade_in, output_dur * 0.4)
-            bg_parts.append(f"afade=t=in:st=0:d={fi:.2f}")
-        if config.bg_music_fade_out > 0 and fade_out_st > 0:
-            bg_parts.append(
-                f"afade=t=out:st={fade_out_st:.3f}:d={config.bg_music_fade_out:.2f}"
-            )
-
-        bg_chain = ",".join(bg_parts)
-
-        # ── Episódio atrasado (input 1) ──────────────────────────────────────
-        # adelay empurra o episódio para depois da intro musical.
-        # Sem delay → usamos [1:a] diretamente (sem filtro extra).
-        if delay_ms > 0:
-            main_label   = "[main]"
-            main_filter  = f"[1:a]adelay={delay_ms}|{delay_ms}[main];"
-        else:
-            main_label   = "[1:a]"
-            main_filter  = ""
-
-        # ── Mistura ──────────────────────────────────────────────────────────
-        # normalize=0 → preserva volumes relativos (voz total, música reduzida).
-        # Loop ativo  → bg trimado a output_dur, episódio delayed = output_dur;
-        #               duration=shortest (ambos == output_dur → saída = output_dur).
-        # Loop inativo → bg pode acabar antes; episódio delayed ancora a saída
-        #               duration=longest (main == output_dur é o maior).
+        Retorna 0.0 quando não há como saber (nem episódio nem faixa medidos).
+        """
         if config.bg_music_loop:
-            mix_filter = (
-                f"[bg]{main_label}amix=inputs=2:duration=shortest"
-                ":dropout_transition=0:normalize=0"
-            )
-        else:
-            mix_filter = (
-                f"[bg]{main_label}amix=inputs=2:duration=longest"
-                ":dropout_transition=0:normalize=0"
-            )
+            return max(0.0, output_dur)
 
-        filter_complex = f"[0:a]{bg_chain}[bg];{main_filter}{mix_filter}"
+        if bg_dur <= 0:
+            return max(0.0, output_dur)      # sem medida da faixa, assume o fim
 
-        tmp = audio_path + ".bgtmp"
-        cmd: list = [ffmpeg_exe(), "-hide_banner", "-y"]
-        if config.bg_music_loop:
-            cmd += ["-stream_loop", "-1"]   # loop infinito da música
-        cmd += [
-            "-i", config.bg_music_path,
-            "-i", audio_path,              # episódio (NÃO loopado)
-            "-filter_complex", filter_complex,
-            "-c:a", "libmp3lame",
-            "-q:a", "2",
-            "-f", "mp3",
-            "-progress", "pipe:1",
-            "-nostats",
-            tmp,
-        ]
-        _log.info("bg_music cmd: %s", " ".join(cmd))
+        if output_dur > 0:
+            return min(bg_dur, output_dur)
 
-        recent_lines: deque = deque(maxlen=20)
-        process = start_process(cmd, cancel_event=cancel_event)
-        try:
-            for line in process.stdout:
-                self._check_cancel(cancel_event)
-                stripped = line.rstrip()
-                if stripped:
-                    recent_lines.append(stripped)
-                self._parse_progress_line(line, output_dur, progress)
+        # Episódio não medido, mas a faixa sim: o fim dela ainda é uma âncora
+        # válida para o fade out.
+        return bg_dur
 
-            ret = process.wait()
-            self._check_cancel(cancel_event)
+    @staticmethod
+    def _fit_bg_fades(
+        fade_in: float,
+        fade_out: float,
+        output_dur: float,
+    ) -> Tuple[float, float]:
+        """
+        Ajusta os fades da música para caberem juntos na saída.
 
-            if ret != 0:
-                tail = "\n  ".join(recent_lines) or "(sem saída)"
-                _log.error("bg_music ffmpeg rc=%s. Linhas: %s", ret, tail)
-                raise RuntimeError(
-                    f"ffmpeg falhou ao mixar música de fundo (código {ret}).\n"
-                    f"Últimas linhas:\n  {tail}"
+        Devolve ``(fade_in, fade_out)`` efetivos. Quando a soma pedida não cabe
+        em ``output_dur``, ambos são reduzidos pelo mesmo fator — a proporção
+        escolhida pelo usuário é mantida e as rampas se encostam sem invadir
+        uma à outra.
+
+        Três comportamentos antigos que isso corrige:
+          - fade out maior que o áudio era **descartado inteiro** (a música
+            parava seca), enquanto o fade in era encurtado;
+          - o fade in era limitado a 40 % da saída, um número arbitrário e
+            silencioso;
+          - com ``fade_in + fade_out > output_dur`` as rampas se sobrepunham e
+            a música nunca chegava ao volume configurado.
+
+        ``output_dur <= 0`` (duração não medida) devolve o fade in pedido e
+        zera o fade out — não há fim conhecido para ancorá-lo.
+        """
+        fi = max(0.0, fade_in)
+        fo = max(0.0, fade_out)
+
+        if output_dur <= 0:
+            return fi, 0.0
+
+        soma = fi + fo
+        if soma > output_dur and soma > 0:
+            fator = output_dur / soma
+            fi *= fator
+            fo *= fator
+
+        return fi, fo
+
+    def _clamp_overlaps(
+        self,
+        config: AudioEditConfig,
+        input_dur: float,
+        intro_dur: float,
+        outro_dur: float,
+        log: Callable[[str], None],
+    ) -> AudioEditConfig:
+        """
+        Limita cada sobreposição à duração da peça mais curta do cruzamento.
+
+        `acrossfade=d=X` consome X segundos do fim do primeiro stream e do
+        início do segundo. Com X maior que a vinheta, o ffmpeg não reclama —
+        ele engole a vinheta inteira e ainda come o começo do sermão (uma
+        vinheta de 4 s com sobreposição de 10 s devora os 6 s iniciais da
+        pregação). O painel permite até 10 s, então o limite tem de vir daqui.
+        """
+        if input_dur <= 0:
+            return config      # sem duração medida não há como limitar
+
+        updates: dict = {}
+        for campo, dur_vinheta, rotulo in (
+            ("intro_overlap_secs", intro_dur, "entrada"),
+            ("outro_overlap_secs", outro_dur, "saída"),
+        ):
+            atual = getattr(config, campo)
+            caminho = config.intro_path if "intro" in campo else config.outro_path
+            if not caminho or atual <= 0 or dur_vinheta <= 0:
+                continue
+            limite = min(dur_vinheta, input_dur)
+            if atual > limite:
+                log(f"[Edição] Sobreposição da vinheta de {rotulo} reduzida de "
+                    f"{atual:.1f}s para {limite:.1f}s (duração da vinheta).")
+                _log.warning(
+                    "%s: overlap %.2fs > limite %.2fs — ajustado",
+                    campo, atual, limite,
                 )
+                updates[campo] = limite
 
-            os.replace(tmp, audio_path)
-            _log.info("bg_music aplicada: %s", audio_path)
-            log("[Música de fundo] Concluído.")
-            progress(1.0)
-
-        except Exception:
-            try:
-                if os.path.exists(tmp):
-                    os.remove(tmp)
-            except Exception:
-                pass
-            raise
+        return replace(config, **updates) if updates else config
 
     # -----------------------------------------------------------------------
     # Construção do filter graph (testado via _build_filter_complex)
@@ -381,6 +450,7 @@ class FfmpegAudioEditor:
         total_dur: float = 0.0,
         *,
         bg_enabled: bool = False,
+        bg_dur: float = 0.0,
     ) -> Tuple[str, str]:
         """
         Constrói a string ``-filter_complex`` e o nome do output map.
@@ -396,6 +466,10 @@ class FfmpegAudioEditor:
         bg_enabled:
             True quando a música de fundo deve ser integrada nesta passagem.
             Determinado por ``process()`` após verificar existência do arquivo.
+        bg_dur:
+            Duração da faixa de música. Necessária para ancorar o fade out no
+            fim REAL da música quando o loop está desligado (uma faixa mais
+            curta que o episódio acaba antes do fim da saída). 0 = desconhecida.
 
         Returns
         -------
@@ -417,14 +491,25 @@ class FfmpegAudioEditor:
         if config.fade_in_enabled and config.fade_in_secs > 0:
             main_filters.append(f"afade=t=in:st=0:d={config.fade_in_secs}")
         if config.fade_out_enabled and config.fade_out_secs > 0:
-            fade_start = max(0.0, input_dur - config.fade_out_secs)
-            main_filters.append(f"afade=t=out:st={fade_start}:d={config.fade_out_secs}")
+            # O fade out é ancorado no FIM do áudio. Sem duração medida,
+            # `st` cairia em 0 e o afade silenciaria o episódio inteiro logo
+            # nos primeiros segundos — por isso a etapa é pulada.
+            if input_dur > 0:
+                fade_start = max(0.0, input_dur - config.fade_out_secs)
+                main_filters.append(
+                    f"afade=t=out:st={fade_start}:d={config.fade_out_secs}"
+                )
+            else:
+                _log.warning("fade out ignorado: duracao do audio desconhecida")
 
         if config.volume_norm_enabled:
             lufs = config.volume_norm_lufs
-            # linear=true: ganho linear único (sem correção frame-a-frame).
-            # Para pregação/voz, resultado idêntico ao modo dinâmico mas
-            # ~40–50 % mais rápido — elimina a análise psicoacústica por frame.
+            # linear=true pede um ganho linear único em vez da correção
+            # frame-a-frame. Em passagem única (sem measured_I/LRA/TP de uma
+            # análise prévia) o ffmpeg não tem como calcular esse ganho e volta
+            # ao modo dinâmico silenciosamente — o alvo de LUFS é respeitado do
+            # mesmo jeito. Mantido porque, com valores medidos, vira o caminho
+            # rápido; não esperar ganho de tempo hoje.
             main_filters.append(
                 f"loudnorm=I={lufs:.1f}:TP=-1.5:LRA=11:linear=true:print_format=none"
             )
@@ -519,24 +604,48 @@ class FfmpegAudioEditor:
         # Índice do input de BG: vem depois de principal + eventuais vinhetas.
         idx_bg = 1 + int(has_intro) + int(has_outro)
 
-        ep_dur     = max(0.001, total_dur if total_dur > 0 else input_dur)
+        ep_dur     = total_dur if total_dur > 0 else input_dur
         delay      = max(0.0, config.bg_music_delay)
-        output_dur = ep_dur + delay
         delay_ms   = int(delay * 1000)
-        fade_out_st = max(0.0, output_dur - config.bg_music_fade_out)
 
-        bg_parts: List[str] = [
-            f"atrim=end={output_dur:.3f}",
-            "asetpts=N/SR/TB",
-            f"volume={config.bg_music_volume:.4f}",
-        ]
-        if config.bg_music_fade_in > 0:
-            fi = min(config.bg_music_fade_in, output_dur * 0.4)
-            bg_parts.append(f"afade=t=in:st=0:d={fi:.2f}")
-        if config.bg_music_fade_out > 0 and fade_out_st > 0:
+        # Sem duração medida não dá para cortar nem ancorar o fade out da
+        # música: um `atrim=end=<delay>` faria a música sumir logo após a
+        # intro musical. Nesse caso a música entra inteira (em loop, se
+        # configurado) e quem delimita a saída é o próprio episódio, via
+        # `amix duration=first`.
+        duration_known = ep_dur > 0
+        output_dur = ep_dur + delay if duration_known else 0.0
+
+        bg_parts: List[str] = []
+        if duration_known:
+            bg_parts += [f"atrim=end={output_dur:.3f}", "asetpts=N/SR/TB"]
+        bg_parts.append(f"volume={config.bg_music_volume:.4f}")
+
+        # Onde a música de fato acaba: fim da saída com loop ligado, fim da
+        # própria faixa com loop desligado. É essa a âncora do fade out.
+        bg_end = self._bg_end(config, output_dur, bg_dur)
+
+        fade_in, fade_out = self._fit_bg_fades(
+            config.bg_music_fade_in,
+            config.bg_music_fade_out,
+            bg_end,
+        )
+
+        if fade_in > 0:
+            bg_parts.append(f"afade=t=in:st=0:d={fade_in:.2f}")
+
+        if fade_out > 0:
+            # `st` pode ser 0 quando o fade out cobre a faixa inteira — é um
+            # comando válido e melhor que descartar o efeito pedido.
+            fade_out_st = max(0.0, bg_end - fade_out)
             bg_parts.append(
-                f"afade=t=out:st={fade_out_st:.3f}:d={config.bg_music_fade_out:.2f}"
+                f"afade=t=out:st={fade_out_st:.3f}:d={fade_out:.2f}"
             )
+        elif config.bg_music_fade_out > 0:
+            _log.warning(
+                "fade out da musica ignorado: fim da musica desconhecido"
+            )
+
         chain_parts.append(f"[{idx_bg}:a]{','.join(bg_parts)}[bg]")
 
         if delay_ms > 0:
@@ -545,9 +654,14 @@ class FfmpegAudioEditor:
         else:
             ep_for_mix = "[episode]"
 
-        amix_dur = "shortest" if config.bg_music_loop else "longest"
+        # `duration=first` com o EPISÓDIO como primeiro input: a saída sempre
+        # tem exatamente o comprimento do episódio (+ intro musical), tanto com
+        # a música em loop infinito (`-stream_loop -1`) quanto com uma faixa
+        # curta que acaba antes. Substitui o par shortest/longest, que dependia
+        # de bg e episódio terem a mesma duração medida para não cortar nem
+        # esticar a saída.
         chain_parts.append(
-            f"[bg]{ep_for_mix}amix=inputs=2:duration={amix_dur}"
+            f"{ep_for_mix}[bg]amix=inputs=2:duration=first"
             ":dropout_transition=0:normalize=0[out]"
         )
 
@@ -562,10 +676,12 @@ class FfmpegAudioEditor:
         total_dur: float = 0.0,
         *,
         bg_enabled: bool = False,
+        bg_dur: float = 0.0,
     ) -> List[str]:
         """Monta a lista de argumentos para o subprocess ffmpeg."""
         filter_complex, out_map = self._build_filter_complex(
-            config, input_dur, total_dur, bg_enabled=bg_enabled
+            config, input_dur, total_dur,
+            bg_enabled=bg_enabled, bg_dur=bg_dur,
         )
 
         cmd: List[str] = [
@@ -607,34 +723,75 @@ class FfmpegAudioEditor:
 
     def _probe_duration(self, path: str) -> float:
         """
-        Retorna a duração do arquivo em segundos via ffprobe.
-        Retorna 0.0 se não conseguir determinar.
+        Retorna a duração do arquivo em segundos. 0.0 se não conseguir medir.
+
+        Tenta o ffprobe e, se ele não estiver disponível, cai para o próprio
+        ffmpeg. O fallback não é teórico: o bundle do PyInstaller já foi
+        distribuído só com `ffmpeg.exe`, e sem duração o pipeline calculava
+        `afade=t=out:st=0` (silenciando o episódio) e `atrim` da música no
+        tamanho da intro musical (a música sumia após alguns segundos).
         """
+        dur = self._duration_via_ffprobe(path)
+        if dur > 0:
+            return dur
+
+        dur = self._duration_via_ffmpeg(path)
+        if dur > 0:
+            _log.info(
+                "duracao de %s obtida via ffmpeg (ffprobe indisponivel): %.2fs",
+                path, dur,
+            )
+        return dur
+
+    def _run_probe(self, cmd: List[str]) -> subprocess.CompletedProcess:
+        """Executa um binário de probe capturando saída, sem abrir console."""
+        extra: dict = {}
+        if sys.platform == "win32":
+            extra["creationflags"] = subprocess.CREATE_NO_WINDOW
+        return subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=15,
+            **extra,
+        )
+
+    def _duration_via_ffprobe(self, path: str) -> float:
+        """Duração via `ffprobe -show_entries format=duration`."""
         try:
-            cmd = [
+            result = self._run_probe([
                 ffprobe_exe(),
                 "-v", "error",
                 "-select_streams", "a:0",
                 "-show_entries", "format=duration",
                 "-of", "default=nw=1:nk=1",
                 path,
-            ]
-            extra: dict = {}
-            if sys.platform == "win32":
-                extra["creationflags"] = subprocess.CREATE_NO_WINDOW
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=15,
-                **extra,
-            )
+            ])
             if result.returncode == 0:
                 return float(result.stdout.strip() or 0.0)
         except Exception as e:
             _log.warning("ffprobe falhou em %s: %s", path, e)
+        return 0.0
+
+    def _duration_via_ffmpeg(self, path: str) -> float:
+        """
+        Duração pela linha ``Duration: HH:MM:SS.ss`` que o ffmpeg imprime ao
+        abrir o arquivo. Sem output definido o ffmpeg sai com código != 0 —
+        isso é esperado; o que interessa é o cabeçalho já impresso.
+        """
+        try:
+            result = self._run_probe([
+                ffmpeg_exe(), "-hide_banner", "-i", path,
+            ])
+            texto = (result.stderr or "") + (result.stdout or "")
+            m = self._RE_DURATION.search(texto)
+            if m:
+                horas, minutos, segundos = m.groups()
+                return int(horas) * 3600 + int(minutos) * 60 + float(segundos)
+        except Exception as e:
+            _log.warning("ffmpeg -i falhou em %s: %s", path, e)
         return 0.0
 
     # -----------------------------------------------------------------------
