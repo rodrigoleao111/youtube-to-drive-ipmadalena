@@ -3094,13 +3094,18 @@ class App(QMainWindow):
                     ep_title = (prefix + first.get("title", "")) if prefix else first.get("title", "")
                     video_id = first.get("video_id", "")
 
-                    # Descrição: lê do descricao.txt gerado pelo downloader na subpasta
+                    # Descrição: lê do descricao.txt gerado pelo downloader na subpasta.
+                    # build_output_names é a MESMA função usada pelo downloader —
+                    # sanitize_folder_name sozinho erraria a pasta quando o nome
+                    # precisou ser encurtado pelo limite de caminho do Windows.
                     description = ""
                     try:
-                        from infrastructure.youtube.ytdlp_source import sanitize_folder_name
+                        from infrastructure.youtube.ytdlp_source import build_output_names
+                        _pasta, _ = build_output_names(
+                            baixar_audio.DOWNLOAD_DIR, first.get("title", "")
+                        )
                         _subfolder = os.path.join(
-                            baixar_audio.DOWNLOAD_DIR,
-                            sanitize_folder_name(first.get("title", "")),
+                            baixar_audio.DOWNLOAD_DIR, _pasta,
                         )
                         _txt = os.path.join(_subfolder, "descricao.txt")
                         if os.path.isfile(_txt):

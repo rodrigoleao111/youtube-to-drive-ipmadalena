@@ -233,11 +233,11 @@ class TestYtDlpAudioDownloader:
 
     def _make_mp4(self, tmp_path, title="Culto"):
         """Cria subpasta + MP4 fake mimicking what yt-dlp would produce."""
-        from infrastructure.youtube.ytdlp_source import sanitize_folder_name
-        safe      = sanitize_folder_name(title)
-        subfolder = tmp_path / safe
+        from infrastructure.youtube.ytdlp_source import build_output_names
+        pasta, arquivo = build_output_names(str(tmp_path), title)
+        subfolder = tmp_path / pasta
         subfolder.mkdir(parents=True, exist_ok=True)
-        mp4       = subfolder / f"{title}.mp4"
+        mp4       = subfolder / f"{arquivo}.mp4"
         mp4.write_bytes(b"fake-mp4-data")
         return mp4, subfolder
 
@@ -248,6 +248,77 @@ class TestYtDlpAudioDownloader:
     # -------------------------------------------------------------------
     # Comando gerado pelo yt-dlp
     # -------------------------------------------------------------------
+
+    def test_output_template_usa_o_nome_orcado_nao_title(self, tmp_path):
+        """
+        `%(title)s` ignorava o orçamento de MAX_PATH (e reintroduzia caracteres
+        de largura total no lugar de `|` e `:`). O nome tem de vir do
+        build_output_names.
+        """
+        mp4, _ = self._make_mp4(tmp_path)
+        proc   = _make_process([f'[Merger] Merging formats into "{mp4}"'])
+        captured_cmd = []
+
+        def fake_start(cmd, *a, **kw):
+            captured_cmd.extend(cmd)
+            return proc
+
+        with patch("infrastructure.youtube.ytdlp_source.start_process",
+                   side_effect=fake_start), \
+             patch("infrastructure.youtube.ytdlp_source.ffmpeg_dir", return_value=None), \
+             patch.object(YtDlpAudioDownloader, "_save_extras"), \
+             patch("subprocess.run", return_value=self._run_ok()):
+            self._dl().download([self._seg()], str(tmp_path))
+
+        template = captured_cmd[captured_cmd.index("--output") + 1]
+        assert "%(title)s" not in template
+        assert template.endswith("Culto.%(ext)s")
+
+    def test_output_template_cabe_no_max_path_com_titulo_longo(self, tmp_path):
+        import os
+        from infrastructure.youtube.ytdlp_source import _MAX_PATH
+        titulo = ("Diante da promessa do Senhor | Juízes 1: 11 - 15; | "
+                  "Culto Solene | Rev. Denilson Cunha | 14.09.2025")
+        mp4, _ = self._make_mp4(tmp_path, title=titulo)
+        proc   = _make_process([f'[Merger] Merging formats into "{mp4}"'])
+        captured_cmd = []
+
+        def fake_start(cmd, *a, **kw):
+            captured_cmd.extend(cmd)
+            return proc
+
+        with patch("infrastructure.youtube.ytdlp_source.start_process",
+                   side_effect=fake_start), \
+             patch("infrastructure.youtube.ytdlp_source.ffmpeg_dir", return_value=None), \
+             patch.object(YtDlpAudioDownloader, "_save_extras"), \
+             patch("subprocess.run", return_value=self._run_ok()):
+            self._dl().download([self._seg(title=titulo)], str(tmp_path))
+
+        template = captured_cmd[captured_cmd.index("--output") + 1]
+        # o pior caso é o .description que o yt-dlp grava com esse mesmo nome
+        caminho = template.replace(".%(ext)s", ".description")
+        assert len(caminho) <= _MAX_PATH
+
+    def test_porcento_no_titulo_e_escapado_no_template(self, tmp_path):
+        """`%` solto quebraria o parsing do template de saída do yt-dlp."""
+        mp4, _ = self._make_mp4(tmp_path, title="Culto 100% Graça")
+        proc   = _make_process([f'[Merger] Merging formats into "{mp4}"'])
+        captured_cmd = []
+
+        def fake_start(cmd, *a, **kw):
+            captured_cmd.extend(cmd)
+            return proc
+
+        with patch("infrastructure.youtube.ytdlp_source.start_process",
+                   side_effect=fake_start), \
+             patch("infrastructure.youtube.ytdlp_source.ffmpeg_dir", return_value=None), \
+             patch.object(YtDlpAudioDownloader, "_save_extras"), \
+             patch("subprocess.run", return_value=self._run_ok()):
+            self._dl().download([self._seg(title="Culto 100% Graça")],
+                                str(tmp_path))
+
+        template = captured_cmd[captured_cmd.index("--output") + 1]
+        assert "100%% Graça" in template
 
     def test_video_completo_sem_download_sections(self, tmp_path):
         mp4, _ = self._make_mp4(tmp_path)
@@ -1483,3 +1554,90 @@ class TestConvertToMp3:
             dl._convert_to_mp3(str(mp4), str(mp3), on_log=logs.append)
 
         assert any("MP3" in m or "Conver" in m for m in logs)
+
+
+# ===========================================================================
+# build_output_names — orçamento de MAX_PATH
+# ===========================================================================
+
+class TestBuildOutputNames:
+    """
+    Regressão de produção (log de 14/09/2025): título de 99 caracteres num
+    downloads/ a 70 caracteres da raiz gerava um caminho de 273 chars. O
+    yt-dlp falhava com "Cannot write video description file ..." e encerrava
+    com código 1, sem nenhuma pista de que o problema era o tamanho.
+    """
+
+    # O caso real que quebrou
+    TITULO_LONGO = ("Diante da promessa do Senhor | Juízes 1: 11 - 15; | "
+                    "Culto Solene | Rev. Denilson Cunha | 14.09.2025")
+    DL = r"C:\Users\rasantos\PythonProjects\youtube-to-drive-ipmadalena\downloads"
+
+    def _nomes(self, output_dir, titulo):
+        from infrastructure.youtube.ytdlp_source import build_output_names
+        return build_output_names(output_dir, titulo)
+
+    def _maior_caminho(self, output_dir, pasta, arquivo):
+        """Caminho mais longo que o pipeline escreve para esse nome."""
+        import os
+        return max(
+            len(os.path.join(output_dir, pasta, arquivo + suf))
+            for suf in (".description", ".mp4.part", ".f251.webm",
+                        ".mp3.tmp", ".zip")
+        )
+
+    def test_caso_real_passa_a_caber_no_max_path(self):
+        from infrastructure.youtube.ytdlp_source import _MAX_PATH
+        pasta, arquivo = self._nomes(self.DL, self.TITULO_LONGO)
+        assert self._maior_caminho(self.DL, pasta, arquivo) <= _MAX_PATH
+
+    def test_titulo_curto_nao_e_alterado(self):
+        from infrastructure.youtube.ytdlp_source import sanitize_folder_name
+        titulo = "Começando bem | Juízes 1.1-10 | Culto Solene | 31.08.2025"
+        pasta, arquivo = self._nomes(self.DL, titulo)
+        assert pasta == sanitize_folder_name(titulo)
+        assert arquivo == pasta
+
+    def test_pasta_e_arquivo_usam_o_mesmo_nome(self):
+        """O nome entra duas vezes no caminho — a conta precisa contar as duas."""
+        pasta, arquivo = self._nomes(self.DL, self.TITULO_LONGO)
+        assert pasta == arquivo
+
+    def test_titulo_absurdo_e_truncado(self):
+        from infrastructure.youtube.ytdlp_source import _MAX_PATH
+        pasta, arquivo = self._nomes(self.DL, "A" * 500)
+        assert self._maior_caminho(self.DL, pasta, arquivo) <= _MAX_PATH
+
+    def test_diretorio_fundo_encurta_mais_o_nome(self):
+        """Quanto mais fundo o downloads/, menos sobra para o nome."""
+        curto = self._nomes(r"C:\dl", self.TITULO_LONGO)[0]
+        fundo = self._nomes("C:\\" + "\\".join(["pasta"] * 20),  # ~120 chars
+                            self.TITULO_LONGO)[0]
+        assert len(fundo) < len(curto)
+
+    def test_diretorio_raso_preserva_o_titulo_inteiro(self):
+        from infrastructure.youtube.ytdlp_source import sanitize_folder_name
+        pasta, _ = self._nomes(r"C:\dl", self.TITULO_LONGO)
+        assert pasta == sanitize_folder_name(self.TITULO_LONGO)
+
+    def test_nome_nunca_fica_abaixo_do_piso(self):
+        from infrastructure.youtube.ytdlp_source import _MIN_NOME
+        pasta, _ = self._nomes("C:\\" + "x" * 240, self.TITULO_LONGO)
+        assert len(pasta) >= _MIN_NOME
+
+    def test_nome_truncado_nao_termina_em_espaco_ou_ponto(self):
+        """Windows rejeita nomes terminados em '.' ou ' '."""
+        for titulo in ("Culto de Domingo. " * 20, "Palavra . . . " * 20):
+            pasta, arquivo = self._nomes(self.DL, titulo)
+            assert not pasta.endswith((" ", "."))
+            assert not arquivo.endswith((" ", "."))
+
+    def test_caracteres_proibidos_continuam_removidos(self):
+        pasta, _ = self._nomes(self.DL, 'a/b\\c:d*e?f"g<h>i|j')
+        for ch in '\\/:*?"<>|':
+            assert ch not in pasta
+
+    def test_titulo_vazio_vira_video(self):
+        pasta, arquivo = self._nomes(self.DL, "")
+        assert pasta == "video"
+        assert arquivo == "video"

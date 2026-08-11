@@ -427,7 +427,59 @@ def sanitize_folder_name(title: str) -> str:
     """
     sanitized = re.sub(r'[\\/:*?"<>|]', '', title)
     sanitized = re.sub(r'\s+', ' ', sanitized).strip().rstrip('. ')
-    return sanitized[:150] if sanitized else "video"
+    return _truncar_nome(sanitized, 150) if sanitized else "video"
+
+
+# ---------------------------------------------------------------------------
+# Orçamento de tamanho de caminho (MAX_PATH do Windows)
+# ---------------------------------------------------------------------------
+
+# Sem `LongPathsEnabled` no registro, a API Win32 rejeita caminhos com 260+
+# caracteres. O yt-dlp falha com "Cannot write video description file ..." e
+# encerra com código 1 — sem pista de que o problema é o tamanho do caminho.
+_MAX_PATH = 260
+
+# Folga para os sufixos que o yt-dlp e o pipeline acrescentam ao nome base:
+# ".description" (12), ".mp4.part" (9), ".f251.webm" (10), ".mp3.tmp" (8).
+_RESERVA_SUFIXO = 20
+
+# Piso: abaixo disso o nome deixa de identificar o episódio. Se nem isso couber,
+# o problema é a pasta de downloads estar fundo demais na árvore.
+_MIN_NOME = 24
+
+
+def _truncar_nome(nome: str, limite: int) -> str:
+    """Corta em ``limite`` caracteres sem deixar espaço/ponto no fim."""
+    if limite <= 0:
+        return ""
+    return nome[:limite].rstrip(". ")
+
+
+def build_output_names(output_dir: str, title: str) -> Tuple[str, str]:
+    """
+    Devolve ``(nome_da_subpasta, nome_do_arquivo)`` que caibam no MAX_PATH.
+
+    O mesmo nome sanitizado é usado para a subpasta e para os arquivos dentro
+    dela, então o caminho final é
+    ``output_dir\\<nome>\\<nome><sufixo>`` — o nome entra DUAS vezes na conta.
+    Antes o arquivo usava o template ``%(title)s`` do yt-dlp, que ignora esse
+    orçamento (e reintroduz caracteres de largura total no lugar de ``|`` e
+    ``:``): um culto com título longo estourava os 260 caracteres e o download
+    morria antes de começar.
+
+    Quando não há espaço, o nome é truncado (nunca abaixo de ``_MIN_NOME``);
+    o chamador loga o ajuste.
+    """
+    nome = sanitize_folder_name(title)
+
+    # 2 separadores: output_dir\nome\nome
+    orcamento = _MAX_PATH - len(output_dir) - 2 - _RESERVA_SUFIXO
+    limite = max(_MIN_NOME, orcamento // 2)
+
+    if len(nome) > limite:
+        nome = _truncar_nome(nome, limite) or "video"
+
+    return nome, nome
 
 
 class YtDlpAudioDownloader:
@@ -516,12 +568,22 @@ class YtDlpAudioDownloader:
             check_cancel(cancel_event)
 
             # ── 1. Subpasta por segmento ────────────────────────────────────
-            safe_title = sanitize_folder_name(seg.title)
-            subfolder  = os.path.join(output_dir, safe_title)
+            # Nome da pasta E dos arquivos com orçamento de MAX_PATH: o mesmo
+            # nome entra duas vezes no caminho final.
+            nome_pasta, nome_arquivo = build_output_names(output_dir, seg.title)
+            if nome_pasta != sanitize_folder_name(seg.title):
+                log(f"  Nome encurtado para caber no limite de "
+                    f"{_MAX_PATH} caracteres do Windows: '{nome_arquivo}'")
+
+            subfolder = os.path.join(output_dir, nome_pasta)
             os.makedirs(subfolder, exist_ok=True)
 
-            url             = f"https://www.youtube.com/watch?v={seg.video_id}"
-            output_template = os.path.join(subfolder, "%(title)s.%(ext)s")
+            url = f"https://www.youtube.com/watch?v={seg.video_id}"
+            # `%` do título precisa ser escapado: o -o do yt-dlp é um template
+            # de formatação e um `%` solto quebraria o parsing.
+            output_template = os.path.join(
+                subfolder, f"{nome_arquivo.replace('%', '%%')}.%(ext)s"
+            )
 
             status(f"Baixando vídeo {idx + 1} de {total}...")
             log(f"Baixando: {seg.title}")
