@@ -46,7 +46,7 @@ youtube_to_drive/
 │   ├── ports.py                    IVideoSource, IVideoFetcher, IChapterSource,
 │   │                                IAudioDownloader, IAudioEditor, IArchiver,
 │   │                                ICloudStorage, IHistoryRepository,
-│   │                                IConfigRepository, INotifier
+│   │                                IConfigRepository, INotifier, ISpotifySession
 │   └── exceptions.py               IPMadalenaError, OperacaoCancelada, DomainError, ...
 │
 ├── infrastructure/                 ← adaptadores que implementam os ports
@@ -62,6 +62,8 @@ youtube_to_drive/
 │   │   └── gdrive_storage.py       GoogleDriveStorage, _ProgressFile
 │   ├── persistence/
 │   │   └── json_repositories.py    JsonHistoryRepository, JsonConfigRepository
+│   ├── spotify/
+│   │   └── session.py              SpotifyWebSession (perfil persistente + login)
 │   ├── notification/
 │   │   └── plyer_notifier.py       PlyerNotifier
 │   └── updater/
@@ -159,6 +161,7 @@ Todos os Protocols do domínio têm implementação concreta em `infrastructure/
 | `IHistoryRepository` | `infrastructure.persistence.json_repositories.JsonHistoryRepository` |
 | `IConfigRepository` | `infrastructure.persistence.json_repositories.JsonConfigRepository` |
 | `INotifier` | `infrastructure.notification.plyer_notifier.PlyerNotifier` |
+| `ISpotifySession` | `infrastructure.spotify.session.SpotifyWebSession` |
 
 ## Fluxo de execução (GUI)
 
@@ -375,7 +378,7 @@ Esta seção é a **norma para qualquer mudança ou adição** ao projeto. Segui
 
 ## 6. Antes de fazer push
 
-1. `python -m pytest tests/` — DEVE passar 100% (atualmente 1010/1010).
+1. `python -m pytest tests/` — DEVE passar 100% (atualmente 1195/1195, ~33 s num único processo).
 2. Atualizar `CLAUDE.md` se a arquitetura, convenções ou estrutura mudaram.
 3. Atualizar `README.md` se o comportamento visível ao usuário/dev mudou.
 4. Mensagem de commit em formato convencional: `feat:`, `fix:`, `refactor:`, `docs:`, `test:`, `chore:`.
@@ -400,7 +403,8 @@ Módulo "raiz" do projeto: hospeda constantes, configuração OAuth, utilidades 
 - **Re-export:** `OperacaoCancelada` é importada de `domain.exceptions` (mesma classe; código legado que importa de `baixar_audio` continua funcionando).
 - **`GITHUB_REPO`:** `"rodrigoleao111/youtube-to-drive-ipmadalena"` — repo usado pelo worker de auto-update para consultar GitHub Releases.
 - **`VINHETAS_DIR`:** `BASE_DIR/assets/vinhetas/` — pasta interna do app onde as vinhetas selecionadas pelo usuário são copiadas. Sobrevive a renomeações da pasta original.
-- **`config_repo()`:** público (não mais `_config_repo`) — fábrica do `JsonConfigRepository` com defaults do projeto, incluindo `audio_edit` (config padrão do pipeline de edição), `upload_to_drive: True` (toggle de upload), `save_video: False` (manter MP4 após conversão) e `spotify` (`show_id`, `title_prefix`, `default_tags`). Usado pelo composition root para injetar o repo em use cases.
+- **`SPOTIFY_PROFILE_DIR`:** `BASE_DIR/credentials/spotify/` — perfil do navegador embutido usado no Spotify (cookies de sessão). Fica junto do `token.pkl` porque é da mesma natureza (credencial do usuário) e, como aquela pasta, **não é removido na desinstalação**.
+- **`config_repo()`:** público (não mais `_config_repo`) — fábrica do `JsonConfigRepository` com defaults do projeto, incluindo `audio_edit` (config padrão do pipeline de edição), `upload_to_drive: True` (toggle de upload), `save_video: False` (manter MP4 após conversão) e `spotify` (`show_id`, `title_prefix`, `default_tags`, `logged_in`). **O merge de defaults é raso** (`data.setdefault` por chave de topo), então configs existentes chegam com o dict `spotify` antigo, sem `logged_in` — leia sempre com `.get("logged_in", False)`. Usado pelo composition root para injetar o repo em use cases.
 - **`audio_edit_persist_paths(d)` / `audio_edit_resolve_paths(d)`:** convertem entre formato persistido (basename) e runtime (path absoluto em `VINHETAS_DIR`). Chamados respectivamente no save da UI e no load do `EditAudioUseCase`. Configs antigas com paths absolutos continuam funcionando (resolve só age em paths não-absolutos).
 
 ## `infrastructure/youtube/`
@@ -415,7 +419,10 @@ Módulo "raiz" do projeto: hospeda constantes, configuração OAuth, utilidades 
 - **`extract_video_id(url) -> str | None`:** pura, sem I/O. Aceita `watch?v=`, `youtu.be/`, `/live/`, `/shorts/`, `/embed/`, `/v/`, hosts `m.`/`music.`/`youtube-nocookie`, URL sem esquema e o ID cru de 11 caracteres; ignora query extra (`&t=`, `&list=`, `?si=`). Retorna `None` para qualquer outra coisa — é o validador que `app._start_by_link()` usa **antes** de abrir thread ou subprocess.
 - **`YtDlpVideoSource.fetch_video(url)`:** resolve UM vídeo pelo link (modo link da tela Processar). Mesmo `--print` de `list_videos` (formato reaproveitado), mas com `--no-playlist` (links de live vêm com `&list=`) e sem filtro de data. Usa só a primeira linha com `|||`, mas continua drenando o stdout para não travar o subprocess com o pipe cheio. Levanta `VideoNaoEncontrado` se o link for inválido (sem chamar yt-dlp), se não houver saída ou se o returncode for != 0.
 - **`_normalize_upload_date(value)`:** o yt-dlp imprime `NA` quando não há data de publicação; vira string vazia para o chamador aplicar seu fallback.
-- **`YtDlpVideoSource.list_videos`:** `--simulate --print "%(id)s|||%(title)s|||%(upload_date)s"` + `--dateafter (data-1d)` + `--break-on-reject` (o canal tem ~1300 vídeos — sem isso varre tudo). Filtra `upload_date ∈ {data_alvo, data_alvo+1}` (lives publicadas com data posterior ao culto). `--socket-timeout 30`. Levanta `VideoNaoEncontrado` se nenhum vídeo bate.
+- **`YtDlpVideoSource.list_videos`:** busca em **duas fases + fallback** (medido em 13/08/2026: o caminho antigo — `--dateafter` + `--break-on-reject` com extração completa por vídeo — levava ~19 s para a data mais recente, sendo ~15 s só enumerando as ~1400 entradas da aba antes de extrair qualquer vídeo, e crescia ~1,5 s por vídeo mais novo que o alvo; o novo caminho faz a mesma data em ~5,6 s):
+  1. **Fase rápida** (`_buscar_candidatos_flat`): `--flat-playlist --lazy-playlist --extractor-args youtubetab:approximate_date` — o yt-dlp converte o "Streamed X ago" em data APROXIMADA sem extrair cada vídeo (1 requisição por ~30 entradas, ~0,2 s cada; `--lazy-playlist` é obrigatório: sem ele o yt-dlp enumera a aba INTEIRA antes de imprimir a 1ª linha). Seleciona candidatos numa janela de tolerância: 3 dias para trás (fixa — o YouTube arredonda a idade para baixo, então a data aproximada nunca é muito anterior à real) e `_flat_janela_futuro_dias(idade)` para frente (7/12/35/400 dias — a resolução do "X ago" piora com a idade; buckets de anos colapsam numa única data). A leitura PARA após 5 entradas consecutivas mais antigas que a janela (lista decrescente por data) e o subprocess é encerrado com `terminate()`. Entradas `NA` (live em andamento/agendada) só entram como candidatas quando o alvo é ~hoje (máx. 5).
+  2. **Confirmação** (`_confirmar_datas`): extração completa SÓ dos candidatos (um único processo yt-dlp com todas as watch URLs, `--ignore-errors` para candidato privado/removido não abortar os demais) + o filtro exato de sempre: `upload_date ∈ {data_alvo, data_alvo+1}`.
+  3. **Fallback** (`_listar_por_varredura`): se a fase rápida/confirmação não achar nada, roda o caminho original (`--dateafter (data-1d)` + `--break-on-reject`, extração por vídeo) — o resultado final é sempre idêntico ao comportamento antigo, inclusive o `VideoNaoEncontrado`. Custo: o caso "data sem culto" paga as duas buscas (~23 s), mas o caso de sucesso — o uso real — fica 3–4× mais rápido.
 - **`YtDlpAudioDownloader.download`:** fluxo MP4-first — para cada segmento: (1) cria subpasta `output_dir/{nome de build_output_names}/`, (2) baixa MP4 via yt-dlp com `-f bestvideo[ext=mp4]+bestaudio[ext=m4a]/... --merge-output-format mp4`, (3) salva `capa.jpg` via CDN do YouTube e `descricao.txt` via `metadata_fetcher` (best-effort), (4) converte MP4 → MP3 via `subprocess.run` com ffmpeg (`-vn -acodec libmp3lame -q:a 0 -f mp3`), (5) se `save_video=False` (default), remove o MP4. Retorna `AudioFile` com `subfolder` preenchido. Caminho do MP4 resolvido: linha `[Merger] Merging formats into "..."` > `[download] Destination: *.mp4` > glob `*.mp4` na subpasta.
 - **`sanitize_folder_name(title) -> str`:** remove caracteres proibidos no Windows (`\\/:*?"<>|`), colapsa espaços, remove `.` e espaços no final, trunca a 150 chars.
 - **`build_output_names(output_dir, title) -> (pasta, arquivo)`:** aplica o **orçamento de `MAX_PATH`** (260 chars sem `LongPathsEnabled`) e devolve o mesmo nome para a subpasta e para os arquivos dentro dela — o nome entra **duas vezes** no caminho (`output_dir\<nome>\<nome><sufixo>`), então o limite por nome é `(260 − len(output_dir) − 2 − 20) // 2`, com piso de 24 chars. Os 20 chars de folga cobrem os sufixos que o pipeline acrescenta (`.description`, `.mp4.part`, `.f251.webm`, `.mp3.tmp`, `.zip`).
@@ -459,6 +466,24 @@ Módulo "raiz" do projeto: hospeda constantes, configuração OAuth, utilidades 
 - **`_version_tuple(v)`:** converte `"v3.2.0"` ou `"3.2.0"` em `(3, 2, 0)` para comparação numérica segura.
 - **Sem dependências externas** — usa apenas stdlib (`urllib`, `json`).
 
+## `infrastructure/spotify/session.py`
+
+Sessão do usuário no Spotify for Creators. **Leia o docstring do módulo antes de
+mexer** — ele registra as medições que sustentam o desenho.
+
+- **Por que existe:** o `QWebEngineView()` sem perfil explícito usa o perfil padrão do Qt, que no Qt 6 é *off-the-record* (`isOffTheRecord() == True`, `NoPersistentCookies` — medido no Qt 6.11). O login morria ao fechar a janela e o usuário reautenticava a cada publicação.
+- **`SpotifyWebSession(storage_dir, config_repo)`:** dona do perfil e do estado. Uma instância por execução (o `App` guarda em `self._spotify_session`) — dois `QWebEngineProfile` sobre o mesmo diretório disputariam o banco de cookies.
+- **`login_url()` = `accounts.spotify.com/login?continue=<CREATORS_HOME_URL>`.** **Nunca use a área autenticada do Creators como porta de entrada do login.** Deslogado, o roteador dela falha a autenticação silenciosa e **não** segue para a tela de credenciais — a janela fica carregando para sempre. Regressão de campo (reproduzida aqui): console com `[AuthRouter] auth error {"error": "login_required"}` + `requestStorageAccess: Permission denied`, 25 s parado em `/pod/dashboard` com a página em branco e depois só o banner de consentimento. A tela de credenciais renderiza de imediato e é estável. O `continue` faz o Spotify devolver o usuário ao Creators depois do login — é o que produz a transição usada como prova.
+- **`profile()`:** cria o `QWebEngineProfile` NOMEADO (`PROFILE_NAME = "ipmadalena_spotify"`, estável entre versões — mudá-lo perderia o login dos usuários) com `persistentStoragePath`, `cachePath` e `ForcePersistentCookies`. **Criação tardia**: instanciar a sessão não inicializa o QtWebEngine, só o primeiro uso.
+- **`desktop_user_agent(ua)`:** remove o token `QtWebEngine/<versão>` do UA padrão, sobrando um UA de Chrome legítimo na versão do Chromium embarcado. Derivado do padrão (em vez de string fixa) para não envelhecer a cada atualização do Qt.
+- **`classify_url(url) -> 'logged_in' | 'logged_out' | 'unknown'`:** função pura. `accounts.spotify.com` → deslogado; `creators.spotify.com` com path além de `/` → logado; resto → desconhecido. A **raiz** `creators.spotify.com/` é a landing page de marketing e carrega deslogada — por isso não conta.
+- **`classify(url)` (não persiste) × `mark_logged_in(bool)` (persiste):** a separação é o cerne. Uma URL isolada NÃO prova sessão:
+  1. o desvio do Creators para o login é feito pelo site, não por um 302 — `urlChanged` e o primeiro `loadFinished` chegam com a URL interna ainda no lugar (medido: deslogado, os dois dizem `logged_in`);
+  2. pior, com o banner de consentimento de cookies na tela a página **fica** na URL interna indefinidamente (medido: 20 s parada em `/pod/dashboard`). Nenhum tempo de espera transforma "continuo na URL interna" em prova de sessão.
+  O veredito **negativo**, sim, é conclusivo. Quem decide o positivo é a janela de login, exigindo a transição `logged_out → logged_in` (ver `app.py`).
+- **`is_logged_in()`:** exige o flag `spotify.logged_in` **e** o diretório do perfil em disco — se o usuário apagou `credentials/`, o flag estaria mentindo.
+- **`logout()`:** `deleteAllCookies()` só funciona se o perfil já carregou uma página nesta execução (o contexto de rede do Chromium nasce sob demanda); apagar os arquivos só funciona se o Chromium ainda não os abriu (no Windows o banco fica travado). Então: perfil nunca instanciado → `rmtree` na hora; perfil vivo → limpa cookies + grava o marcador `<storage_dir>.wipe`, e `_apply_pending_wipe()` (no construtor) apaga a pasta na próxima abertura. O marcador fica FORA da pasta para não ser removido pelo próprio `rmtree`.
+
 ## `infrastructure/notification/plyer_notifier.py`
 
 - **`PlyerNotifier.notify(title, message, *, app_name="IPMadalena", timeout=8)`:** import lazy de `plyer.notification` (evita carregar plyer se nunca chamado). Best-effort: `try/except: pass` envolve toda a chamada — plyer ausente, sem DBus, etc., são silenciados. Não interrompe o fluxo principal.
@@ -493,12 +518,13 @@ Módulo "raiz" do projeto: hospeda constantes, configuração OAuth, utilidades 
 
 - **`build_processing_presenter()`:** constrói um `ProcessingPresenter` fresco com toda a infraestrutura wired. `list_videos_uc`, `chapters_uc` e `fetch_video_uc` compartilham a MESMA instância de `YtDlpVideoSource` (é stateless). Reconstruir a cada chamada permite refletir mudanças em `drive_folder_id`/`channel_url` que o usuário tenha feito desde a última invocação. Lê config via `baixar_audio.load_config()` (público).
 - **`build_notifier()`:** retorna um `PlyerNotifier`.
+- **`build_spotify_session()`:** retorna a `SpotifyWebSession` apontando para `baixar_audio.SPOTIFY_PROFILE_DIR`, com o `JsonConfigRepository` injetado. Deve ser chamado **uma vez por execução** — o `App` guarda a instância.
 - Único módulo do projeto que conhece todas as camadas. Eliminou a duplicação de wiring que existia entre `app._build_presenter()` e `baixar_audio.run()`.
 
 ## `app.py`
 
 - **Framework:** PyQt6. **Janela:** `QMainWindow` com sidebar à esquerda + `QStackedWidget` à direita (4 páginas: Início / Processar / Histórico / Configurações).
-- **`APP_VERSION`:** constante de módulo (`"v3.5.0"`) usada na sidebar e no rodapé da aba Configurações. Bumpar aqui ao fechar cada versão — e **também o `#define AppVersion` do `installer.iss`**, que ficou parado no 3.0.0 por quatro versões.
+- **`APP_VERSION`:** constante de módulo (`"v3.5.1"`) usada na sidebar e no rodapé da aba Configurações. Bumpar aqui ao fechar cada versão — e **também o `#define AppVersion` do `installer.iss`**, que ficou parado no 3.0.0 por quatro versões.
 - **`_build_palette(dark: bool) -> QPalette`:** constrói a QPalette correta para modo escuro/claro. Chamada no startup (`_q.setPalette(...)`) e em `_toggle_theme`. Necessária porque o QSS global **não** define mais `background-color` na regra `QWidget` — o Fusion style usa a QPalette para pintar controles (`QComboBox`, `QDoubleSpinBox`, `QTabBar`, etc.) que não têm regra QSS explícita.
 - **Página Início (`_build_home_page`):** lista arquivos MP3 em `DOWNLOAD_DIR` como cards (220×262 px). Topbar com `QComboBox` de ordenação ("Mais recentes" / "A–Z"). Estado vazio com ícone grande + instrução de ação. Subtítulo mostra contagem e tamanho total. Badge "✓ Enviado ao Drive" (verde) ou "● Local" (cinza) detectado pelo título do arquivo vs. `historico.json`. Botão "↑" (SP_ArrowUp) dispara re-upload individual em thread daemon; botão lixeira (SP_TrashIcon) exclui local com confirmação em português.
 - **`_reupload_file(fpath, btn)`:** constrói `AudioFile(video_id="")` com `mtime` como `date_str`, chama `upload_uc.execute()` em thread, atualiza badge via `QTimer.singleShot(0, _refresh_home)`.
@@ -519,7 +545,7 @@ Módulo "raiz" do projeto: hospeda constantes, configuração OAuth, utilidades 
 - **Página Configurações (`_build_config_page`):** título + subtítulo + **`QTabWidget`** com 4 abas (ícones SVG reais via `_logo_icon()`):
   - **Drive** (`_build_drive_tab`): toggle "Fazer upload para o Drive" (primeiro, controla todos os outros), auth Google Drive, pasta Drive, manter arquivos, **salvar vídeo (MP4)** (`_cfg_save_video_check`, default=False), abrir log. Quando o toggle está desmarcado, os cards dependentes são desabilitados e o upload é pulado pelo presenter.
   - **YouTube** (`_build_youtube_tab`): canal YouTube, capítulo automático.
-  - **Spotify** (`_build_spotify_tab`): Show ID, prefixo de título, tags padrão.
+  - **Spotify** (`_build_spotify_tab`): **conta** (status + Entrar/Sair + aviso do que falta), Show ID, prefixo de título, tags padrão. O card de conta é o primeiro porque sem login não há publicação, mesmo com Show ID.
   - **Edição de áudio** (instância de `_AudioSettingsTab`): 4 cards funcionais (vinhetas, fade, EQ, redução de ruído) + card de teste de configuração.
   - Save unificado no rodapé (`_cfg_save`): persiste TODAS as abas em uma única gravação — evita o footgun de o usuário clicar Save com a aba errada visível e perder mudanças.
 - **`_AudioSettingsTab(QWidget)`:** widget self-contained com a sub-aba de edição de áudio. Lê `audio_edit` do `config.json` no construtor (basenames são expandidos para abs paths via `audio_edit_resolve_paths`). Expõe `read_config_from_ui()` para o save unificado da página principal.
@@ -532,8 +558,26 @@ Módulo "raiz" do projeto: hospeda constantes, configuração OAuth, utilidades 
 - **`_start()`** apenas despacha para `_start_by_date()` ou `_start_by_link()`; a preparação comum (checagem de auth + reset da UI + `_running=True`) vive em **`_prepare_run() -> bool`**, que retorna `False` sem tocar na UI quando o Drive não está autorizado.
 - **`_start_by_link()`:** valida com `extract_video_id` antes de qualquer thread; erro de link mostra exemplos dos formatos aceitos.
 - **`_worker_link(url)`:** delega a `Presenter.fetch_video`, deriva `date_str` de `_upload_date_to_br(video["upload_date"])` e enfileira `("check_chapters", (date_str, [video]))` — reaproveitando todo o fluxo a partir da detecção de capítulos. Mesmas conversões de exceção dos outros workers.
-- **`_on_done()`:** salva histórico (`baixar_audio.save_history`) + notificação via `self._notifier.notify(...)` (instância de `PlyerNotifier`). Se `_spotify_pending` for não-None, agenda `_show_spotify_predialog` via `QTimer.singleShot(800, ...)` e zera o campo.
-- **Spotify publishing:** `_worker_phase2` popula `_spotify_pending` (dict com `show_id`, `video_id`, `title`, `description`, `date_str`, `tags`, `cover_image_path`) quando `show_id` está configurado. A descrição e `cover_image_path` são derivados dos arquivos `descricao.txt` e `capa.jpg` da subpasta do segmento (via `sanitize_folder_name`). `_show_spotify_predialog` localiza o MP3 mais recente em `DOWNLOAD_DIR` — busca em `*.mp3` e `*/*.mp3` (subpastas do novo fluxo) e abre `_SpotifyPrePublishDialog`. `_SpotifyPrePublishDialog`: modal com campos editáveis de título, descrição (pré-preenchida) e tags; ao confirmar, armazena a janela em `parent_app._spotify_window` para evitar GC e abre `_SpotifyPublishWindow`. `_SpotifyPublishWindow(QMainWindow)`: WebView apontando para `https://podcasters.spotify.com/pod/show/{show_id}/episodes/new`; após load injeta `_SPOTIFY_FILL_JS` com `window._spotifyTitle` e `window._spotifyDescription`. `_SpotifyPage` (inner class lazy): sobrescreve `chooseFiles()` detectando MIME `audio/*` vs `image/*` para retornar o arquivo correto automaticamente. **Nota:** `QApplication.setAttribute(AA_ShareOpenGLContexts)` deve ser chamado antes de `QApplication(sys.argv)` para que o `QWebEngineView` funcione no processo principal.
+- **`_on_done()`:** salva histórico (`baixar_audio.save_history`) + notificação via `self._notifier.notify(...)` (instância de `PlyerNotifier`). Se `_spotify_pending` for não-None, zera o campo e chama `_agendar_spotify_predialog(pending)`.
+
+- **`_agendar_spotify_predialog(pending)` / `_abrir_spotify_predialog()`:** agendam a abertura do diálogo de pré-publicação para daqui a `_SPOTIFY_PREDIALOG_MS` (800 ms — deixa a notificação de conclusão aparecer antes de um modal roubar o foco). Usa **um timer próprio, filho do `App`** (`_spotify_predialog_timer`, single-shot, criado no `__init__`) em vez de `QTimer.singleShot`, porque um singleShot solto **não pode ser cancelado**: se o usuário fechasse o app dentro dos 800 ms, o timer órfão abria um modal sobre uma janela morta. O `closeEvent` para o timer e limpa `_spotify_predialog_pending`. Um segundo agendamento **substitui** o anterior (nunca enfileira dois diálogos). Ver também a nota sobre `_sem_timers_orfaos` na seção de testes — esse mesmo timer órfão travava a suíte inteira.
+- **Spotify — gate de duas condições:** **`_spotify_publish_ready() -> (bool, motivo)`** é o portão único: exige Show ID configurado **e** `self._spotify_session.is_logged_in()`. Consultado em três lugares: o botão do Spotify no card da tela Início (existe se há Show ID, mas fica `setEnabled(False)` com o motivo no tooltip), `_spotify_from_local` (aviso e não abre nada) e `_worker_phase2` (não popula `_spotify_pending` e **registra no log** por que não ofereceu — antes esse desvio era silencioso). O motivo volta sem ponto final e sem dizer onde resolver; quem exibe fecha a frase, porque dentro da própria aba de Spotify mandar "ir em Configurações → Spotify" seria absurdo (`_SPOTIFY_ONDE` é o complemento para os outros contextos).
+- **Spotify — conta:** `_refresh_spotify_account()` atualiza status/botão/aviso (chamado no build da aba, em `_open_settings` e após `_cfg_save`, login ou logout). `_spotify_toggle_login()` abre `_SpotifyLoginWindow` ou, se logado, pede confirmação e chama `session.logout()`. **`_cfg_save` preserva `logged_in`**: ele reescreve o dict `spotify` inteiro, e sem essa preservação salvar qualquer configuração deslogaria o usuário.
+- **`_SpotifyLoginWindow(QMainWindow)`:** WebView com `session.profile()` (o perfil persistente) na `session.login_url()` — a tela de credenciais, **não** a área autenticada (ver a seção de `session.py`: entrar por lá deixa a janela carregando para sempre). A detecção exige a **transição** `logged_out → logged_in`: `_on_load_finished` apenas reinicia o timer `_assentar_timer` (2500 ms), e `_on_settled` julga a URL já assentada — tela de credenciais marca `_viu_login = True` (e corrige o flag para deslogado), e uma URL interna do Creators **depois disso** conclui o login. Por que tão indireto: a página fica parada numa URL interna enquanto o banner de consentimento de cookies não é resolvido (medido: 20 s), então "estar numa URL interna" não prova sessão. Botão **"Concluí o login"** (`_confirmar_manual`) é a saída para quem já estava logado (nunca vê a tela de credenciais) e para o caso de a Spotify ignorar o `continue`; se clicado à toa, o flag fica errado só até a próxima publicação, que o corrige.
+- **`_SpotifyPublishWindow(QMainWindow)`:** WebView na `session.wizard_url(show_id)` (= `https://creators.spotify.com/pod/show/{show_id}/episode/wizard` — o domínio `podcasters` é o antigo). Recebe `session` e passa `session.profile()` para a página, o que evita cair na tela de login. Em `_on_load_finished`: se a página recebida é a de credenciais, **não injeta** (o primeiro input visível ali é o campo de e-mail e receberia o título do episódio) e corrige o flag com `mark_logged_in(False)` — só nessa direção, porque este callback também roda antes de um eventual desvio. Caso contrário injeta `_SPOTIFY_FILL_JS` com as variáveis montadas por **`_build_setup_js(title, description)`**.
+- **`_SPOTIFY_FILL_JS` é um observador, não algumas tentativas.** O wizard é uma **SPA**: sair de "Upload" para "Details" não recarrega a página, então `loadFinished` não dispara de novo — e os campos de título/descrição **só existem no segundo passo**. A versão anterior tentava 10 vezes em 6 s, ainda na tela de Upload, desistia, e o episódio subia sem texto (relato de campo: arquivo entrou, título e descrição não). Agora um `MutationObserver` (com debounce de 300 ms) + um timer de 1 s de rede de segurança esperam os campos aparecerem, por até 5 min. Regras: cada campo é preenchido **uma vez** e **só se estiver vazio** (nunca sobrescreve o que o usuário digitou); tudo é registrado via `console.log('[IPMadalena] ...')`, que cai no log do app como linha `js:`.
+- **`_SpotifyPage.javaScriptConsoleMessage` é a ponte do log.** **Não confie no encaminhamento padrão do Qt** — medido, ele não imprimiu nem `console.log` nem `console.error`. Um relato de campo chegou sem nenhuma linha `[IPMadalena]` apesar de o script ter rodado (o título tinha sido preenchido), e foi isso que atrasou o diagnóstico. A página agora intercepta as mensagens prefixadas com `[IPMadalena]` e as manda para `_file_log`; o resto (TikTok Pixel, GraphQL do Creators, etc.) segue o caminho padrão.
+- **Busca em profundidade + diagnóstico:** `acha(seletor)` tenta o `querySelectorAll` simples e, só se não achar nada, varre shadow DOM e iframes de mesma origem. O seletor de descrição é `[contenteditable]` (sem exigir `="true"`, que o atributo aceita vazio e pode ser herdado) validado por `isContentEditable`; "vazio" ignora espaços, `<br>` e caracteres de largura zero que os editores deixam no campo. Quando o título entra mas a descrição não, após 6 s (`window.__ipmDiagnosticoMs`, reduzido nos testes) o script **relata no log** quantos campos existem e por que cada um foi descartado — sem isso, cada falha vira adivinhação.
+- **Dois formatos de campo de descrição:** `textarea` (quando o toggle HTML está ligado) → setter nativo + eventos `input`/`change`; **editor rico** (`[contenteditable="true"]`, o padrão, com barra B/I/U) → `focus()` + `document.execCommand('insertText')`, que gera os eventos que editores tipo Draft.js/ProseMirror esperam — atribuir `textContent` sozinho não basta. No editor rico o texto chega completo, mas o número de linhas em branco entre parágrafos pode variar (o editor cria blocos); por isso o teste compara com as quebras normalizadas.
+- **Título:** procura um `input[type=text]` visível e vazio cujo placeholder/aria-label/name/id case com `name|nome|title|título`; sem pista, só arrisca quando há **exatamente um** candidato — chutar entre vários encheria o campo errado.
+- **`_build_setup_js` usa `json.dumps`, não escape manual.** O escape anterior tratava só `\` e `'` — e a descrição do YouTube é multi-linha (as reais têm ~25 linhas e emoji). Uma quebra de linha crua dentro de `'...'` invalida o script, ele falha **em silêncio**, e aí NEM o título é preenchido, porque o preenchedor só age se a variável existir. Medido numa página real: com descrição multi-linha as duas chegavam `undefined`; com `json.dumps`, input e textarea são preenchidos com as 25 linhas íntegras. O `ensure_ascii` padrão ainda escapa U+2028/U+2029, válidos em JSON mas quebrados como literal de string em JS antigo.
+- **`App._spotify_extras(audio_path) -> (descricao, capa)`:** localiza os artefatos que o downloader gravou **na subpasta** (`descricao.txt`, `capa.jpg`), com fallback para o formato antigo (`<base>.txt`, `<base>.jpg`) e para leitura em cp1252 quando o arquivo não é UTF-8 (melhor descrição com caractere torto do que campo vazio). Usado por `_spotify_from_local` — que antes passava `description=""` fixo e procurava a capa só pelo nome do áudio, então publicar pela tela Início abria sempre sem descrição e sem miniatura — e como fallback em `_show_spotify_predialog`.
+- **`_worker_phase2` → `_spotify_pending`:** dict com `show_id`, `video_id`, `title`, `description`, `date_str`, `tags`, `cover_image_path`. Descrição e capa vêm de `descricao.txt` e `capa.jpg` da subpasta do segmento, derivada com **`build_output_names`** (não `sanitize_folder_name` — ver a seção de `ytdlp_source`). `_show_spotify_predialog` localiza o MP3 mais recente em `DOWNLOAD_DIR` (`*.mp3` e `*/*.mp3`) e abre `_SpotifyPrePublishDialog`: modal com título, descrição e tags editáveis; ao confirmar, guarda a janela em `parent_app._spotify_window` (evita GC) e abre `_SpotifyPublishWindow`.
+- **`_spotify_top_bar(esquerda, direita) -> QWidget`:** barra das duas janelas do Spotify, com **altura fixa** (`_SPOTIFY_BAR_H = 40`). Não use um `QHBoxLayout` solto aqui: num `QVBoxLayout`, a altura máxima de uma linha aninhada depende dos itens dela e, medido, **muda conforme a ordem** — com o botão (altura fixa) à esquerda e o rótulo (flexível) à direita, a barra da janela de publicação ficava sem limite e comia 503 px de uma janela de 1000 px; com a ordem invertida (janela de login) ficava nos 37 px esperados, ou seja, funcionava por acidente. Os chamadores ainda fazem `layout.addWidget(self._view, 1)` e `layout.setSpacing(0)`, para a sobra ir toda para a página e não sobrar faixa escura entre barra e conteúdo.
+- **`_SpotifyPage._make_page(view, audio_path, cover_path, profile)`:** classe interna lazy; sobrescreve `chooseFiles()` para devolver o arquivo certo no lugar do seletor do Windows. O `profile` é opcional: sem ele a página cai no perfil padrão do Qt (off-the-record) e o login se perde.
+- **`_spotify_tipo_pedido(accepted)`:** traduz a lista de tipos aceitos em `imagem` / `audio` / `indefinido`. **O `accept` de um `<input>` pode ser MIME (`audio/*`) OU extensão (`.mp3,.m4a,...`), e o QtWebEngine repassa cru, sem normalizar.** O formulário do Spotify usa extensões — medido, chega `['.mp3', '.m4a', '.wav', '.mpg', '.mp4', '.mov']`. A detecção antiga procurava a palavra "audio" nos MIMEs, não casava, e o `chooseFiles` caía no `super()`, abrindo o Explorer: o arquivo não era preenchido sozinho. Regras: imagem é testada primeiro (o passo da capa aceita só imagem, o do episódio aceita áudio **e** vídeo); `indefinido` (accept ausente) cai no áudio, que é o passo obrigatório do wizard. `chooseFiles` registra no log o que entregou — antes o desvio era invisível.
+- **Limite do preenchimento automático:** o arquivo só entra quando o usuário clica em "Select a file"; o navegador exige gesto do usuário para abrir o seletor (verificado: `input.click()` via `runJavaScript` não dispara `chooseFiles`). Preencher sem clique algum exigiria injetar os bytes na página (base64 → `File` → `DataTransfer` → evento `drop`) — com MP3 de ~52 MB isso vira uma string JS de ~70 MB, além de depender do handler de drop interno do site.
+- **Nota:** `QApplication.setAttribute(AA_ShareOpenGLContexts)` deve ser chamado antes de `QApplication(sys.argv)` para que o `QWebEngineView` funcione no processo principal.
 - **Mensagens da fila:** `log`, `status`, `progress`, `download_progress`, `edit_progress`, `upload_stats`, `done`, `cancelled`, `error`, `preflight_error`, `history_warning`, `auth_done`, `auth_error`, `select_videos`, `open_player`.
 - **Modo subprocesso do player (frozen exe):** `app.py` detecta `--player-mode-qt` antes de qualquer import Qt; importa `player_subprocess_qt` e chama `main()`, encerrando em seguida — permite que `IPMadalena.exe --player-mode-qt` rode o player sem inicializar a GUI principal.
 
@@ -561,7 +605,7 @@ Indicador de passos: dots coloridos — verde (concluído), azul (atual), cinza 
 
 # Comportamento especial — transmissões ao vivo
 
-Cultos ao vivo podem ser publicados no YouTube com a data do dia seguinte ao evento. O script usa `--dateafter (data - 1 dia)` para garantir que o yt-dlp não rejeite esses vídeos, e depois filtra explicitamente por `upload_date ∈ {data_alvo, data_alvo + 1 dia}` — sem esse filtro, todos os vídeos a partir da data seriam retornados.
+Cultos ao vivo podem ser publicados no YouTube com a data do dia seguinte ao evento (o `upload_date` é UTC). Por isso TODAS as fases da busca por data filtram explicitamente por `upload_date ∈ {data_alvo, data_alvo + 1 dia}` — tanto a confirmação da busca rápida quanto a varredura completa (que usa `--dateafter (data - 1 dia)` justamente para o yt-dlp não rejeitar esses vídeos; sem o filtro explícito, todos os vídeos a partir da data seriam retornados).
 
 ---
 
@@ -571,28 +615,61 @@ Cultos ao vivo podem ser publicados no YouTube com a data do dia seguinte ao eve
 tests/
 ├── conftest.py                ← sys.path + fixture shared_app (sessão)
 ├── test_domain.py             ← 105 testes puros do domínio
-├── test_ytdlp_source.py       ← 139 testes da infra YouTube (subprocess mockado)
+├── test_ytdlp_source.py       ← 160 testes da infra YouTube (subprocess mockado)
 ├── test_ffmpeg_editor.py      ← 101 testes do FfmpegAudioEditor (subprocess mockado)
 ├── test_gdrive_storage.py     ← 53 testes do adaptador Drive (HTTP/Drive API mockados)
 ├── test_zip_archiver.py       ← 17 testes do ZipArchiver (I/O real em tmp_path)
+├── test_spotify_session.py    ← 53 testes da SpotifyWebSession (sem Qt e sem rede)
 ├── test_persistence.py        ← 33 testes dos repositórios JSON (I/O real em tmp_path)
 ├── test_plyer_notifier.py     ← 10 testes do PlyerNotifier (plyer mockado)
 ├── test_use_cases.py          ← 57 testes dos use cases (ports mockados)
 ├── test_presenter.py          ← 58 testes do ProcessingPresenter (use cases mockados)
 ├── test_audio_test_presenter.py ← 17 testes do AudioTestPresenter
-├── test_composition_root.py   ← 27 testes do composition root (DI/wiring)
+├── test_composition_root.py   ← 32 testes do composition root (DI/wiring)
 ├── test_baixar_audio.py       ← 38 testes de utilidades + auth wrappers + update_ytdlp
-├── test_app.py                ← 273 testes de integração da GUI
+├── test_app.py                ← 371 testes de integração da GUI
 ├── test_github_updater.py     ← 19 testes do módulo de auto-update (HTTP mockado)
 ├── test_player_window.py      ← 34 testes do PlayerWindow
 └── test_player_window_qt.py   ← 29 testes do PlayerWindowQt
 ```
 
-**Total: 1010 testes.**
+**Total: 1195 testes** (~33 s num único processo; `test_app.py` e `test_player_window_qt.py`, que sobem QtWebEngine, respondem pela maior parte).
 
 > O `_reset_app_state` (autouse) devolve a tela Processar ao modo "busca por
 > data" e limpa o `link_entry` antes de cada teste — sem isso, um teste que
 > muda o modo de entrada contaminaria os seguintes (o `App` é de escopo sessão).
+
+> **`_sem_timers_orfaos` (autouse, `conftest.py`) — por que existe.** O loop de
+> eventos do Qt **não roda** durante os testes (ninguém chama `app.exec()`),
+> então um `QTimer` armado por um teste fica pendente. Quando um teste posterior
+> cria janela Tcl/Tk, o `customtkinter` chama `self.update()` internamente (ao
+> ajustar a cor da barra de título) e o Tcl **pompa a fila de mensagens do
+> Windows** — e com ela os timers do Qt. O callback atrasado dispara ali dentro,
+> fora do teste que o criou. Foi assim que a suíte inteira travava para sempre
+> em `test_player_window.py`: um teste de `_on_done` deixava pendente o timer do
+> diálogo de pré-publicação do Spotify, que abria um modal (`exec()`) dentro do
+> `update()` do Tk, sem ninguém para fechá-lo. A fixture desarma, ao fim de cada
+> teste, os timers de **disparo único** que ficaram ativos nos widgets de topo;
+> os repetitivos (ex.: `_queue_timer`) são estado normal e continuam rodando.
+> Por isso `_spotify_predialog_timer` é filho do `App` e single-shot — é o que o
+> torna visível a `findChildren` e, portanto, à rede de segurança.
+
+> **Watchdog (`pytest.ini`).** `faulthandler_timeout = 60` +
+> `faulthandler_exit_on_timeout` fazem o pytest dumpar a pilha de todas as
+> threads e encerrar quando um teste passa de 60 s. É o que faltava no episódio
+> acima: a suíte parava em ~65 % **sem diagnóstico nenhum**. O teste mais lento
+> hoje leva ~8 s, então 60 s é folga larga — quem estourar está travado, não
+> lento. Para descobrir onde travou, a pilha vai para o stderr; ao rodar em
+> shell não-interativo, redirecione o stderr para arquivo (senão a saída
+> bufferizada se perde quando o processo morre).
+
+> **Spotify nos testes:** o helper `_spotify_logado(app, bool)` (context manager
+> em `test_app.py`) finge o estado de login. Como a publicação exige DUAS
+> condições, um teste que só configura o `show_id` não passa mais pelo gate.
+> As janelas do Spotify NÃO são instanciadas nos testes — construí-las abriria
+> um `QWebEngineView` e faria requisição de rede; a lógica é exercitada
+> chamando os métodos com um stub que carrega só os atributos que eles tocam
+> (`TestSpotifyLoginWindowLogic`, `TestSpotifyPublishWindowGate`).
 
 **Como rodar:**
 ```bash
@@ -833,6 +910,8 @@ App baixa formato 18 e extrai áudio via ffmpeg → MP3. Resultado final equival
 - Listagem retornava vídeos de datas além da data alvo → `--dateafter` só filtra o passado; necessário filtrar `upload_date` explicitamente após receber cada linha do yt-dlp.
 - `player_client=tv_embedded` descontinuado pelo YouTube → substituído por `ios,android,web`.
 - `--date` ignora `--dateafter` no yt-dlp → usar apenas `--dateafter` + `--break-on-reject`.
+- Busca por data lenta (~19 s até para a data mais recente; minutos para datas antigas) → a extração completa por vídeo + enumeração total da aba dominavam o tempo. Resolvido com busca em duas fases (flat playlist com `youtubetab:approximate_date` → confirmação só dos candidatos) e fallback para a varredura original. Medições e janelas de tolerância documentadas em `ytdlp_source.py`.
+- Suíte de testes travando para sempre em ~65 % (primeira janela `CTkToplevel` de `test_player_window.py`) → **não** era incompatibilidade Qt × tkinter. Um teste de `_on_done` armava o `QTimer.singleShot(800, …)` real do diálogo de pré-publicação do Spotify: a lambda resolve `self._show_spotify_predialog` **na hora de disparar**, quando o `patch.object` do teste já foi desfeito. O timer órfão sobrevivia ao teste e disparava dentro do `update()` do Tcl/Tk (que pompa a fila de mensagens do Windows), abrindo um modal `exec()` que nunca retornava. Corrigido em três camadas: (1) `_agendar_spotify_predialog` usa timer próprio, filho do `App`, cancelado no `closeEvent` — o que também conserta o caso real de o diálogo abrir depois de o app fechar; (2) o teste passou a disparar o callback à mão em vez de deixar o timer armado; (3) rede de segurança `_sem_timers_orfaos` + watchdog do `pytest.ini`. Diagnóstico só foi possível com `faulthandler.dump_traceback_later(..., exit=True)` escrevendo num arquivo dedicado.
 - Cancelar operação mostrava popup de erro → separado em mensagem `("cancelled", None)` → `_on_cancelled()` sem popup.
 - Barra de progresso mostrava marcador em 0% → `progress_color=fg_color`.
 - Upload `PermissionError WinError 32` (arquivo em uso) → matar processo Python anterior com `taskkill`.

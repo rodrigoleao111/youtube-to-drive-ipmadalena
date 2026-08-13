@@ -33,6 +33,7 @@ from infrastructure.audio.ffmpeg_editor import FfmpegAudioEditor
 from infrastructure.drive.gdrive_storage import GoogleDriveStorage
 from infrastructure.notification.plyer_notifier import PlyerNotifier
 from infrastructure.persistence.json_repositories import JsonHistoryRepository
+from infrastructure.spotify.session import SpotifyWebSession
 from infrastructure.youtube.ytdlp_source import (
     YtDlpAudioDownloader,
     YtDlpVideoSource,
@@ -91,6 +92,19 @@ def build_processing_presenter() -> ProcessingPresenter:
 def build_notifier() -> PlyerNotifier:
     """Constrói o adaptador de notificações desktop (implementa INotifier)."""
     return PlyerNotifier()
+
+
+def build_spotify_session() -> SpotifyWebSession:
+    """
+    Constrói a sessão web do Spotify (implementa ISpotifySession).
+
+    Deve ser chamado UMA vez por execução e a instância guardada pelo App: dois
+    perfis do QtWebEngine sobre o mesmo diretório disputariam o banco de cookies.
+    """
+    return SpotifyWebSession(
+        storage_dir = baixar_audio.SPOTIFY_PROFILE_DIR,
+        config_repo = baixar_audio.config_repo(),
+    )
 
 
 def build_audio_test_presenter() -> AudioTestPresenter:

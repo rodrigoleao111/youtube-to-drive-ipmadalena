@@ -96,27 +96,270 @@ def _make_process(lines: list[str], returncode: int = 0) -> MagicMock:
     return proc
 
 
+def _start_seq(procs: list) -> tuple:
+    """
+    side_effect para start_process que devolve um processo por chamada,
+    na ordem, capturando cada cmd em uma lista de listas.
+
+    list_videos() pode disparar até 3 subprocessos (flat → confirmação →
+    varredura); com return_value único o MESMO mock seria devolvido para
+    todas as fases e o stdout já estaria esgotado a partir da segunda.
+    """
+    cmds: list[list[str]] = []
+    it = iter(procs)
+
+    def _fake(cmd, *a, **kw):
+        cmds.append(list(cmd))
+        return next(it)
+
+    return _fake, cmds
+
+
 # ===========================================================================
-# YtDlpVideoSource
+# YtDlpVideoSource — busca em duas fases
 # ===========================================================================
+#
+# list_videos() busca em duas fases (rápida + confirmação) com fallback para
+# a varredura completa original. Os testes de orquestração usam datas no
+# PASSADO ("19/04/2026"): a janela da fase rápida só se alarga com o passar
+# do tempo real, então "aprox == alvo" é candidato em qualquer data de
+# execução da suíte.
+
+class TestFlatJanelaFuturoDias:
+    """Janela para FRENTE da data aproximada cresce com a idade do vídeo."""
+
+    def _f(self, idade):
+        from infrastructure.youtube.ytdlp_source import _flat_janela_futuro_dias
+        return _flat_janela_futuro_dias(idade)
+
+    def test_video_recente_janela_de_dias(self):
+        assert self._f(0) == 7
+        assert self._f(10) == 7
+
+    def test_video_de_semanas_janela_maior(self):
+        assert self._f(11) == 12
+        assert self._f(45) == 12
+
+    def test_video_de_meses_janela_de_mes(self):
+        assert self._f(46) == 35
+        assert self._f(400) == 35
+
+    def test_video_de_anos_janela_de_ano(self):
+        # "N years ago" colapsa o bucket inteiro em uma única data aproximada
+        assert self._f(401) == 400
+
+    def test_data_alvo_futura_usa_piso(self):
+        assert self._f(-5) == 7
+
+
+class TestBuscarCandidatosFlat:
+    """
+    Fase rápida: seleção de candidatos pela data APROXIMADA
+    (flat playlist), com relógio fixado via parâmetro ``hoje``.
+    """
+
+    def setup_method(self):
+        from datetime import datetime
+        self.hoje = datetime(2026, 8, 13)
+        self.alvo = datetime(2026, 8, 9)   # idade 4 → janela [20260806, 20260816]
+
+    def _buscar(self, lines, *, alvo=None, cancel_event=None):
+        proc = _make_process(lines)
+        with patch("infrastructure.youtube.ytdlp_source.start_process",
+                   return_value=proc) as sp:
+            ids = YtDlpVideoSource()._buscar_candidatos_flat(
+                alvo or self.alvo, "https://x",
+                cancel_event=cancel_event, hoje=self.hoje,
+            )
+        return ids, proc, sp.call_args[0][0]
+
+    def test_seleciona_apenas_datas_na_janela(self):
+        ids, _, _ = self._buscar([
+            "novo1|||Live futura|||20260830",     # acima da janela → fora
+            "cand1|||Culto quarta|||20260812",    # dentro
+            "cand2|||Culto domingo|||20260810",   # dentro
+            "velho|||Culto antigo|||20260701",    # abaixo → fora
+        ])
+        assert ids == ["cand1", "cand2"]
+
+    def test_ordem_do_canal_preservada_e_sem_duplicatas(self):
+        ids, _, _ = self._buscar([
+            "b|||Culto noite|||20260810",
+            "a|||Culto manhã|||20260809",
+            "b|||Culto noite repetido|||20260810",
+        ])
+        assert ids == ["b", "a"]
+
+    def test_para_leitura_apos_entradas_antigas_consecutivas(self):
+        # 5 entradas consecutivas mais antigas que a janela encerram a
+        # leitura — as linhas seguintes nem são consumidas.
+        consumidas = []
+
+        def _stdout():
+            lines = (
+                ["cand|||Culto|||20260809"]
+                + [f"old{i}|||Antigo|||2026070{i}" for i in range(1, 6)]
+                + ["nunca|||Não deveria ser lido|||20260809"]
+            )
+            for ln in lines:
+                consumidas.append(ln)
+                yield ln + "\n"
+
+        proc = MagicMock()
+        proc.stdout = _stdout()
+        proc.wait = MagicMock()
+        with patch("infrastructure.youtube.ytdlp_source.start_process", return_value=proc):
+            ids = YtDlpVideoSource()._buscar_candidatos_flat(
+                self.alvo, "https://x", hoje=self.hoje,
+            )
+        assert ids == ["cand"]
+        assert len(consumidas) == 6          # parou na 5ª antiga consecutiva
+        proc.terminate.assert_called()       # subprocess encerrado cedo
+
+    def test_entrada_nova_zera_contagem_de_antigas(self):
+        # Datas aproximadas podem oscilar na fronteira de arredondamento;
+        # uma entrada dentro/acima da janela zera o contador de parada.
+        lines = []
+        for i in range(4):
+            lines.append(f"old{i}|||Antigo|||20260701")
+        lines.append("cand|||Na janela|||20260808")     # zera o contador
+        for i in range(4):
+            lines.append(f"old{i+4}|||Antigo|||20260701")
+        lines.append("cand2|||Na janela de novo|||20260809")
+        ids, _, _ = self._buscar(lines)
+        assert ids == ["cand", "cand2"]
+
+    def test_sem_data_e_aceito_quando_alvo_e_hoje(self):
+        # Live em andamento imprime NA; só é candidata quando a data alvo
+        # é ~hoje (único caso em que a live pode pertencer à data buscada).
+        from datetime import datetime
+        ids, _, _ = self._buscar(
+            ["aovivo|||Live agora|||NA", "cand|||Culto|||20260812"],
+            alvo=datetime(2026, 8, 12),
+        )
+        assert ids == ["aovivo", "cand"]
+
+    def test_sem_data_e_ignorado_quando_alvo_e_antigo(self):
+        from datetime import datetime
+        ids, _, _ = self._buscar(
+            ["aovivo|||Live agora|||NA", "cand|||Culto|||20260710"],
+            alvo=datetime(2026, 7, 10),
+        )
+        assert ids == ["cand"]
+
+    def test_limite_de_candidatos_sem_data(self):
+        from datetime import datetime
+        lines = [f"na{i}|||Live {i}|||NA" for i in range(8)]
+        ids, _, _ = self._buscar(lines, alvo=datetime(2026, 8, 13))
+        assert len(ids) == 5                 # _FLAT_NA_CANDIDATOS_MAX
+
+    def test_comando_usa_flat_lazy_e_data_aproximada(self):
+        _, _, cmd = self._buscar(["cand|||Culto|||20260809"])
+        assert "--flat-playlist" in cmd
+        assert "--lazy-playlist" in cmd
+        i = cmd.index("--extractor-args")
+        assert cmd[i + 1] == "youtubetab:approximate_date"
+        assert cmd[-1] == "https://x"
+        assert "--dateafter" not in cmd      # o filtro de janela é nosso
+
+    def test_ignora_linhas_sem_separador(self):
+        ids, _, _ = self._buscar([
+            "[youtube] canal: Downloading page",
+            "cand|||Culto|||20260809",
+        ])
+        assert ids == ["cand"]
+
+    def test_cancelamento_encerra_subprocess(self):
+        import threading
+        ev = threading.Event()
+
+        def _stdout():
+            yield "cand|||Culto|||20260809\n"
+            ev.set()
+            yield "outro|||Culto 2|||20260809\n"
+
+        proc = MagicMock()
+        proc.stdout = _stdout()
+        proc.wait = MagicMock()
+        with patch("infrastructure.youtube.ytdlp_source.start_process", return_value=proc):
+            with pytest.raises(OperacaoCancelada):
+                YtDlpVideoSource()._buscar_candidatos_flat(
+                    self.alvo, "https://x", cancel_event=ev, hoje=self.hoje,
+                )
+        proc.terminate.assert_called()
+
+
+class TestConfirmarDatas:
+    """Fase de confirmação: extração completa apenas dos candidatos."""
+
+    def _confirmar(self, ids, lines):
+        from datetime import datetime
+        proc = _make_process(lines)
+        with patch("infrastructure.youtube.ytdlp_source.start_process",
+                   return_value=proc) as sp:
+            videos = YtDlpVideoSource()._confirmar_datas(
+                ids, datetime(2026, 4, 19),
+            )
+        return videos, sp.call_args[0][0]
+
+    def test_aplica_filtro_exato_de_data(self):
+        # O mesmo filtro da varredura completa: alvo ou alvo+1 (fuso UTC).
+        videos, _ = self._confirmar(
+            ["a", "b", "c", "d"],
+            [
+                "a|||No alvo|||20260419",
+                "b|||Alvo mais um|||20260420",
+                "c|||Perto mas fora|||20260421",
+                "d|||Fora|||20260415",
+            ],
+        )
+        assert [(v.id, v.upload_date) for v in videos] == \
+            [("a", "20260419"), ("b", "20260420")]
+
+    def test_monta_urls_na_ordem_dos_candidatos(self):
+        _, cmd = self._confirmar(["x1", "x2"], [])
+        urls = [c for c in cmd if c.startswith("https://")]
+        assert urls == [
+            "https://www.youtube.com/watch?v=x1",
+            "https://www.youtube.com/watch?v=x2",
+        ]
+
+    def test_usa_ignore_errors(self):
+        # Um candidato privado/removido não pode abortar a confirmação
+        # dos demais (sem --ignore-errors o yt-dlp para no primeiro erro).
+        _, cmd = self._confirmar(["x1"], [])
+        assert "--ignore-errors" in cmd
+
+    def test_sem_correspondencia_devolve_vazio_sem_levantar(self):
+        # Quem decide o fallback (varredura completa) é o list_videos.
+        videos, _ = self._confirmar(["a"], ["a|||Fora da data|||20260101"])
+        assert videos == []
+
 
 class TestYtDlpVideoSource:
-    """Testa YtDlpVideoSource com subprocess mockado."""
+    """
+    Orquestração de list_videos(): fase rápida → confirmação → fallback
+    de varredura completa, com subprocessos mockados em sequência.
+    """
 
     def _source(self):
         return YtDlpVideoSource()
 
     # -------------------------------------------------------------------
-    # Listagem normal
+    # Caminho rápido (flat + confirmação)
     # -------------------------------------------------------------------
 
-    def test_retorna_lista_de_videos(self):
-        lines = [
+    def test_retorna_lista_de_videos_pelo_caminho_rapido(self):
+        flat = _make_process([
             "abc123|||Culto Domingo|||20260419",
             "def456|||Culto Extra|||20260420",
-        ]
-        proc = _make_process(lines)
-        with patch("infrastructure.youtube.ytdlp_source.start_process", return_value=proc):
+        ])
+        exato = _make_process([
+            "abc123|||Culto Domingo|||20260419",
+            "def456|||Culto Extra|||20260420",
+        ])
+        fake, cmds = _start_seq([flat, exato])
+        with patch("infrastructure.youtube.ytdlp_source.start_process", side_effect=fake):
             videos = self._source().list_videos(
                 "19/04/2026",
                 "https://www.youtube.com/@IPMadalena/streams",
@@ -125,44 +368,48 @@ class TestYtDlpVideoSource:
         assert all(isinstance(v, Video) for v in videos)
         assert videos[0].id == "abc123"
         assert videos[0].title == "Culto Domingo"
+        assert len(cmds) == 2                # NÃO caiu na varredura completa
 
     def test_filtra_datas_fora_do_intervalo(self):
-        # Somente upload_date == target ou target+1 são aceitos
-        lines = [
+        # Somente upload_date == target ou target+1 são aceitos na confirmação
+        flat = _make_process([
+            "abc123|||Culto Domingo|||20260419",
+            "xyz999|||Quase|||20260421",
+            "def456|||Culto Extra|||20260420",
+        ])
+        exato = _make_process([
             "abc123|||Culto Domingo|||20260419",   # target
-            "xyz999|||Video Antigo|||20260301",     # ignorado
+            "xyz999|||Quase|||20260421",            # ignorado
             "def456|||Culto Extra|||20260420",      # target+1
-            "zzz000|||Amanha Demais|||20260421",    # ignorado
-        ]
-        proc = _make_process(lines)
-        with patch("infrastructure.youtube.ytdlp_source.start_process", return_value=proc):
+        ])
+        fake, _ = _start_seq([flat, exato])
+        with patch("infrastructure.youtube.ytdlp_source.start_process", side_effect=fake):
             videos = self._source().list_videos("19/04/2026", "https://x")
         assert len(videos) == 2
         assert {v.id for v in videos} == {"abc123", "def456"}
 
     def test_ignora_linhas_sem_separador(self):
-        lines = [
+        flat = _make_process([
             "[youtube] canal: Downloading page",
             "abc123|||Culto|||20260419",
             "lixo sem pipe",
-        ]
-        proc = _make_process(lines)
-        with patch("infrastructure.youtube.ytdlp_source.start_process", return_value=proc):
+        ])
+        exato = _make_process([
+            "[youtube] abc123: Downloading webpage",
+            "abc123|||Culto|||20260419",
+        ])
+        fake, _ = _start_seq([flat, exato])
+        with patch("infrastructure.youtube.ytdlp_source.start_process", side_effect=fake):
             videos = self._source().list_videos("19/04/2026", "https://x")
         assert len(videos) == 1
 
-    def test_levanta_video_nao_encontrado_quando_lista_vazia(self):
-        proc = _make_process([])
-        with patch("infrastructure.youtube.ytdlp_source.start_process", return_value=proc):
-            with pytest.raises(VideoNaoEncontrado):
-                self._source().list_videos("19/04/2026", "https://x")
-
     def test_chama_on_log_e_on_status(self):
-        lines = ["abc123|||Culto|||20260419"]
-        proc = _make_process(lines)
+        flat  = _make_process(["abc123|||Culto|||20260419"])
+        exato = _make_process(["abc123|||Culto|||20260419"])
+        fake, _ = _start_seq([flat, exato])
         log_msgs = []
         status_msgs = []
-        with patch("infrastructure.youtube.ytdlp_source.start_process", return_value=proc):
+        with patch("infrastructure.youtube.ytdlp_source.start_process", side_effect=fake):
             self._source().list_videos(
                 "19/04/2026", "https://x",
                 on_log=log_msgs.append,
@@ -171,18 +418,6 @@ class TestYtDlpVideoSource:
         assert any("Buscando" in m for m in status_msgs)
         assert any("Canal" in m for m in log_msgs)
         assert any("Culto" in m for m in log_msgs)
-
-    def test_usa_dateafter_correto(self):
-        """dateafter deve ser 1 dia antes da data alvo."""
-        proc = _make_process(["abc|||T|||20260419"])
-        captured_cmd = []
-        def fake_start(cmd, *a, **kw):
-            captured_cmd.extend(cmd)
-            return proc
-        with patch("infrastructure.youtube.ytdlp_source.start_process", side_effect=fake_start):
-            self._source().list_videos("19/04/2026", "https://x")
-        idx = captured_cmd.index("--dateafter")
-        assert captured_cmd[idx + 1] == "20260418"   # 19/04 - 1 dia = 18/04
 
     def test_cancela_durante_leitura(self):
         import threading
@@ -203,6 +438,50 @@ class TestYtDlpVideoSource:
                 self._source().list_videos(
                     "19/04/2026", "https://x", cancel_event=ev
                 )
+
+    # -------------------------------------------------------------------
+    # Fallback — varredura completa
+    # -------------------------------------------------------------------
+
+    def test_sem_candidatos_cai_na_varredura_completa(self):
+        # Datas aproximadas indisponíveis (NA) → sem candidatos → varredura
+        flat      = _make_process(["a|||Sem data|||NA", "b|||Sem data|||NA"])
+        varredura = _make_process(["abc123|||Culto|||20260419"])
+        fake, cmds = _start_seq([flat, varredura])
+        with patch("infrastructure.youtube.ytdlp_source.start_process", side_effect=fake):
+            videos = self._source().list_videos("19/04/2026", "https://x")
+        assert [v.id for v in videos] == ["abc123"]
+        assert len(cmds) == 2
+        assert "--dateafter" in cmds[1]      # 2ª chamada é a varredura original
+
+    def test_confirmacao_vazia_cai_na_varredura_completa(self):
+        # Candidato na janela aproximada mas com data exata diferente
+        flat      = _make_process(["abc123|||Culto|||20260419"])
+        exato     = _make_process(["abc123|||Culto|||20260417"])   # fora do filtro
+        varredura = _make_process(["zzz|||Achado na varredura|||20260419"])
+        fake, cmds = _start_seq([flat, exato, varredura])
+        with patch("infrastructure.youtube.ytdlp_source.start_process", side_effect=fake):
+            videos = self._source().list_videos("19/04/2026", "https://x")
+        assert [v.id for v in videos] == ["zzz"]
+        assert len(cmds) == 3
+
+    def test_levanta_video_nao_encontrado_quando_lista_vazia(self):
+        flat      = _make_process([])
+        varredura = _make_process([])
+        fake, _ = _start_seq([flat, varredura])
+        with patch("infrastructure.youtube.ytdlp_source.start_process", side_effect=fake):
+            with pytest.raises(VideoNaoEncontrado):
+                self._source().list_videos("19/04/2026", "https://x")
+
+    def test_varredura_usa_dateafter_correto(self):
+        """dateafter da varredura deve ser 1 dia antes da data alvo."""
+        flat      = _make_process([])
+        varredura = _make_process(["abc|||T|||20260419"])
+        fake, cmds = _start_seq([flat, varredura])
+        with patch("infrastructure.youtube.ytdlp_source.start_process", side_effect=fake):
+            self._source().list_videos("19/04/2026", "https://x")
+        idx = cmds[1].index("--dateafter")
+        assert cmds[1][idx + 1] == "20260418"   # 19/04 - 1 dia = 18/04
 
 
 # ===========================================================================

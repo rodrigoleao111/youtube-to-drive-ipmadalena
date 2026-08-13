@@ -1,6 +1,9 @@
 # Credenciais e tokens — NUNCA commitar
-credentials/client_secret.json
-credentials/token.pkl
+# A pasta inteira: além do client_secret.json e do token.pkl, ela guarda o
+# perfil do navegador embutido do Spotify (credentials/spotify/), cujos cookies
+# SÃO a sessão logada do usuário. Listar arquivo por arquivo deixava esse perfil
+# de fora — e um `git add -A` publicaria a sessão no repositório.
+credentials/
 
 # Gerados em runtime
 downloads/

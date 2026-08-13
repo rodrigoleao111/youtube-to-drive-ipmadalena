@@ -4,7 +4,7 @@
 
 #define AppName      "IPMadalena — Cultos para o Drive"
 #define AppShortName "IPMadalena"
-#define AppVersion   "3.5.0"
+#define AppVersion   "3.5.1"
 #define AppPublisher "Igreja Presbiteriana de Madalena"
 #define AppExeName   "IPMadalena.exe"
 
@@ -67,9 +67,9 @@ begin
   if CurUninstallStep = usPostUninstall then begin
     MsgBox(
       'Desinstalação concluída.' + #13#10 + #13#10 +
-      'As suas credenciais Google (pasta "credentials") e as vinhetas' + #13#10 +
-      'salvas (pasta "assets\vinhetas") foram mantidas.' + #13#10 +
-      'Remova-as manualmente se desejar.',
+      'Foram mantidas as suas credenciais Google e o login do Spotify' + #13#10 +
+      '(pasta "credentials") e as vinhetas salvas (pasta' + #13#10 +
+      '"assets\vinhetas"). Remova-as manualmente se desejar.',
       mbInformation, MB_OK
     );
   end;

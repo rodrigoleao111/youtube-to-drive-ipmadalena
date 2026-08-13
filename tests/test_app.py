@@ -23,6 +23,7 @@ import queue
 import sys
 import threading
 import urllib.request
+from contextlib import contextmanager
 from unittest.mock import MagicMock, call, patch
 
 import pytest
@@ -45,6 +46,18 @@ def _left_click_event():
         Qt.MouseButton.LeftButton,
         Qt.KeyboardModifier.NoModifier,
     )
+
+
+@contextmanager
+def _spotify_logado(app, logado: bool = True):
+    """
+    Finge o estado de login da sessão do Spotify.
+
+    A publicação exige DUAS condições — Show ID configurado E conta logada —
+    então testes que só preparam o show_id precisam simular o login também.
+    """
+    with patch.object(app._spotify_session, "is_logged_in", return_value=logado):
+        yield
 
 
 def _right_click_event():
@@ -1218,12 +1231,16 @@ class TestTryCdnThumbnail:
              patch("urllib.request.urlopen", side_effect=Exception("fail")):
             _try_cdn_thumbnail("vid123")
 
-        assert len(captured_urls) == 5
-        assert any("maxresdefault" in u for u in captured_urls)
-        assert any("hqdefault" in u for u in captured_urls)
-        assert any("mqdefault" in u for u in captured_urls)
-        assert any("sddefault" in u for u in captured_urls)
-        assert any("default.jpg" in u for u in captured_urls)
+        # Filtra pelo id deste teste: outros testes deixam threads de thumbnail
+        # rodando em background, e elas caem no mesmo patch global de
+        # urllib.request.Request, inflando a contagem de forma intermitente.
+        urls = [u for u in captured_urls if "vid123" in u]
+        assert len(urls) == 5
+        assert any("maxresdefault" in u for u in urls)
+        assert any("hqdefault" in u for u in urls)
+        assert any("mqdefault" in u for u in urls)
+        assert any("sddefault" in u for u in urls)
+        assert any("default.jpg" in u for u in urls)
 
     def test_para_na_primeira_url_valida_sem_tentar_as_demais(self):
         from app import _try_cdn_thumbnail
@@ -2836,10 +2853,30 @@ class TestHomePage:
         fpath.write_bytes(b"\x00" * 1024)
         cfg_com_spotify = {"channel_url": "x", "drive_folder_id": "y",
                            "spotify": {"show_id": "ABC123"}}
-        with patch("baixar_audio.load_config", return_value=cfg_com_spotify):
+        with patch("baixar_audio.load_config", return_value=cfg_com_spotify), \
+             _spotify_logado(application):
             card = application._build_home_card(str(fpath))
         btns = card.findChildren(QPushButton)
-        assert any(b.toolTip() == "Publicar no Spotify" for b in btns)
+        sp = [b for b in btns if b.toolTip() == "Publicar no Spotify"]
+        assert sp, "botão do Spotify não encontrado no card"
+        assert sp[0].isEnabled()
+
+    def test_card_botao_spotify_desabilitado_sem_login(self, application, tmp_path):
+        """
+        Com Show ID mas sem conta logada o botão aparece desabilitado, e o
+        tooltip explica o que falta em vez de dizer "Publicar no Spotify".
+        """
+        fpath = tmp_path / "culto.mp3"
+        fpath.write_bytes(b"\x00" * 1024)
+        cfg = {"channel_url": "x", "drive_folder_id": "y",
+               "spotify": {"show_id": "ABC123"}}
+        with patch("baixar_audio.load_config", return_value=cfg), \
+             _spotify_logado(application, False):
+            card = application._build_home_card(str(fpath))
+        btns = [b for b in card.findChildren(QPushButton) if "Spotify" in b.toolTip()]
+        assert btns, "botão do Spotify deveria existir (show_id configurado)"
+        assert not btns[0].isEnabled()
+        assert "conta do Spotify" in btns[0].toolTip()
 
     def test_spotify_from_local_exibe_aviso_quando_show_id_nao_configurado(
         self, application, tmp_path
@@ -2862,12 +2899,33 @@ class TestHomePage:
                "spotify": {"show_id": "ABC123", "title_prefix": "",
                            "default_tags": ""}}
         with patch("baixar_audio.load_config", return_value=cfg), \
-             patch("app._SpotifyPrePublishDialog") as MockDlg:
+             patch("app._SpotifyPrePublishDialog") as MockDlg, \
+             _spotify_logado(application):
             mock_dlg = MagicMock()
             MockDlg.return_value = mock_dlg
             application._spotify_from_local(str(fpath))
         MockDlg.assert_called_once()
         mock_dlg.exec.assert_called_once()
+
+    def test_spotify_from_local_exibe_aviso_quando_nao_logado(
+        self, application, tmp_path
+    ):
+        """Com show_id mas sem login, avisa e não abre o diálogo."""
+        fpath = tmp_path / "culto.mp3"
+        fpath.write_bytes(b"\x00" * 1024)
+        cfg = {"channel_url": "x", "drive_folder_id": "y",
+               "spotify": {"show_id": "ABC123", "title_prefix": "",
+                           "default_tags": ""}}
+        with patch("baixar_audio.load_config", return_value=cfg), \
+             patch("app._SpotifyPrePublishDialog") as MockDlg, \
+             patch("app.QMessageBox") as MockMsgBox, \
+             _spotify_logado(application, False):
+            application._spotify_from_local(str(fpath))
+        MockDlg.assert_not_called()
+        MockMsgBox.information.assert_called_once()
+        # A mensagem precisa dizer o que fazer, não só que falhou
+        texto = " ".join(str(a) for a in MockMsgBox.information.call_args.args)
+        assert "conta do Spotify" in texto
 
     def test_spotify_from_local_usa_nome_do_arquivo_como_titulo(
         self, application, tmp_path
@@ -2883,7 +2941,8 @@ class TestHomePage:
             m = MagicMock()
             return m
         with patch("baixar_audio.load_config", return_value=cfg), \
-             patch("app._SpotifyPrePublishDialog", side_effect=capture):
+             patch("app._SpotifyPrePublishDialog", side_effect=capture), \
+             _spotify_logado(application):
             application._spotify_from_local(str(fpath))
         assert captured.get("title") == "Culto da Manha 19-05-2026"
 
@@ -2900,7 +2959,8 @@ class TestHomePage:
             captured.update(kwargs)
             return MagicMock()
         with patch("baixar_audio.load_config", return_value=cfg), \
-             patch("app._SpotifyPrePublishDialog", side_effect=capture):
+             patch("app._SpotifyPrePublishDialog", side_effect=capture), \
+             _spotify_logado(application):
             application._spotify_from_local(str(fpath))
         assert captured.get("title") == "IPMadalena Culto"
 
@@ -2917,7 +2977,8 @@ class TestHomePage:
             captured.update(kwargs)
             return MagicMock()
         with patch("baixar_audio.load_config", return_value=cfg), \
-             patch("app._SpotifyPrePublishDialog", side_effect=capture):
+             patch("app._SpotifyPrePublishDialog", side_effect=capture), \
+             _spotify_logado(application):
             application._spotify_from_local(str(fpath))
         assert captured.get("audio_path") == str(fpath)
 
@@ -3054,7 +3115,8 @@ class TestSpotifyCover:
             return MagicMock()
 
         with patch("baixar_audio.load_config", return_value=cfg), \
-             patch("app._SpotifyPrePublishDialog", side_effect=capture):
+             patch("app._SpotifyPrePublishDialog", side_effect=capture), \
+             _spotify_logado(application):
             application._spotify_from_local(str(fpath))
 
         assert captured.get("cover_image_path") == str(jpg_path)
@@ -3075,7 +3137,8 @@ class TestSpotifyCover:
             return MagicMock()
 
         with patch("baixar_audio.load_config", return_value=cfg), \
-             patch("app._SpotifyPrePublishDialog", side_effect=capture):
+             patch("app._SpotifyPrePublishDialog", side_effect=capture), \
+             _spotify_logado(application):
             application._spotify_from_local(str(fpath))
 
         assert captured.get("cover_image_path") == ""
@@ -3344,6 +3407,1194 @@ class TestSpotifyConfigTab:
         assert saved["spotify"]["show_id"] == ""
 
 
+class TestSpotifyAccount:
+    """
+    Conta do Spotify: login persistente e o gate de duas condições.
+
+    A publicação só é liberada com Show ID configurado E conta logada.
+    """
+
+    # ── _spotify_publish_ready ──────────────────────────────────────────────
+
+    def test_sem_show_id_nao_esta_pronto(self, application):
+        cfg = {"spotify": {"show_id": ""}}
+        with patch("baixar_audio.load_config", return_value=cfg), \
+             _spotify_logado(application):
+            pronto, motivo = application._spotify_publish_ready()
+        assert pronto is False
+        assert "Show ID" in motivo
+
+    def test_com_show_id_sem_login_nao_esta_pronto(self, application):
+        cfg = {"spotify": {"show_id": "abc"}}
+        with patch("baixar_audio.load_config", return_value=cfg), \
+             _spotify_logado(application, False):
+            pronto, motivo = application._spotify_publish_ready()
+        assert pronto is False
+        assert "conta do Spotify" in motivo
+
+    def test_com_as_duas_condicoes_esta_pronto(self, application):
+        cfg = {"spotify": {"show_id": "abc"}}
+        with patch("baixar_audio.load_config", return_value=cfg), \
+             _spotify_logado(application):
+            pronto, motivo = application._spotify_publish_ready()
+        assert pronto is True
+        assert motivo == ""
+
+    def test_show_id_so_com_espacos_nao_conta(self, application):
+        cfg = {"spotify": {"show_id": "   "}}
+        with patch("baixar_audio.load_config", return_value=cfg), \
+             _spotify_logado(application):
+            pronto, _ = application._spotify_publish_ready()
+        assert pronto is False
+
+    def test_falta_de_show_id_tem_prioridade_na_mensagem(self, application):
+        """Sem nada configurado, o primeiro passo é o Show ID."""
+        cfg = {"spotify": {"show_id": ""}}
+        with patch("baixar_audio.load_config", return_value=cfg), \
+             _spotify_logado(application, False):
+            _, motivo = application._spotify_publish_ready()
+        assert "Show ID" in motivo
+
+    # ── Card de conta ───────────────────────────────────────────────────────
+
+    def test_aba_spotify_tem_os_widgets_de_conta(self, application):
+        assert hasattr(application, "_cfg_spotify_status_label")
+        assert hasattr(application, "_cfg_spotify_login_btn")
+        assert hasattr(application, "_cfg_spotify_gate_label")
+
+    def test_refresh_mostra_conectado_quando_logado(self, application):
+        cfg = {"spotify": {"show_id": "abc"}}
+        with patch("baixar_audio.load_config", return_value=cfg), \
+             _spotify_logado(application):
+            application._refresh_spotify_account()
+        assert "Conectado" in application._cfg_spotify_status_label.text()
+        assert application._cfg_spotify_login_btn.text() == "Sair"
+
+    def test_refresh_mostra_nao_conectado_quando_deslogado(self, application):
+        cfg = {"spotify": {"show_id": "abc"}}
+        with patch("baixar_audio.load_config", return_value=cfg), \
+             _spotify_logado(application, False):
+            application._refresh_spotify_account()
+        assert "Não conectado" in application._cfg_spotify_status_label.text()
+        assert application._cfg_spotify_login_btn.text() == "Entrar"
+
+    def test_refresh_avisa_o_que_falta(self, application):
+        cfg = {"spotify": {"show_id": "abc"}}
+        with patch("baixar_audio.load_config", return_value=cfg), \
+             _spotify_logado(application, False):
+            application._refresh_spotify_account()
+        assert "conta do Spotify" in application._cfg_spotify_gate_label.text()
+
+    def test_refresh_confirma_quando_liberado(self, application):
+        cfg = {"spotify": {"show_id": "abc"}}
+        with patch("baixar_audio.load_config", return_value=cfg), \
+             _spotify_logado(application):
+            application._refresh_spotify_account()
+        assert "liberada" in application._cfg_spotify_gate_label.text()
+
+    # ── Entrar / Sair ───────────────────────────────────────────────────────
+
+    def test_toggle_abre_janela_de_login_quando_deslogado(self, application):
+        with _spotify_logado(application, False), \
+             patch("app._SpotifyLoginWindow") as MockWin:
+            MockWin.return_value = MagicMock()
+            application._spotify_toggle_login()
+        MockWin.assert_called_once()
+        kwargs = MockWin.call_args.kwargs
+        assert kwargs["session"] is application._spotify_session
+        MockWin.return_value.show.assert_called_once()
+
+    def test_toggle_pede_confirmacao_antes_de_sair(self, application):
+        with _spotify_logado(application), \
+             patch.object(application._spotify_session, "logout") as mock_logout, \
+             patch("app.QMessageBox") as MockMsgBox:
+            MockMsgBox.StandardButton.Yes = QMessageBox.StandardButton.Yes
+            MockMsgBox.StandardButton.No = QMessageBox.StandardButton.No
+            MockMsgBox.question.return_value = QMessageBox.StandardButton.No
+            application._spotify_toggle_login()
+        MockMsgBox.question.assert_called_once()
+        mock_logout.assert_not_called()
+
+    def test_toggle_encerra_sessao_quando_confirmado(self, application):
+        with _spotify_logado(application), \
+             patch.object(application._spotify_session, "logout") as mock_logout, \
+             patch("app.QMessageBox") as MockMsgBox:
+            MockMsgBox.StandardButton.Yes = QMessageBox.StandardButton.Yes
+            MockMsgBox.StandardButton.No = QMessageBox.StandardButton.No
+            MockMsgBox.question.return_value = QMessageBox.StandardButton.Yes
+            application._spotify_toggle_login()
+        mock_logout.assert_called_once()
+
+    def test_callback_de_login_bem_sucedido(self, application):
+        with _spotify_logado(application):
+            application._on_spotify_login_finished(True)
+        assert "conectado" in application._cfg_feedback_label.text().lower()
+
+    def test_callback_de_login_incompleto(self, application):
+        with _spotify_logado(application, False):
+            application._on_spotify_login_finished(False)
+        assert "não concluído" in application._cfg_feedback_label.text().lower()
+
+    # ── Persistência do flag ────────────────────────────────────────────────
+
+    def test_cfg_save_preserva_o_login(self, application):
+        """
+        Regressão: o save da aba reescreve o dict 'spotify' inteiro. Se ele não
+        preservasse 'logged_in', salvar qualquer configuração deslogaria o
+        usuário.
+        """
+        mock_repo = MagicMock()
+        mock_repo.load.return_value = {
+            "spotify": {"show_id": "antigo", "logged_in": True},
+        }
+        application._cfg_spotify_show_id.setText("novo")
+        with patch("baixar_audio.config_repo", return_value=mock_repo):
+            application._cfg_save()
+
+        salvo = mock_repo.save.call_args.args[0]
+        assert salvo["spotify"]["show_id"] == "novo"
+        assert salvo["spotify"]["logged_in"] is True
+
+    def test_cfg_save_mantem_deslogado_quando_era_deslogado(self, application):
+        mock_repo = MagicMock()
+        mock_repo.load.return_value = {"spotify": {"show_id": "x"}}
+        with patch("baixar_audio.config_repo", return_value=mock_repo):
+            application._cfg_save()
+        assert mock_repo.save.call_args.args[0]["spotify"]["logged_in"] is False
+
+    # ── Gate no fluxo automático ────────────────────────────────────────────
+
+    def test_worker_phase2_nao_publica_sem_login(self, application):
+        cfg = baixar_audio.load_config()
+        cfg["spotify"] = {"show_id": "abc123", "title_prefix": "", "default_tags": ""}
+        segments = [{"video_id": "V", "title": "Culto", "start": None, "end": None}]
+
+        with patch("baixar_audio.load_config", return_value=cfg), \
+             _spotify_logado(application, False), \
+             patch.object(application, "_build_presenter") as mock_pres:
+            mock_pres.return_value.process_segments.return_value = ["Culto"]
+            application._worker_phase2("01/01/2026", segments)
+            msgs = []
+            try:
+                while True:
+                    kind, value = application._queue.get_nowait()
+                    if kind == "log":
+                        msgs.append(value)
+            except Exception:
+                pass
+
+        assert application._spotify_pending is None
+        # O desvio precisa aparecer no log — antes era silencioso
+        assert any("Spotify" in m and "conta" in m for m in msgs), msgs
+
+    def test_worker_phase2_silencioso_para_quem_nao_usa_spotify(self, application):
+        """
+        Sem Show ID o Spotify não faz parte do fluxo do usuário — avisar a cada
+        execução seria só ruído no log.
+        """
+        cfg = baixar_audio.load_config()
+        cfg["spotify"] = {"show_id": "", "title_prefix": "", "default_tags": ""}
+        segments = [{"video_id": "V", "title": "Culto", "start": None, "end": None}]
+
+        with patch("baixar_audio.load_config", return_value=cfg), \
+             _spotify_logado(application, False), \
+             patch.object(application, "_build_presenter") as mock_pres:
+            mock_pres.return_value.process_segments.return_value = ["Culto"]
+            application._worker_phase2("01/01/2026", segments)
+            msgs = []
+            try:
+                while True:
+                    kind, value = application._queue.get_nowait()
+                    if kind == "log":
+                        msgs.append(value)
+            except Exception:
+                pass
+
+        assert application._spotify_pending is None
+        assert not any("Spotify" in m for m in msgs), msgs
+
+    # ── Perfil persistente chegando na página ───────────────────────────────
+
+    def test_make_page_usa_o_perfil_informado(self, application):
+        """
+        O ponto central da correção: a página do WebView precisa nascer com o
+        perfil persistente. Com o perfil padrão do Qt (off-the-record) o login
+        morre ao fechar a janela.
+        """
+        from PyQt6.QtWebEngineCore import QWebEngineProfile
+        from PyQt6.QtWidgets import QWidget
+
+        # Perfil anônimo (sem storage) só para checar a amarração
+        perfil = QWebEngineProfile()
+        pai = QWidget()
+        page = app_module._SpotifyPage._make_page(pai, profile=perfil)
+        try:
+            assert page.profile() is perfil
+        finally:
+            page.setParent(None)
+            page.deleteLater()
+
+    def test_make_page_sem_perfil_continua_funcionando(self, application):
+        """Sem sessão (caminho legado) a página ainda é criada."""
+        from PyQt6.QtWidgets import QWidget
+
+        pai = QWidget()
+        page = app_module._SpotifyPage._make_page(pai, audio_path="", cover_path="")
+        try:
+            assert page is not None
+        finally:
+            page.setParent(None)
+            page.deleteLater()
+
+
+class TestSpotifyExtras:
+    """
+    Descrição e capa geradas pelo downloader, localizadas a partir do áudio.
+
+    Regressão de campo: publicando pela tela Início, o diálogo abria sempre com
+    "Não foi possível buscar a descrição do YouTube" e sem miniatura — o código
+    procurava `<nome do áudio>.jpg` e nunca lia a descrição, enquanto o
+    downloader grava `capa.jpg` e `descricao.txt` na subpasta do episódio.
+    """
+
+    def _episodio(self, tmp_path, *, descricao=None, capa=True):
+        sub = tmp_path / "Culto Solene"
+        sub.mkdir()
+        mp3 = sub / "Culto Solene.mp3"
+        mp3.write_bytes(b"\x00" * 32)
+        if descricao is not None:
+            (sub / "descricao.txt").write_text(descricao, encoding="utf-8")
+        if capa:
+            (sub / "capa.jpg").write_bytes(b"\xff\xd8\xff" + b"\x00" * 600)
+        return str(mp3), sub
+
+    def test_le_descricao_da_subpasta(self, application, tmp_path):
+        mp3, _ = self._episodio(tmp_path, descricao="Pregação do culto solene.")
+        desc, _capa = application._spotify_extras(mp3)
+        assert desc == "Pregação do culto solene."
+
+    def test_le_capa_da_subpasta(self, application, tmp_path):
+        mp3, sub = self._episodio(tmp_path, descricao="x")
+        _desc, capa = application._spotify_extras(mp3)
+        assert capa == str(sub / "capa.jpg")
+
+    def test_preserva_quebras_de_linha(self, application, tmp_path):
+        """A descrição do YouTube é multi-linha — não pode ser achatada."""
+        texto = "Culto Solene\n\nTexto: Juízes 1.11-15\nRev. Denilson Cunha"
+        mp3, _ = self._episodio(tmp_path, descricao=texto)
+        desc, _ = application._spotify_extras(mp3)
+        assert desc == texto
+
+    def test_remove_espacos_nas_pontas(self, application, tmp_path):
+        mp3, _ = self._episodio(tmp_path, descricao="\n\n  Pregação  \n\n")
+        desc, _ = application._spotify_extras(mp3)
+        assert desc == "Pregação"
+
+    def test_sem_extras_devolve_vazio(self, application, tmp_path):
+        mp3, _ = self._episodio(tmp_path, descricao=None, capa=False)
+        assert application._spotify_extras(mp3) == ("", "")
+
+    def test_fallback_para_o_formato_antigo(self, application, tmp_path):
+        """Episódios anteriores às subpastas guardavam extras com o nome do áudio."""
+        mp3 = tmp_path / "Culto antigo.mp3"
+        mp3.write_bytes(b"\x00" * 32)
+        (tmp_path / "Culto antigo.txt").write_text("Descrição antiga", encoding="utf-8")
+        (tmp_path / "Culto antigo.jpg").write_bytes(b"\xff\xd8\xff")
+
+        desc, capa = application._spotify_extras(str(mp3))
+        assert desc == "Descrição antiga"
+        assert capa == str(tmp_path / "Culto antigo.jpg")
+
+    def test_subpasta_tem_prioridade_sobre_o_formato_antigo(self, application, tmp_path):
+        mp3, sub = self._episodio(tmp_path, descricao="Nova")
+        (sub / "Culto Solene.txt").write_text("Antiga", encoding="utf-8")
+        (sub / "Culto Solene.jpg").write_bytes(b"\xff\xd8\xff")
+
+        desc, capa = application._spotify_extras(mp3)
+        assert desc == "Nova"
+        assert capa == str(sub / "capa.jpg")
+
+    def test_arquivo_em_cp1252_nao_perde_a_descricao(self, application, tmp_path):
+        """
+        Melhor uma descrição com caractere torto do que campo vazio — antes
+        qualquer erro de decodificação era engolido e virava "".
+        """
+        mp3, sub = self._episodio(tmp_path, descricao=None)
+        (sub / "descricao.txt").write_bytes("Pregação".encode("cp1252"))
+        desc, _ = application._spotify_extras(mp3)
+        assert desc, "descrição não deveria ficar vazia"
+        assert "Prega" in desc
+
+    def test_descricao_vazia_cai_para_o_proximo_candidato(self, application, tmp_path):
+        mp3, sub = self._episodio(tmp_path, descricao="   ")
+        (sub / "Culto Solene.txt").write_text("Descrição de verdade", encoding="utf-8")
+        desc, _ = application._spotify_extras(mp3)
+        assert desc == "Descrição de verdade"
+
+    # ── integração com os dois pontos de publicação ─────────────────────────
+
+    def test_spotify_from_local_passa_a_descricao_do_arquivo(
+        self, application, tmp_path
+    ):
+        mp3, _ = self._episodio(tmp_path, descricao="Pregação do culto.")
+        cfg = {"channel_url": "x", "drive_folder_id": "y",
+               "spotify": {"show_id": "ABC", "title_prefix": "", "default_tags": ""}}
+        captured = {}
+
+        with patch("baixar_audio.load_config", return_value=cfg), \
+             patch("app._SpotifyPrePublishDialog",
+                   side_effect=lambda **kw: (captured.update(kw), MagicMock())[1]), \
+             _spotify_logado(application):
+            application._spotify_from_local(mp3)
+
+        assert captured["description"] == "Pregação do culto."
+
+    def test_spotify_from_local_passa_a_capa_da_subpasta(self, application, tmp_path):
+        mp3, sub = self._episodio(tmp_path, descricao="x")
+        cfg = {"channel_url": "x", "drive_folder_id": "y",
+               "spotify": {"show_id": "ABC", "title_prefix": "", "default_tags": ""}}
+        captured = {}
+
+        with patch("baixar_audio.load_config", return_value=cfg), \
+             patch("app._SpotifyPrePublishDialog",
+                   side_effect=lambda **kw: (captured.update(kw), MagicMock())[1]), \
+             _spotify_logado(application):
+            application._spotify_from_local(mp3)
+
+        assert captured["cover_image_path"] == str(sub / "capa.jpg")
+
+    def test_predialog_usa_o_pending_quando_ele_traz_a_descricao(
+        self, application, tmp_path
+    ):
+        """O fluxo automático já resolve os extras; o fallback não pode atropelar."""
+        mp3, _ = self._episodio(tmp_path, descricao="Do arquivo")
+        pending = {
+            "show_id": "s", "video_id": "v", "title": "t",
+            "description": "Do pending", "date_str": "01/01/2026", "tags": "",
+            "cover_image_path": "",
+        }
+        captured = {}
+        with patch("app._SpotifyPrePublishDialog",
+                   side_effect=lambda **kw: (captured.update(kw), MagicMock())[1]), \
+             patch.object(baixar_audio, "DOWNLOAD_DIR", str(tmp_path)):
+            application._show_spotify_predialog(pending)
+
+        assert captured["description"] == "Do pending"
+
+    def test_predialog_cai_para_o_arquivo_quando_pending_vem_sem_descricao(
+        self, application, tmp_path
+    ):
+        mp3, _ = self._episodio(tmp_path, descricao="Do arquivo")
+        pending = {
+            "show_id": "s", "video_id": "v", "title": "t",
+            "description": "", "date_str": "01/01/2026", "tags": "",
+            "cover_image_path": "",
+        }
+        captured = {}
+        with patch("app._SpotifyPrePublishDialog",
+                   side_effect=lambda **kw: (captured.update(kw), MagicMock())[1]), \
+             patch.object(baixar_audio, "DOWNLOAD_DIR", str(tmp_path)):
+            application._show_spotify_predialog(pending)
+
+        assert captured["description"] == "Do arquivo"
+
+
+class TestSpotifyLoginWindowLogic:
+    """
+    Lógica da janela de login sem instanciá-la.
+
+    Construir a janela de verdade abriria um QWebEngineView e faria requisição
+    de rede; os métodos são exercitados com um stub que carrega só os atributos
+    que eles tocam.
+    """
+
+    class _Stub:
+        _FECHAR_APOS_MS = 1200
+        _ASSENTAR_MS = 2500
+
+        def __init__(self, session, url="", viu_login=False):
+            self._session = session
+            self._logado = False
+            self._viu_login = viu_login
+            self._notificou = False
+            self._on_finish = None
+            self._hint_lbl = MagicMock()
+            self._confirm_btn = MagicMock()
+            self._view = MagicMock()
+            self._view.url.return_value.toString.return_value = url
+            self._assentar_timer = MagicMock()
+            self.close = MagicMock()
+
+        def _concluir(self):
+            """Delega para a implementação real (o stub não a reimplementa)."""
+            app_module._SpotifyLoginWindow._concluir(self)
+
+    @staticmethod
+    def _sessao_fake(veredito):
+        s = MagicMock()
+        s.classify.return_value = veredito
+        return s
+
+    URL_LOGIN = "https://accounts.spotify.com/pt-BR/login"
+    URL_INTERNA = "https://creators.spotify.com/pod/dashboard"
+
+    # ── loadFinished apenas adia; não decide ────────────────────────────────
+
+    def test_load_finished_nao_classifica_nada(self):
+        """
+        Regressão medida ao vivo: o desvio do Creators para o login é feito pelo
+        próprio site (não é 302), então o PRIMEIRO loadFinished chega com a URL
+        interna ainda no lugar e seria lido como "logado" por quem não está.
+        Aqui o callback só pode reiniciar o timer.
+        """
+        stub = self._Stub(self._sessao_fake("logged_in"), self.URL_INTERNA)
+        app_module._SpotifyLoginWindow._on_load_finished(stub, True)
+        stub._session.classify.assert_not_called()
+        assert stub._logado is False
+        stub._assentar_timer.start.assert_called_once_with(stub._ASSENTAR_MS)
+
+    def test_cada_carregamento_reinicia_a_espera(self):
+        """Uma cadeia de redirecionamentos só é avaliada quando para."""
+        stub = self._Stub(self._sessao_fake("logged_in"), "https://x/")
+        for _ in range(3):
+            app_module._SpotifyLoginWindow._on_load_finished(stub, True)
+        assert stub._assentar_timer.start.call_count == 3
+        stub._session.classify.assert_not_called()
+
+    def test_carregamento_falho_nao_agenda(self):
+        stub = self._Stub(self._sessao_fake("logged_in"), "https://x/")
+        app_module._SpotifyLoginWindow._on_load_finished(stub, False)
+        stub._assentar_timer.start.assert_not_called()
+
+    # ── a decisão exige a TRANSIÇÃO logged_out → logged_in ──────────────────
+
+    def test_url_interna_sem_ter_visto_login_nao_conclui(self):
+        """
+        O caso que derrubou a versão anterior: com o banner de consentimento de
+        cookies na tela, a página fica parada na URL interna (medido: 20 s em
+        /pod/dashboard, deslogado). Sem ter visto a tela de credenciais, estar
+        numa URL interna não prova nada.
+        """
+        from domain.ports import SPOTIFY_LOGGED_IN
+
+        stub = self._Stub(
+            self._sessao_fake(SPOTIFY_LOGGED_IN), self.URL_INTERNA, viu_login=False
+        )
+        with patch("app.QTimer") as MockTimer:
+            app_module._SpotifyLoginWindow._on_settled(stub)
+        assert stub._logado is False
+        stub._session.mark_logged_in.assert_not_called()
+        MockTimer.singleShot.assert_not_called()
+
+    def test_url_interna_depois_da_tela_de_login_conclui(self):
+        from domain.ports import SPOTIFY_LOGGED_IN
+
+        stub = self._Stub(
+            self._sessao_fake(SPOTIFY_LOGGED_IN), self.URL_INTERNA, viu_login=True
+        )
+        with patch("app.QTimer") as MockTimer:
+            app_module._SpotifyLoginWindow._on_settled(stub)
+        assert stub._logado is True
+        stub._session.mark_logged_in.assert_called_once_with(True)
+        MockTimer.singleShot.assert_called_once()
+
+    def test_tela_de_login_registra_e_corrige_o_flag(self):
+        from domain.ports import SPOTIFY_LOGGED_OUT
+
+        stub = self._Stub(self._sessao_fake(SPOTIFY_LOGGED_OUT), self.URL_LOGIN)
+        with patch("app.QTimer") as MockTimer:
+            app_module._SpotifyLoginWindow._on_settled(stub)
+        assert stub._viu_login is True
+        assert stub._logado is False
+        stub._session.mark_logged_in.assert_called_once_with(False)
+        MockTimer.singleShot.assert_not_called()
+
+    def test_sequencia_completa_do_login(self):
+        """Fluxo real: sonda → tela de credenciais → área autenticada."""
+        from domain.ports import SPOTIFY_LOGGED_IN, SPOTIFY_LOGGED_OUT
+
+        sessao = MagicMock()
+        stub = self._Stub(sessao, self.URL_LOGIN)
+
+        with patch("app.QTimer") as MockTimer:
+            # 1) assenta na tela de credenciais
+            sessao.classify.return_value = SPOTIFY_LOGGED_OUT
+            app_module._SpotifyLoginWindow._on_settled(stub)
+            assert stub._logado is False
+
+            # 2) usuário entra e a página volta para a área autenticada
+            sessao.classify.return_value = SPOTIFY_LOGGED_IN
+            stub._view.url.return_value.toString.return_value = self.URL_INTERNA
+            app_module._SpotifyLoginWindow._on_settled(stub)
+
+        assert stub._logado is True
+        assert sessao.mark_logged_in.call_args_list == [call(False), call(True)]
+        MockTimer.singleShot.assert_called_once()
+
+    def test_veredito_manda_e_nao_o_flag_em_cache(self):
+        """
+        Se a janela olhasse `is_logged_in()` (que pode estar ligado de uma
+        sessão anterior), ela fecharia sozinha ainda na tela de login.
+        """
+        from domain.ports import SPOTIFY_LOGGED_OUT
+
+        sessao = self._sessao_fake(SPOTIFY_LOGGED_OUT)
+        sessao.is_logged_in.return_value = True     # cache dizendo "logado"
+        stub = self._Stub(sessao, self.URL_LOGIN)
+        with patch("app.QTimer") as MockTimer:
+            app_module._SpotifyLoginWindow._on_settled(stub)
+        assert stub._logado is False
+        MockTimer.singleShot.assert_not_called()
+
+    def test_url_desconhecida_e_ignorada(self):
+        from domain.ports import SPOTIFY_UNKNOWN
+
+        stub = self._Stub(
+            self._sessao_fake(SPOTIFY_UNKNOWN),
+            "https://creators.spotify.com/",
+            viu_login=True,
+        )
+        with patch("app.QTimer") as MockTimer:
+            app_module._SpotifyLoginWindow._on_settled(stub)
+        assert stub._logado is False
+        stub._session.mark_logged_in.assert_not_called()
+        MockTimer.singleShot.assert_not_called()
+
+    def test_nao_conclui_duas_vezes(self):
+        from domain.ports import SPOTIFY_LOGGED_IN
+
+        stub = self._Stub(
+            self._sessao_fake(SPOTIFY_LOGGED_IN), self.URL_INTERNA, viu_login=True
+        )
+        with patch("app.QTimer") as MockTimer:
+            for _ in range(3):
+                app_module._SpotifyLoginWindow._on_settled(stub)
+        assert MockTimer.singleShot.call_count == 1
+        assert stub._session.mark_logged_in.call_count == 1
+
+    # ── botão "Concluí o login" ─────────────────────────────────────────────
+
+    def test_confirmacao_manual_conclui_fora_da_tela_de_login(self):
+        """Saída para quem já estava logado e nunca vê a tela de credenciais."""
+        from domain.ports import SPOTIFY_LOGGED_IN
+
+        stub = self._Stub(self._sessao_fake(SPOTIFY_LOGGED_IN), self.URL_INTERNA)
+        with patch("app.QTimer") as MockTimer:
+            app_module._SpotifyLoginWindow._confirmar_manual(stub)
+        assert stub._logado is True
+        stub._session.mark_logged_in.assert_called_once_with(True)
+        MockTimer.singleShot.assert_called_once()
+
+    def test_confirmacao_manual_recusada_na_tela_de_login(self):
+        from domain.ports import SPOTIFY_LOGGED_OUT
+
+        stub = self._Stub(self._sessao_fake(SPOTIFY_LOGGED_OUT), self.URL_LOGIN)
+        with patch("app.QTimer") as MockTimer:
+            app_module._SpotifyLoginWindow._confirmar_manual(stub)
+        assert stub._logado is False
+        stub._session.mark_logged_in.assert_not_called()
+        MockTimer.singleShot.assert_not_called()
+        # E explica por quê
+        texto = " ".join(
+            str(c.args[0]) for c in stub._hint_lbl.setText.call_args_list
+        )
+        assert "tela de login" in texto
+
+    def test_notifica_o_app_uma_unica_vez(self):
+        stub = self._Stub(MagicMock())
+        chamadas = []
+        stub._on_finish = lambda ok: chamadas.append(ok)
+        app_module._SpotifyLoginWindow._notificar(stub)
+        app_module._SpotifyLoginWindow._notificar(stub)
+        assert chamadas == [False]
+
+    def test_notifica_sucesso_quando_logou(self):
+        stub = self._Stub(MagicMock())
+        stub._logado = True
+        chamadas = []
+        stub._on_finish = lambda ok: chamadas.append(ok)
+        app_module._SpotifyLoginWindow._notificar(stub)
+        assert chamadas == [True]
+
+    def test_sem_callback_nao_quebra(self):
+        stub = self._Stub(MagicMock())
+        stub._on_finish = None
+        app_module._SpotifyLoginWindow._notificar(stub)   # não deve levantar
+
+
+class TestSpotifyPreenchimentoSPA:
+    """
+    Preenchimento de título e descrição no wizard do Spotify.
+
+    Regressão de campo: o arquivo entrava, mas título e descrição não. O wizard
+    é uma SPA — sair de "Upload" para "Details" NÃO recarrega a página, então
+    `loadFinished` não dispara de novo e os campos só existem no segundo passo.
+    A versão anterior tentava 10 vezes em 6 s, ainda na tela de Upload, e
+    desistia antes de os campos existirem.
+
+    Estes testes simulam essa troca de passo: a página começa sem os campos e
+    eles aparecem depois, sem novo carregamento.
+    """
+
+    TITULO = "Culto Solene 14/09"
+    DESCRICAO = "Madalena, igreja acolhedora.\n\nTexto: Juízes 1.11-15\nRev. Denilson"
+
+    #: Campo de descrição nos dois formatos que a tela oferece: o editor rico
+    #: (padrão, com barra B/I/U) e o textarea (quando o toggle HTML está ligado).
+    RICO = ('<div contenteditable="true" id="d" '
+            'style="width:400px;height:120px;border:1px solid #ccc"></div>')
+    TEXTAREA = '<textarea id="d" style="width:400px;height:120px"></textarea>'
+
+    def _html(self, campo_desc):
+        """Página que troca de passo sozinha, como o wizard faz."""
+        return """
+        <html><body style="margin:0">
+          <div id="upload"><input type="file" accept=".mp3,.mp4"></div>
+          <script>
+            setTimeout(function () {
+              document.getElementById('upload').remove();
+              var d = document.createElement('div');
+              d.innerHTML = '<input type="text" '
+                + 'placeholder="Give your episode a name" maxlength="200">'
+                + 'CAMPO';
+              document.body.appendChild(d);
+            }, 200);
+          </script>
+        </body></html>
+        """.replace("CAMPO", campo_desc.replace("'", "\\'"))
+
+    def _executa(self, campo_desc):
+        """Roda o fluxo real (setup + fill no load) e devolve o que foi digitado."""
+        from PyQt6.QtCore import QEventLoop, QTimer
+        from PyQt6.QtWebEngineWidgets import QWebEngineView
+
+        view = QWebEngineView()
+        loop = QEventLoop()
+
+        def no_load(ok):
+            view.page().runJavaScript(
+                app_module._SpotifyPublishWindow._build_setup_js(
+                    self.TITULO, self.DESCRICAO)
+            )
+            view.page().runJavaScript(app_module._SPOTIFY_FILL_JS)
+
+        view.loadFinished.connect(no_load)
+        view.setHtml(self._html(campo_desc))
+
+        resultado = {}
+
+        # innerText (não textContent): num editor rico as quebras de linha viram
+        # elementos e textContent as descartaria.
+        LEITURA = (
+            "(function(){var i=document.querySelector('input[type=text]');"
+            "var d=document.getElementById('d');"
+            "return {t: i?i.value:'', "
+            "d: d?(d.value!==undefined?d.value:d.innerText):''};})()"
+        )
+
+        def tenta_ler():
+            def cb(v):
+                v = v or {}
+                if v.get("t") and v.get("d"):
+                    resultado.update(v)
+                    loop.quit()
+            view.page().runJavaScript(LEITURA, cb)
+
+        poll = QTimer()
+        poll.timeout.connect(tenta_ler)
+        poll.start(100)
+        QTimer.singleShot(8000, loop.quit)     # teto de segurança
+        loop.exec()
+        poll.stop()
+        view.close()
+        view.deleteLater()
+        return resultado.get("t", ""), resultado.get("d", "")
+
+    @staticmethod
+    def _normaliza(texto):
+        """Compara conteúdo ignorando quantas linhas em branco o editor criou."""
+        import re
+
+        return re.sub(r"\n{2,}", "\n", (texto or "").strip())
+
+    def test_preenche_apos_a_troca_de_passo_com_editor_rico(self):
+        titulo, desc = self._executa(self.RICO)
+        assert titulo == self.TITULO
+        assert self._normaliza(desc) == self._normaliza(self.DESCRICAO)
+
+    def test_preenche_apos_a_troca_de_passo_com_textarea(self):
+        titulo, desc = self._executa(self.TEXTAREA)
+        assert titulo == self.TITULO
+        # No textarea o texto entra literal, sem o editor reinterpretar
+        assert desc == self.DESCRICAO
+
+    def test_descricao_multilinha_chega_inteira(self):
+        _titulo, desc = self._executa(self.TEXTAREA)
+        assert len(desc.splitlines()) == len(self.DESCRICAO.splitlines())
+
+    def test_contenteditable_sem_valor_true_tambem_e_preenchido(self):
+        """
+        `contenteditable` aceita valor vazio e pode ser herdado. Exigir
+        `="true"` no seletor deixava editores assim de fora — e o relato de
+        campo foi exatamente descrição não preenchida com o título OK.
+        """
+        campo = ('<div contenteditable id="d" '
+                 'style="width:400px;height:120px;border:1px solid #ccc"></div>')
+        _titulo, desc = self._executa(campo)
+        assert self._normaliza(desc) == self._normaliza(self.DESCRICAO)
+
+    def test_editor_vazio_com_br_ainda_conta_como_vazio(self):
+        """Editores deixam <br> no campo vazio; isso não é conteúdo do usuário."""
+        campo = ('<div contenteditable="true" id="d" '
+                 'style="width:400px;height:120px"><br></div>')
+        _titulo, desc = self._executa(campo)
+        assert self._normaliza(desc) == self._normaliza(self.DESCRICAO)
+
+    def test_relata_no_log_quando_nao_encontra_a_descricao(self):
+        """
+        Sem esse relato, cada falha vira adivinhação. O diagnóstico diz quantos
+        campos existem e por que cada um foi descartado.
+        """
+        from PyQt6.QtCore import QEventLoop, QTimer
+        from PyQt6.QtWebEngineCore import QWebEnginePage
+        from PyQt6.QtWebEngineWidgets import QWebEngineView
+
+        mensagens = []
+
+        class _PaginaEspia(QWebEnginePage):
+            def javaScriptConsoleMessage(self, level, message, line, source):
+                if message and "IPMadalena" in message:
+                    mensagens.append(message)
+
+        view = QWebEngineView()
+        view.setPage(_PaginaEspia(view))
+        loop = QEventLoop()
+
+        def no_load(ok):
+            # Antecipa o diagnóstico (em produção espera 6s)
+            view.page().runJavaScript("window.__ipmDiagnosticoMs = 300;")
+            view.page().runJavaScript(
+                app_module._SpotifyPublishWindow._build_setup_js(
+                    self.TITULO, self.DESCRICAO)
+            )
+            view.page().runJavaScript(app_module._SPOTIFY_FILL_JS)
+
+        view.loadFinished.connect(no_load)
+        # Só o título existe — nenhum campo de descrição na página
+        view.setHtml(
+            '<html><body><input type="text" placeholder="Give your episode a name">'
+            '</body></html>'
+        )
+        QTimer.singleShot(3000, loop.quit)
+        loop.exec()
+        view.close()
+        view.deleteLater()
+
+        assert any("titulo preenchido" in m for m in mensagens), mensagens
+        assert any("descricao nao encontrada" in m for m in mensagens), mensagens
+
+
+class TestSpotifyPonteDeConsole:
+    """
+    As mensagens do injetor precisam chegar ao log do app.
+
+    Medido: o encaminhamento padrão do Qt não imprimiu nem `console.log` nem
+    `console.error`. Um relato de campo chegou sem nenhuma linha `[IPMadalena]`
+    apesar de o script ter rodado (o título tinha sido preenchido).
+    """
+
+    def _pagina(self):
+        from PyQt6.QtWidgets import QWidget
+
+        self._dono = QWidget()
+        return app_module._SpotifyPage._make_page(self._dono)
+
+    def _nivel(self):
+        from PyQt6.QtWebEngineCore import QWebEnginePage
+
+        return QWebEnginePage.JavaScriptConsoleMessageLevel.InfoMessageLevel
+
+    def test_mensagem_do_injetor_vai_para_o_log(self):
+        page = self._pagina()
+        with patch("app._file_log") as mock_log:
+            page.javaScriptConsoleMessage(
+                self._nivel(), "[IPMadalena] titulo preenchido [dom]", 1, "x")
+        assert mock_log.called
+        assert "titulo preenchido" in mock_log.call_args.args[0]
+
+    def test_prefixo_e_removido_do_log(self):
+        page = self._pagina()
+        with patch("app._file_log") as mock_log:
+            page.javaScriptConsoleMessage(self._nivel(), "[IPMadalena] oi", 1, "x")
+        assert "[IPMadalena]" not in mock_log.call_args.args[0]
+
+    def test_ruido_da_pagina_nao_vai_para_o_log_do_app(self):
+        """TikTok Pixel, GraphQL e afins seguem o caminho padrão do Qt."""
+        page = self._pagina()
+        with patch("app._file_log") as mock_log:
+            page.javaScriptConsoleMessage(self._nivel(), "[TikTok Pixel] blá", 1, "x")
+        mock_log.assert_not_called()
+
+
+class TestSpotifyTipoPedido:
+    """
+    Leitura do `accept` do seletor de arquivos.
+
+    Regressão de campo: o formulário do Spotify declara os formatos por
+    EXTENSÃO (é o que ele mostra: "mp3, m4a, wav, mpg, mp4, mov") e o
+    QtWebEngine repassa a lista crua — medido, chega
+    `['.mp3', '.m4a', '.wav', '.mpg', '.mp4', '.mov']`. A detecção antiga
+    procurava a palavra "audio" dentro dos tipos MIME, não casava com nada e
+    caía no seletor do Windows: o arquivo não era preenchido sozinho.
+    """
+
+    def _tipo(self, aceitos):
+        return app_module._spotify_tipo_pedido(aceitos)
+
+    def test_extensoes_do_spotify_sao_audio(self):
+        assert self._tipo([".mp3", ".m4a", ".wav", ".mpg", ".mp4", ".mov"]) == \
+            app_module._SP_PEDE_AUDIO
+
+    def test_mime_de_audio(self):
+        assert self._tipo(["audio/*"]) == app_module._SP_PEDE_AUDIO
+
+    def test_mime_de_audio_e_video(self):
+        assert self._tipo(["audio/*", "video/*"]) == app_module._SP_PEDE_AUDIO
+
+    def test_so_video_conta_como_audio(self):
+        """O Spotify aceita episódio em vídeo no mesmo campo do áudio."""
+        assert self._tipo(["video/mp4"]) == app_module._SP_PEDE_AUDIO
+
+    def test_mime_de_imagem(self):
+        assert self._tipo(["image/*"]) == app_module._SP_PEDE_IMAGEM
+
+    def test_extensoes_de_imagem(self):
+        assert self._tipo([".jpg", ".png"]) == app_module._SP_PEDE_IMAGEM
+
+    def test_imagem_tem_prioridade_quando_os_dois_aparecem(self):
+        """O passo da capa aceita só imagem; o do episódio, áudio e vídeo."""
+        assert self._tipo(["image/*", "audio/*"]) == app_module._SP_PEDE_IMAGEM
+
+    def test_lista_vazia_e_indefinido(self):
+        assert self._tipo([]) == app_module._SP_PEDE_INDEFINIDO
+
+    def test_none_e_indefinido(self):
+        assert self._tipo(None) == app_module._SP_PEDE_INDEFINIDO
+
+    def test_tipo_irreconhecivel_e_indefinido(self):
+        assert self._tipo(["application/pdf", ".docx"]) == \
+            app_module._SP_PEDE_INDEFINIDO
+
+    def test_maiusculas_e_espacos_nao_atrapalham(self):
+        assert self._tipo(["  .MP3 ", "AUDIO/*"]) == app_module._SP_PEDE_AUDIO
+
+    def test_extensao_parecida_nao_casa(self):
+        """`.mp3x` não é mp3 — o casamento é por sufixo exato."""
+        assert self._tipo([".mp3x"]) == app_module._SP_PEDE_INDEFINIDO
+
+
+class TestSpotifyChooseFiles:
+    """Entrega do arquivo no lugar do seletor do Windows."""
+
+    def _pagina(self, audio="", capa=""):
+        from PyQt6.QtWidgets import QWidget
+
+        self._dono = QWidget()          # mantém a página viva
+        return app_module._SpotifyPage._make_page(
+            self._dono, audio_path=audio, cover_path=capa
+        )
+
+    def _modo(self):
+        from PyQt6.QtWebEngineCore import QWebEnginePage
+
+        return QWebEnginePage.FileSelectionMode.FileSelectOpen
+
+    def _arquivos(self, tmp_path):
+        mp3 = tmp_path / "culto.mp3"
+        mp3.write_bytes(b"\x00" * 64)
+        jpg = tmp_path / "capa.jpg"
+        jpg.write_bytes(b"\xff\xd8\xff")
+        return str(mp3), str(jpg)
+
+    def test_entrega_o_audio_para_extensoes_do_spotify(self, tmp_path):
+        mp3, jpg = self._arquivos(tmp_path)
+        page = self._pagina(audio=mp3, capa=jpg)
+        with patch("app._file_log"):
+            r = page.chooseFiles(self._modo(), [], [".mp3", ".m4a", ".wav"])
+        assert r == [mp3]
+
+    def test_entrega_a_capa_para_imagem(self, tmp_path):
+        mp3, jpg = self._arquivos(tmp_path)
+        page = self._pagina(audio=mp3, capa=jpg)
+        with patch("app._file_log"):
+            r = page.chooseFiles(self._modo(), [], ["image/*"])
+        assert r == [jpg]
+
+    def test_accept_vazio_entrega_o_audio(self, tmp_path):
+        """Sem `accept`, o passo obrigatório do wizard é o do episódio."""
+        mp3, jpg = self._arquivos(tmp_path)
+        page = self._pagina(audio=mp3, capa=jpg)
+        with patch("app._file_log"):
+            r = page.chooseFiles(self._modo(), [], [])
+        assert r == [mp3]
+
+    def test_registra_no_log_o_que_entregou(self, tmp_path):
+        """Sem log, não havia como saber se a interceptação tinha funcionado."""
+        mp3, jpg = self._arquivos(tmp_path)
+        page = self._pagina(audio=mp3, capa=jpg)
+        with patch("app._file_log") as mock_log:
+            page.chooseFiles(self._modo(), [], ["audio/*"])
+        assert mock_log.called
+        assert "áudio" in mock_log.call_args.args[0]
+
+
+class TestSpotifyTopBar:
+    """
+    Barra de ferramentas das janelas do Spotify.
+
+    Regressão de campo: a barra da janela de publicação ocupava 503 px de uma
+    janela de 1000 px, empurrando a página do Spotify para a metade de baixo.
+    Causa: num QVBoxLayout, a altura máxima de uma linha aninhada depende dos
+    itens dela — e mudava conforme a ORDEM. Com o botão (altura fixa) à
+    esquerda a barra ficava sem limite; com ele à direita (janela de login),
+    ficava nos 37 px esperados. Ou seja, a janela de login só funcionava por
+    acidente de ordenação.
+    """
+
+    ALTURA = 40
+
+    @staticmethod
+    def _sessao():
+        """Sessão de mentira que aponta o WebView para about:blank (sem rede)."""
+        from PyQt6.QtWebEngineCore import QWebEngineProfile
+
+        s = MagicMock()
+        # Perfil anônimo: sem storage em disco, sem tocar credentials/
+        s.profile.return_value = QWebEngineProfile()
+        s.wizard_url.return_value = "about:blank"
+        s.login_url.return_value = "about:blank"
+        s.classify.return_value = "unknown"
+        return s
+
+    def _altura_da_barra(self, win, largura=1365, altura=1000):
+        """Mede quanto sobrou para a barra depois de dimensionar a janela."""
+        from PyQt6.QtWidgets import QApplication
+
+        win.resize(largura, altura)
+        win.show()
+        for _ in range(10):
+            QApplication.processEvents()
+        # Compara com o widget central, não com a altura pedida: a janela real
+        # perde alguns pixels para a moldura do sistema.
+        y = win._view.y()
+        sobra = win.centralWidget().height() - win._view.height()
+        win.close()
+        win.deleteLater()
+        return y, sobra
+
+    # ── o helper ────────────────────────────────────────────────────────────
+
+    def test_helper_fixa_a_altura(self):
+        from PyQt6.QtWidgets import QLabel
+
+        barra = app_module._spotify_top_bar([QLabel("a")], [QLabel("b")])
+        assert barra.minimumHeight() == self.ALTURA
+        assert barra.maximumHeight() == self.ALTURA
+
+    def test_helper_coloca_os_widgets(self):
+        from PyQt6.QtWidgets import QLabel, QPushButton
+
+        esq, dir_ = QPushButton("voltar"), QLabel("dica")
+        barra = app_module._spotify_top_bar([esq], [dir_])
+        assert esq.parent() is barra
+        assert dir_.parent() is barra
+
+    def test_helper_aceita_barra_vazia(self):
+        barra = app_module._spotify_top_bar([], [])
+        assert barra.maximumHeight() == self.ALTURA
+
+    # ── as janelas reais ────────────────────────────────────────────────────
+
+    def test_janela_de_publicacao_deixa_a_pagina_com_o_espaco(self):
+        win = app_module._SpotifyPublishWindow(
+            show_id="abc", episode_title="T", episode_description="D",
+            session=self._sessao(),
+        )
+        y, sobra = self._altura_da_barra(win)
+        assert y == self.ALTURA, f"barra ficou com {y}px"
+        # A barra é a ÚNICA coisa acima da página
+        assert sobra == self.ALTURA
+
+    def test_janela_de_login_deixa_a_pagina_com_o_espaco(self):
+        win = app_module._SpotifyLoginWindow(session=self._sessao())
+        y, sobra = self._altura_da_barra(win)
+        assert y == self.ALTURA, f"barra ficou com {y}px"
+        assert sobra == self.ALTURA
+
+    def test_altura_da_barra_nao_depende_do_tamanho_da_janela(self):
+        """O bug crescia com a janela: quanto maior, mais a barra engolia."""
+        alturas = []
+        for h in (600, 1000, 1400):
+            win = app_module._SpotifyPublishWindow(
+                show_id="abc", episode_title="T", episode_description="D",
+                session=self._sessao(),
+            )
+            y, _ = self._altura_da_barra(win, 1200, h)
+            alturas.append(y)
+        assert alturas == [self.ALTURA] * 3, alturas
+
+
+class TestSpotifySetupJs:
+    """
+    Geração do JS que declara título e descrição para o preenchedor.
+
+    Regressão: o escape manual antigo tratava só `\\` e `'`. A descrição do
+    YouTube é multi-linha (as reais têm ~25 linhas), e uma quebra de linha crua
+    dentro de `'...'` invalida o script inteiro — ele falha em silêncio e NEM o
+    título é preenchido, porque o preenchedor só age se a variável existir.
+    Verificado numa página real: as duas chegavam como `undefined`.
+    """
+
+    @staticmethod
+    def _valor(js: str, variavel: str):
+        """Extrai e desserializa o literal atribuído a uma das variáveis."""
+        import json
+        import re
+
+        m = re.search(rf"window\.{variavel} = (.*);", js)
+        assert m, f"{variavel} não encontrada em: {js!r}"
+        return json.loads(m.group(1))
+
+    def _js(self, titulo, descricao):
+        return app_module._SpotifyPublishWindow._build_setup_js(titulo, descricao)
+
+    def test_descricao_multilinha_preserva_o_conteudo(self):
+        desc = "Madalena, igreja acolhedora.\n\nTexto: Juízes 1.11-15\nRev. Denilson"
+        js = self._js("Culto", desc)
+        assert self._valor(js, "_spotifyDescription") == desc
+
+    def test_descricao_multilinha_nao_gera_quebra_crua(self):
+        """A quebra crua é o que invalidava o script."""
+        import re
+
+        js = self._js("Culto", "linha1\nlinha2")
+        literal = re.search(r"window\._spotifyDescription = (.*);", js).group(1)
+        assert "\n" not in literal
+        assert "\\n" in literal
+
+    def test_titulo_preservado(self):
+        titulo = "Diante da promessa do Senhor Juízes 1 11 - 15; Culto Solene"
+        assert self._valor(self._js(titulo, ""), "_spotifyTitle") == titulo
+
+    def test_aspas_simples_e_duplas_no_titulo(self):
+        titulo = """O "grande" dia d'Ele"""
+        assert self._valor(self._js(titulo, ""), "_spotifyTitle") == titulo
+
+    def test_barra_invertida(self):
+        titulo = r"Culto \ especial"
+        assert self._valor(self._js(titulo, ""), "_spotifyTitle") == titulo
+
+    def test_acentos_e_emoji(self):
+        """As descrições reais têm emoji (🌐 SIGA-NOS NAS REDES SOCIAIS)."""
+        desc = "Pregação 🌐 ação"
+        assert self._valor(self._js("t", desc), "_spotifyDescription") == desc
+
+    def test_nao_ascii_sai_escapado(self):
+        """`ensure_ascii` também neutraliza U+2028/U+2029, que quebram JS antigo."""
+        js = self._js("t", "ação quebra")
+        assert " " not in js
+        assert "\\u2028" in js
+
+    def test_carriage_return(self):
+        desc = "linha1\r\nlinha2"
+        assert self._valor(self._js("t", desc), "_spotifyDescription") == desc
+
+    def test_descricao_vazia(self):
+        assert self._valor(self._js("t", ""), "_spotifyDescription") == ""
+
+    def test_none_vira_string_vazia(self):
+        js = self._js(None, None)
+        assert self._valor(js, "_spotifyTitle") == ""
+        assert self._valor(js, "_spotifyDescription") == ""
+
+    def test_declara_as_duas_variaveis(self):
+        js = self._js("t", "d")
+        assert "window._spotifyTitle" in js
+        assert "window._spotifyDescription" in js
+
+
+class TestSpotifyPublishWindowGate:
+    """A janela de publicação não deve preencher a tela de login."""
+
+    class _Stub:
+        def __init__(self, veredito, url):
+            self._session = MagicMock()
+            self._session.classify.return_value = veredito
+            self._episode_title = "Culto"
+            self._episode_description = "Pregação"
+            self._view = MagicMock()
+            self._view.url.return_value.toString.return_value = url
+
+        def _build_setup_js(self, title, description):
+            """Delega para a implementação real (o stub não a reimplementa)."""
+            return app_module._SpotifyPublishWindow._build_setup_js(title, description)
+
+    def test_nao_injeta_js_na_tela_de_login(self):
+        """
+        Sem esse desvio, o primeiro input visível da página de login (o campo
+        de e-mail) receberia o título do episódio.
+        """
+        from domain.ports import SPOTIFY_LOGGED_OUT
+
+        stub = self._Stub(
+            SPOTIFY_LOGGED_OUT, "https://accounts.spotify.com/pt-BR/login"
+        )
+        app_module._SpotifyPublishWindow._on_load_finished(stub, True)
+        stub._view.page.return_value.runJavaScript.assert_not_called()
+
+    def test_tela_de_login_corrige_o_flag_para_deslogado(self):
+        """Se o Spotify pediu credenciais, o cache dizendo 'logado' está errado."""
+        from domain.ports import SPOTIFY_LOGGED_OUT
+
+        stub = self._Stub(
+            SPOTIFY_LOGGED_OUT, "https://accounts.spotify.com/pt-BR/login"
+        )
+        app_module._SpotifyPublishWindow._on_load_finished(stub, True)
+        stub._session.mark_logged_in.assert_called_once_with(False)
+
+    def test_nao_marca_como_logado_a_partir_daqui(self):
+        """
+        Este callback também roda ANTES de um eventual desvio para o login, com
+        a URL do wizard ainda no lugar — então ele nunca pode ligar o flag.
+        """
+        from domain.ports import SPOTIFY_LOGGED_IN
+
+        stub = self._Stub(
+            SPOTIFY_LOGGED_IN,
+            "https://creators.spotify.com/pod/show/abc/episode/wizard",
+        )
+        app_module._SpotifyPublishWindow._on_load_finished(stub, True)
+        stub._session.mark_logged_in.assert_not_called()
+        stub._session.observe_url.assert_not_called()
+
+    def test_injeta_js_na_pagina_do_wizard(self):
+        from domain.ports import SPOTIFY_LOGGED_IN
+
+        stub = self._Stub(
+            SPOTIFY_LOGGED_IN,
+            "https://creators.spotify.com/pod/show/abc/episode/wizard",
+        )
+        app_module._SpotifyPublishWindow._on_load_finished(stub, True)
+        assert stub._view.page.return_value.runJavaScript.call_count >= 1
+
+    def test_load_falho_nao_injeta(self):
+        from domain.ports import SPOTIFY_LOGGED_IN
+
+        stub = self._Stub(SPOTIFY_LOGGED_IN, "https://creators.spotify.com/pod/x")
+        app_module._SpotifyPublishWindow._on_load_finished(stub, False)
+        stub._view.page.return_value.runJavaScript.assert_not_called()
+
+
 class TestSpotifyPublish:
     """Fluxo de publicação no Spotify for Podcasters."""
 
@@ -3359,6 +4610,7 @@ class TestSpotifyPublish:
         segments = [{"video_id": "VID1", "title": "Culto 19/05", "start": None, "end": None}]
 
         with patch("baixar_audio.load_config", return_value=cfg), \
+             _spotify_logado(application), \
              patch.object(application, "_build_presenter") as mock_pres:
             mock_pres.return_value.process_segments.return_value = ["Culto 19/05"]
             application._worker_phase2("19/05/2026", segments)
@@ -3390,9 +4642,8 @@ class TestSpotifyPublish:
 
         assert application._spotify_pending is None
 
-    def test_on_done_dispara_spotify_dialog_quando_pending(self, application):
-        """_on_done com _spotify_pending não-None deve agendar _show_spotify_predialog."""
-        application._spotify_pending = {
+    def _pending_exemplo(self) -> dict:
+        return {
             "show_id":     "abc",
             "video_id":    "VID1",
             "title":       "Titulo",
@@ -3400,20 +4651,28 @@ class TestSpotifyPublish:
             "date_str":    "19/05/2026",
             "tags":        "",
         }
-        with patch.object(application, "_show_spotify_predialog") as mock_show, \
-             patch("app.QTimer") as mock_timer:
-            application._on_done()
 
-        mock_timer.singleShot.assert_called_once()
-        # Após _on_done, _spotify_pending deve ser None (consumido)
-        assert application._spotify_pending is None
+    def test_on_done_dispara_spotify_dialog_quando_pending(self, application):
+        """_on_done com _spotify_pending não-None deve agendar o diálogo."""
+        application._spotify_pending = self._pending_exemplo()
+        try:
+            with patch.object(application, "_show_spotify_predialog"):
+                application._on_done()
+
+            assert application._spotify_predialog_timer.isActive()
+            assert application._spotify_predialog_pending["video_id"] == "VID1"
+            # Após _on_done, _spotify_pending deve ser None (consumido)
+            assert application._spotify_pending is None
+        finally:
+            application._spotify_predialog_timer.stop()
+            application._spotify_predialog_pending = None
 
     def test_on_done_sem_pending_nao_dispara_spotify_dialog(self, application):
         application._spotify_pending = None
-        with patch.object(application, "_show_spotify_predialog") as mock_show, \
-             patch("app.QTimer") as mock_timer:
+        with patch.object(application, "_show_spotify_predialog") as mock_show:
             application._on_done()
         mock_show.assert_not_called()
+        assert application._spotify_predialog_timer.isActive() is False
 
     def test_show_spotify_predialog_abre_dialog(self, application, tmp_path):
         """_show_spotify_predialog instancia _SpotifyPrePublishDialog."""
@@ -3459,23 +4718,92 @@ class TestSpotifyPublish:
         kwargs = MockDlg.call_args.kwargs
         assert kwargs["description"] == ""
 
-    def test_spotify_pending_consumido_antes_de_abrir_dialog(self, application, tmp_path):
-        """O campo _spotify_pending deve ser None antes de abrir o diálogo."""
+    def test_spotify_pending_consumido_antes_de_abrir_dialog(self, application):
+        """
+        O campo _spotify_pending deve ser None quando o diálogo abre.
+
+        A versão anterior deste teste apenas trocava ``_show_spotify_predialog``
+        por um mock e chamava ``_on_done()``, deixando o timer REAL armado — e o
+        callback resolve ``self._show_spotify_predialog`` só na hora de disparar,
+        quando o patch já foi desfeito. O modal de verdade abria fora do teste
+        (ver ``_sem_timers_orfaos`` em conftest.py) e travava a suíte. Aqui o
+        callback agendado é disparado à mão, sem depender do loop de eventos.
+        """
         application._spotify_pending = {
             "show_id": "s", "video_id": "v", "title": "t",
             "description": "", "date_str": "01/01/2026", "tags": "",
         }
-        consumed_before_open = []
+        pendente_ao_abrir = []
 
-        def fake_show(pending):
-            consumed_before_open.append(application._spotify_pending)
-
-        with patch.object(application, "_show_spotify_predialog", side_effect=fake_show):
+        with patch.object(
+            application, "_show_spotify_predialog",
+            side_effect=lambda pending: pendente_ao_abrir.append(
+                (application._spotify_pending, pending)
+            ),
+        ):
             application._on_done()
+            assert application._spotify_pending is None
+            # Dispara o callback do timer sem esperar o loop de eventos
+            application._abrir_spotify_predialog()
 
-        # _spotify_pending já era None quando o diálogo foi "aberto" (via timer real)
-        # Aqui verificamos apenas que o campo foi zerado após _on_done
-        assert application._spotify_pending is None
+        assert len(pendente_ao_abrir) == 1
+        pendente_no_app, recebido = pendente_ao_abrir[0]
+        assert pendente_no_app is None          # já consumido quando abriu
+        assert recebido["video_id"] == "v"      # mas o payload chegou íntegro
+
+    def test_abrir_predialog_sem_agendamento_nao_faz_nada(self, application):
+        application._spotify_predialog_pending = None
+        with patch.object(application, "_show_spotify_predialog") as mock_show:
+            application._abrir_spotify_predialog()
+        mock_show.assert_not_called()
+
+    def test_agendar_predialog_substitui_agendamento_anterior(self, application):
+        """Dois _on_done seguidos não podem enfileirar dois diálogos."""
+        try:
+            application._agendar_spotify_predialog({"video_id": "primeiro"})
+            application._agendar_spotify_predialog({"video_id": "segundo"})
+
+            with patch.object(application, "_show_spotify_predialog") as mock_show:
+                application._abrir_spotify_predialog()
+                application._abrir_spotify_predialog()   # nada sobrou
+
+            assert mock_show.call_count == 1
+            assert mock_show.call_args.args[0]["video_id"] == "segundo"
+        finally:
+            application._spotify_predialog_timer.stop()
+            application._spotify_predialog_pending = None
+
+    def test_fechar_app_cancela_predialog_agendado(self, application):
+        """
+        Fechar o app dentro dos 800 ms do agendamento não pode deixar um modal
+        abrir depois — era o que um QTimer.singleShot solto fazia (não dá para
+        cancelar), e é o motivo de o timer ser filho do App.
+        """
+        from PyQt6.QtGui import QCloseEvent
+
+        application._agendar_spotify_predialog(self._pending_exemplo())
+        assert application._spotify_predialog_timer.isActive()
+
+        application.closeEvent(QCloseEvent())
+
+        assert application._spotify_predialog_timer.isActive() is False
+        assert application._spotify_predialog_pending is None
+        # O _queue_timer é reiniciado para não afetar os testes seguintes
+        application._queue_timer.start(100)
+
+    def test_timer_do_predialog_e_filho_do_app_e_de_disparo_unico(self, application):
+        """
+        Propriedades que a rede de segurança da suíte depende: o timer precisa
+        ser FILHO do App (para ``findChildren`` achá-lo) e de disparo único
+        (a fixture ``_sem_timers_orfaos`` só desarma esses, pois os repetitivos
+        — como o ``_queue_timer`` — são estado normal do App).
+        """
+        from PyQt6.QtCore import QTimer
+
+        timer = application._spotify_predialog_timer
+        assert timer.parent() is application
+        assert timer.isSingleShot() is True
+        assert timer in application.findChildren(QTimer)
 
     def test_worker_phase2_prefixo_concatenado_no_titulo(self, application):
         cfg = baixar_audio.load_config()
@@ -3487,6 +4815,7 @@ class TestSpotifyPublish:
         segments = [{"video_id": "V", "title": "Culto Manha", "start": None, "end": None}]
 
         with patch("baixar_audio.load_config", return_value=cfg), \
+             _spotify_logado(application), \
              patch.object(application, "_build_presenter") as mock_pres:
             mock_pres.return_value.process_segments.return_value = ["Culto Manha"]
             application._worker_phase2("01/01/2026", segments)

@@ -357,6 +357,72 @@ class INotifier(Protocol):
 
 
 # ---------------------------------------------------------------------------
+# Sessão do Spotify for Creators
+# ---------------------------------------------------------------------------
+
+# Vocabulário dos vereditos de ``ISpotifySession.observe_url``. Fica no domínio
+# porque faz parte do contrato: tanto o adaptador que classifica quanto a UI que
+# reage precisam concordar sobre os nomes.
+SPOTIFY_LOGGED_IN  = "logged_in"
+SPOTIFY_LOGGED_OUT = "logged_out"
+SPOTIFY_UNKNOWN    = "unknown"
+
+
+@runtime_checkable
+class ISpotifySession(Protocol):
+    """
+    Guarda a sessão do usuário no Spotify for Creators entre execuções.
+
+    Implementações: SpotifyWebSession (infraestrutura/spotify)
+
+    A publicação do episódio é feita pelo próprio usuário num navegador
+    embutido, então "estar logado" é uma propriedade do navegador — não há
+    token que o domínio possa manipular. Este contrato expõe apenas o que a
+    apresentação precisa saber (está logado? deslogue; qual perfil usar), sem
+    revelar como a sessão é guardada.
+    """
+
+    def is_logged_in(self) -> bool:
+        """Retorna True se existe sessão guardada do Spotify."""
+        ...
+
+    def mark_logged_in(self, value: bool) -> None:
+        """Registra o estado de login (persistido entre execuções)."""
+        ...
+
+    def classify(self, url: str) -> str:
+        """
+        Veredito cru de uma URL do fluxo do Spotify, sem gravar nada.
+
+        Retorna 'logged_in', 'logged_out' ou 'unknown'. O negativo é conclusivo;
+        o positivo não prova sessão por si (ver a implementação), então persistir
+        é decisão de quem acompanha a navegação.
+        """
+        ...
+
+    def logout(self) -> None:
+        """Descarta a sessão guardada."""
+        ...
+
+    def profile(self):
+        """
+        Perfil do navegador embutido a ser usado pelas janelas do Spotify.
+
+        Objeto opaco para o domínio: quem o recebe apenas repassa à view. É o
+        que faz o login sobreviver ao fechamento da janela.
+        """
+        ...
+
+    def login_url(self) -> str:
+        """URL de entrada do login (a tela de credenciais)."""
+        ...
+
+    def wizard_url(self, show_id: str) -> str:
+        """URL do formulário de novo episódio do show informado."""
+        ...
+
+
+# ---------------------------------------------------------------------------
 # Editor de áudio (pós-processamento: vinhetas, fade, EQ, denoise)
 # ---------------------------------------------------------------------------
 

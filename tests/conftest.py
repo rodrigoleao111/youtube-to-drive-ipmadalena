@@ -29,6 +29,39 @@ _QApplication.setAttribute(_Qt.ApplicationAttribute.AA_ShareOpenGLContexts)
 _qapp = _QApplication.instance() or _QApplication(sys.argv)
 
 
+@pytest.fixture(autouse=True)
+def _sem_timers_orfaos():
+    """
+    Desarma, ao fim de cada teste, os ``QTimer`` de disparo único que ficaram
+    ativos — rede de segurança contra travamento da suíte inteira.
+
+    Por que isso existe: o loop de eventos do Qt **não roda** durante os testes
+    (ninguém chama ``app.exec()``), então um timer armado por um teste fica
+    pendente. Quando um teste posterior cria uma janela Tcl/Tk
+    (``customtkinter`` chama ``self.update()`` internamente ao ajustar a cor da
+    barra de título), o Tcl pompa a fila de mensagens do **Windows** — e com
+    ela os timers do Qt. O callback atrasado dispara ali dentro, fora do teste
+    que o criou.
+
+    Foi exatamente assim que a suíte travava para sempre em
+    ``test_player_window.py``: um teste de ``_on_done`` deixava pendente o
+    timer do diálogo de pré-publicação do Spotify, que abria um modal
+    (``exec()``) dentro do ``update()`` do Tk — sem ninguém para fechá-lo.
+
+    Só timers de disparo único são parados: os repetitivos (ex.: o
+    ``_queue_timer`` do App, que faz o polling worker → GUI) são parte do
+    estado normal e precisam continuar rodando.
+    """
+    yield
+
+    from PyQt6.QtCore import QTimer
+
+    for widget in _qapp.topLevelWidgets():
+        for timer in widget.findChildren(QTimer):
+            if timer.isActive() and timer.isSingleShot():
+                timer.stop()
+
+
 @pytest.fixture(scope="session")
 def shared_app():
     """

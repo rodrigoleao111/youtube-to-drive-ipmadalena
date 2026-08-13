@@ -39,7 +39,7 @@ from setup_wizard import SetupWizard
 from player_window_qt import PlayerWindowQt as PlayerWindow
 
 
-APP_VERSION = "v3.5.0"
+APP_VERSION = "v3.5.1"
 
 # ---------------------------------------------------------------------------
 # Instância única — impede abrir dois apps ao mesmo tempo
@@ -106,6 +106,11 @@ _SUB_BY_DATE = (
 _SUB_BY_LINK = (
     "Cole o link do vídeo no YouTube — a busca por data é ignorada"
 )
+
+# Complemento das mensagens do gate do Spotify, para quem está FORA da aba de
+# configurações (tooltip do botão na tela Início, aviso, log). Dentro da própria
+# aba a frase é fechada de outro jeito — ver _refresh_spotify_account.
+_SPOTIFY_ONDE = " em Configurações → Spotify."
 
 
 def _upload_date_to_br(upload_date: str) -> str:
@@ -955,8 +960,11 @@ class App(QMainWindow):
         # Spotify publishing — preenchido em _worker_phase2, consumido em _on_done
         self._spotify_pending: dict | None = None
 
-        from composition_root import build_notifier
+        from composition_root import build_notifier, build_spotify_session
         self._notifier = build_notifier()
+        # Uma única sessão do Spotify por execução (dona do perfil persistente
+        # do navegador embutido). O perfil em si só é criado no primeiro uso.
+        self._spotify_session = build_spotify_session()
 
         self._build_ui()
 
@@ -964,6 +972,14 @@ class App(QMainWindow):
         self._queue_timer = QTimer(self)
         self._queue_timer.timeout.connect(self._process_queue)
         self._queue_timer.start(100)
+
+        # Timer do diálogo de pré-publicação no Spotify (ver
+        # _agendar_spotify_predialog): filho do App e guardado aqui para poder
+        # ser cancelado — um QTimer.singleShot solto não pode.
+        self._spotify_predialog_pending: dict | None = None
+        self._spotify_predialog_timer = QTimer(self)
+        self._spotify_predialog_timer.setSingleShot(True)
+        self._spotify_predialog_timer.timeout.connect(self._abrir_spotify_predialog)
 
         # Atualiza yt-dlp em background
         threading.Thread(target=self._init_update_ytdlp, daemon=True).start()
@@ -1374,14 +1390,19 @@ class App(QMainWindow):
             btn_upload.clicked.connect(lambda: self._reupload_file(_fp, btn_upload))
             acts.addWidget(btn_upload)
 
-        # Botão Spotify — aparece somente quando show_id está configurado
+        # Botão Spotify — aparece quando o Show ID está configurado e só fica
+        # clicável quando também há conta logada (as duas condições do gate).
         _sp_cfg = baixar_audio.load_config().get("spotify", {})
         if _sp_cfg.get("show_id", "").strip():
             btn_spotify = QPushButton()
             btn_spotify.setIcon(_logo_icon("spotify", 16))
             btn_spotify.setObjectName("gray_btn")
             btn_spotify.setFixedWidth(32)
-            btn_spotify.setToolTip("Publicar no Spotify")
+            _pronto, _motivo = self._spotify_publish_ready()
+            btn_spotify.setEnabled(_pronto)
+            btn_spotify.setToolTip(
+                "Publicar no Spotify" if _pronto else _motivo + _SPOTIFY_ONDE
+            )
             btn_spotify.clicked.connect(lambda: self._spotify_from_local(_fp))
             acts.addWidget(btn_spotify)
 
@@ -1509,6 +1530,50 @@ class App(QMainWindow):
 
         threading.Thread(target=worker, daemon=True).start()
 
+    @staticmethod
+    def _spotify_extras(audio_path: str) -> tuple[str, str]:
+        """
+        Localiza a descrição e a capa geradas pelo downloader para um áudio.
+
+        Retorna ``(descricao, caminho_da_capa)`` — strings vazias quando não há.
+
+        O downloader grava `descricao.txt` e `capa.jpg` **na subpasta do
+        episódio**, com nome fixo (`YtDlpAudioDownloader._save_extras`). Antes do
+        fluxo de subpastas os extras ficavam com o nome do áudio — daí o
+        fallback para `<base>.txt` / `<base>.jpg`, que mantém os episódios
+        antigos funcionando.
+        """
+        pasta = os.path.dirname(audio_path)
+        base  = os.path.splitext(audio_path)[0]
+
+        descricao = ""
+        for cand in (os.path.join(pasta, "descricao.txt"), base + ".txt"):
+            if not os.path.isfile(cand):
+                continue
+            try:
+                with open(cand, encoding="utf-8") as fh:
+                    descricao = fh.read().strip()
+            except UnicodeDecodeError:
+                # Arquivo antigo gravado na codepage do Windows: melhor uma
+                # descrição com algum caractere torto do que campo vazio.
+                try:
+                    with open(cand, encoding="cp1252", errors="replace") as fh:
+                        descricao = fh.read().strip()
+                except Exception:
+                    pass
+            except Exception:
+                pass
+            if descricao:
+                break
+
+        capa = ""
+        for cand in (os.path.join(pasta, "capa.jpg"), base + ".jpg"):
+            if os.path.isfile(cand):
+                capa = cand
+                break
+
+        return descricao, capa
+
     def _spotify_from_local(self, fpath: str):
         """
         Abre o diálogo de pré-publicação no Spotify para um arquivo local
@@ -1520,11 +1585,10 @@ class App(QMainWindow):
         sp_cfg = cfg.get("spotify", {})
         show_id = sp_cfg.get("show_id", "").strip()
 
-        if not show_id:
+        pronto, motivo = self._spotify_publish_ready()
+        if not pronto:
             QMessageBox.information(
-                self,
-                "Spotify não configurado",
-                "Configure o Show ID do Spotify em Configurações → Spotify.",
+                self, "Spotify não configurado", motivo + _SPOTIFY_ONDE
             )
             return
 
@@ -1538,21 +1602,23 @@ class App(QMainWindow):
         except Exception:
             date_str = ""
 
-        cover_image_path = ""
-        _c = os.path.splitext(fpath)[0] + ".jpg"
-        if os.path.isfile(_c):
-            cover_image_path = _c
+        # Descrição e capa que o downloader salvou junto do áudio — sem isso o
+        # diálogo abria sempre com a descrição em branco e sem miniatura.
+        description, cover_image_path = self._spotify_extras(fpath)
+        if not description:
+            _file_log(f"Spotify: descrição não encontrada para '{fpath}'.")
 
         dlg = _SpotifyPrePublishDialog(
             show_id          = show_id,
             video_id         = "",
             title            = ep_title,
-            description      = "",
+            description      = description,
             date_str         = date_str,
             tags             = sp_cfg.get("default_tags", ""),
             audio_path       = fpath,
             cover_image_path = cover_image_path,
             parent           = self,
+            session          = self._spotify_session,
         )
         dlg.exec()
 
@@ -2308,6 +2374,47 @@ class App(QMainWindow):
 
         sp_cfg = baixar_audio.load_config().get("spotify", {})
 
+        # ── Card: Conta do Spotify ─────────────────────────────────────────
+        # Primeiro card porque é a primeira condição: sem login não há
+        # publicação, mesmo com o Show ID preenchido.
+        acc_card = QFrame()
+        acc_card.setObjectName("cfg_card")
+        acc = QVBoxLayout(acc_card)
+        acc.setContentsMargins(20, 16, 20, 16)
+        acc.setSpacing(8)
+
+        tr0 = QHBoxLayout()
+        tr0.addWidget(self._icon_label("👤", 22))
+        lbl0 = QLabel("Conta do Spotify")
+        lbl0.setStyleSheet("font-size: 14px; font-weight: bold;")
+        tr0.addWidget(lbl0)
+        tr0.addStretch()
+        acc.addLayout(tr0)
+
+        acc_hint = QLabel(
+            "Entre na conta que administra o podcast. O login fica salvo neste "
+            "computador, então você não precisa repetir a cada publicação."
+        )
+        acc_hint.setStyleSheet(f"color: {P.HINT}; font-size: 11px;")
+        acc_hint.setWordWrap(True)
+        acc.addWidget(acc_hint)
+
+        sr0 = QHBoxLayout()
+        self._cfg_spotify_status_label = QLabel("")
+        self._cfg_spotify_login_btn = QPushButton("")
+        self._cfg_spotify_login_btn.setFixedWidth(110)
+        self._cfg_spotify_login_btn.clicked.connect(self._spotify_toggle_login)
+        sr0.addWidget(self._cfg_spotify_status_label, stretch=1)
+        sr0.addWidget(self._cfg_spotify_login_btn)
+        acc.addLayout(sr0)
+
+        # Diz qual das duas condições ainda falta para a publicação funcionar.
+        self._cfg_spotify_gate_label = QLabel("")
+        self._cfg_spotify_gate_label.setWordWrap(True)
+        self._cfg_spotify_gate_label.setStyleSheet(f"font-size: 11px;")
+        acc.addWidget(self._cfg_spotify_gate_label)
+        layout.addWidget(acc_card)
+
         # ── Card: Show ID ──────────────────────────────────────────────────
         sid_card = QFrame()
         sid_card.setObjectName("cfg_card")
@@ -2396,6 +2503,7 @@ class App(QMainWindow):
         layout.addStretch()
         scroll.setWidget(container)
         outer.addWidget(scroll)
+        self._refresh_spotify_account()
         return tab
 
     @staticmethod
@@ -2469,6 +2577,115 @@ class App(QMainWindow):
         self._cfg_feedback_label.setText(f"Erro na autorização: {msg}")
         self._cfg_feedback_label.setStyleSheet(f"color: {P.ERROR}; font-size: 11px;")
 
+    # -----------------------------------------------------------------------
+    # Conta do Spotify (login persistente no navegador embutido)
+    # -----------------------------------------------------------------------
+
+    def _spotify_publish_ready(self) -> tuple[bool, str]:
+        """
+        Diz se a publicação no Spotify está liberada e, se não, o que falta.
+
+        Duas condições, ambas obrigatórias: uma conta logada e o Show ID
+        configurado. Sem o Show ID não há para onde enviar; sem login o
+        formulário do Spotify abriria na tela de credenciais.
+
+        O motivo vem sem ponto final e sem dizer onde resolver — quem exibe
+        completa a frase, porque dentro da própria aba de Spotify mandar o
+        usuário "ir em Configurações → Spotify" seria absurdo.
+        """
+        sp_cfg = baixar_audio.load_config().get("spotify", {})
+        if not sp_cfg.get("show_id", "").strip():
+            return False, "Configure o Show ID do Spotify"
+        if not self._spotify_session.is_logged_in():
+            return False, "Entre na sua conta do Spotify"
+        return True, ""
+
+    def _refresh_spotify_account(self):
+        """Atualiza o card de conta (status, botão) e o aviso do que falta."""
+        logado = self._spotify_session.is_logged_in()
+        if logado:
+            self._cfg_spotify_status_label.setText("✓  Conectado")
+            self._cfg_spotify_status_label.setStyleSheet(
+                f"color: {P.GREEN}; font-weight: bold;"
+            )
+            self._cfg_spotify_login_btn.setText("Sair")
+            self._cfg_spotify_login_btn.setStyleSheet(
+                f"background: {P.RED}; border-radius: 4px;"
+            )
+        else:
+            self._cfg_spotify_status_label.setText("✗  Não conectado")
+            self._cfg_spotify_status_label.setStyleSheet(
+                f"color: {P.ERROR}; font-weight: bold;"
+            )
+            self._cfg_spotify_login_btn.setText("Entrar")
+            self._cfg_spotify_login_btn.setStyleSheet(
+                f"background: {P.GREEN}; border-radius: 4px;"
+            )
+
+        pronto, motivo = self._spotify_publish_ready()
+        if pronto:
+            self._cfg_spotify_gate_label.setText(
+                "✓  Publicação no Spotify liberada."
+            )
+            self._cfg_spotify_gate_label.setStyleSheet(
+                f"color: {P.GREEN}; font-size: 11px;"
+            )
+        else:
+            # Aqui o usuário já está na tela certa — só falta a ação.
+            self._cfg_spotify_gate_label.setText(
+                f"⚠  {motivo} para liberar a publicação."
+            )
+            self._cfg_spotify_gate_label.setStyleSheet(
+                f"color: {P.WARN}; font-size: 11px;"
+            )
+
+    def _spotify_toggle_login(self):
+        """Entra na conta (abre o navegador embutido) ou encerra a sessão."""
+        if self._spotify_session.is_logged_in():
+            resp = QMessageBox.question(
+                self,
+                "Sair do Spotify",
+                "Encerrar a sessão do Spotify neste computador?\n\n"
+                "Você precisará entrar de novo para publicar episódios.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if resp != QMessageBox.StandardButton.Yes:
+                return
+            self._spotify_session.logout()
+            self._refresh_spotify_account()
+            self._cfg_feedback_label.setText("Sessão do Spotify encerrada.")
+            self._cfg_feedback_label.setStyleSheet(
+                f"color: {P.WARN}; font-size: 11px;"
+            )
+            _file_log("Spotify: sessão encerrada pelo usuário.")
+            return
+
+        self._spotify_login_window = _SpotifyLoginWindow(
+            session   = self._spotify_session,
+            on_finish = self._on_spotify_login_finished,
+            parent    = self,
+        )
+        self._spotify_login_window.show()
+
+    def _on_spotify_login_finished(self, logado: bool):
+        """Callback da janela de login — atualiza o card e dá o retorno na UI."""
+        self._refresh_spotify_account()
+        if logado:
+            self._cfg_feedback_label.setText("Spotify conectado com sucesso!")
+            self._cfg_feedback_label.setStyleSheet(
+                f"color: {P.GREEN}; font-size: 11px;"
+            )
+            _file_log("Spotify: login concluído.")
+        else:
+            self._cfg_feedback_label.setText(
+                "Login do Spotify não concluído. Tente novamente."
+            )
+            self._cfg_feedback_label.setStyleSheet(
+                f"color: {P.WARN}; font-size: 11px;"
+            )
+            _file_log("Spotify: janela de login fechada sem concluir.")
+
     def _open_today_log(self):
         log_path = os.path.join(
             baixar_audio.LOGS_DIR,
@@ -2516,16 +2733,24 @@ class App(QMainWindow):
             current["video_quality"]   = (
                 "baixa" if self._cfg_video_quality_baixa.isChecked() else "alta"
             )
+            # `logged_in` é preservado: ele não vem de nenhum campo da tela, e
+            # sobrescrever o dict inteiro deslogaria o usuário a cada save.
+            _sp_atual = current.get("spotify") or {}
             current["spotify"] = {
                 "show_id":      self._cfg_spotify_show_id.text().strip(),
                 "title_prefix": self._cfg_spotify_title_prefix.text().strip(),
                 "default_tags": self._cfg_spotify_default_tags.text().strip(),
+                "logged_in":    bool(_sp_atual.get("logged_in", False)),
             }
             repo.save(current)
         except Exception as e:
             self._cfg_feedback_label.setText(f"Erro ao salvar: {e}")
             self._cfg_feedback_label.setStyleSheet(f"color: {P.ERROR}; font-size: 11px;")
             return
+
+        # O Show ID acabou de mudar → o aviso do que falta para publicar
+        # precisa refletir o novo estado.
+        self._refresh_spotify_account()
 
         self._cfg_feedback_label.setText("Configurações salvas com sucesso!")
         self._cfg_feedback_label.setStyleSheet(f"color: {P.GREEN}; font-size: 11px;")
@@ -3088,7 +3313,18 @@ class App(QMainWindow):
             if segments:
                 sp_cfg = baixar_audio.load_config().get("spotify", {})
                 show_id = sp_cfg.get("show_id", "").strip()
-                if show_id:
+                pronto, motivo = self._spotify_publish_ready()
+                if not pronto and show_id:
+                    # Show ID preenchido = o usuário quer publicar, então o
+                    # desvio precisa aparecer no log (antes era silencioso).
+                    # Sem Show ID nenhum, o Spotify não faz parte do fluxo
+                    # dele — avisar a cada execução seria só ruído.
+                    self._queue.put((
+                        "log",
+                        "Publicação no Spotify não oferecida: "
+                        + motivo + _SPOTIFY_ONDE,
+                    ))
+                elif pronto:
                     first    = segments[0]
                     prefix   = sp_cfg.get("title_prefix", "")
                     ep_title = (prefix + first.get("title", "")) if prefix else first.get("title", "")
@@ -3144,6 +3380,7 @@ class App(QMainWindow):
     def _open_settings(self):
         self._switch_page(3)
         self._refresh_config_auth()
+        self._refresh_spotify_account()
 
     def _check_auth_visibility(self):
         if baixar_audio.check_auth_status():
@@ -3497,7 +3734,7 @@ class App(QMainWindow):
         if self._spotify_pending:
             pending = self._spotify_pending
             self._spotify_pending = None
-            QTimer.singleShot(800, lambda: self._show_spotify_predialog(pending))
+            self._agendar_spotify_predialog(pending)
 
     def _on_error(self, msg: str):
         self._running = False
@@ -3508,6 +3745,35 @@ class App(QMainWindow):
         self._append_log(f"ERRO: {msg}")
         _file_log(f"ERRO: {msg}")
         self._show_error(msg)
+
+    # Espera antes de abrir o diálogo: dá tempo de a notificação de conclusão
+    # aparecer e de a GUI assentar antes de um modal roubar o foco.
+    _SPOTIFY_PREDIALOG_MS = 800
+
+    def _agendar_spotify_predialog(self, pending: dict) -> None:
+        """
+        Agenda a abertura do diálogo de pré-publicação para daqui a
+        ``_SPOTIFY_PREDIALOG_MS``.
+
+        Usa o timer próprio criado no ``__init__`` (filho do App) em vez de
+        ``QTimer.singleShot``: um singleShot solto **não pode ser cancelado**.
+        Se o usuário fechasse o app dentro da janela de 800 ms, o timer órfão
+        disparava depois e abria um diálogo modal sobre uma janela já morta —
+        e, nos testes, disparava dentro do ``update()`` do Tcl/Tk
+        (``customtkinter``, que pompa a fila de mensagens do Windows e com ela
+        os timers do Qt), travando a suíte para sempre no ``exec()`` do modal.
+        Ver ``closeEvent``, que para o timer.
+        """
+        self._spotify_predialog_pending = pending
+        self._spotify_predialog_timer.stop()      # substitui agendamento anterior
+        self._spotify_predialog_timer.start(self._SPOTIFY_PREDIALOG_MS)
+
+    def _abrir_spotify_predialog(self) -> None:
+        """Slot do ``_spotify_predialog_timer`` — consome o pedido agendado."""
+        pending = self._spotify_predialog_pending
+        self._spotify_predialog_pending = None
+        if pending:
+            self._show_spotify_predialog(pending)
 
     def _show_spotify_predialog(self, pending: dict):
         """
@@ -3528,23 +3794,26 @@ class App(QMainWindow):
         )
         audio_path = candidates[0] if candidates else ""
 
+        # Fallback para os extras: o `pending` os traz de `_worker_phase2`, mas
+        # se a subpasta não foi encontrada lá, procuramos ao lado do áudio.
+        description      = pending.get("description", "")
         cover_image_path = pending.get("cover_image_path", "")
-        # fallback: procura .jpg ao lado do arquivo de áudio
-        if not cover_image_path and audio_path:
-            _c = os.path.splitext(audio_path)[0] + ".jpg"
-            if os.path.isfile(_c):
-                cover_image_path = _c
+        if audio_path and (not description or not cover_image_path):
+            _desc, _capa = self._spotify_extras(audio_path)
+            description      = description      or _desc
+            cover_image_path = cover_image_path or _capa
 
         dlg = _SpotifyPrePublishDialog(
             show_id          = pending["show_id"],
             video_id         = pending["video_id"],
             title            = pending["title"],
-            description      = pending.get("description", ""),
+            description      = description,
             date_str         = pending["date_str"],
             tags             = pending["tags"],
             audio_path       = audio_path,
             cover_image_path = cover_image_path,
             parent           = self,
+            session          = self._spotify_session,
         )
         dlg.exec()
 
@@ -3568,6 +3837,10 @@ class App(QMainWindow):
                 event.ignore()
                 return
         self._queue_timer.stop()
+        # Sem isso, um diálogo de pré-publicação agendado nos últimos 800 ms
+        # abriria depois da janela fechar (ver _agendar_spotify_predialog).
+        self._spotify_predialog_timer.stop()
+        self._spotify_predialog_pending = None
         event.accept()
 
 
@@ -5256,63 +5529,285 @@ class _AudioSettingsTab(QWidget):
 # ---------------------------------------------------------------------------
 
 # JavaScript injetado na página do Spotify for Podcasters após o carregamento.
-# Preenche os campos do formulário React usando os valores passados como variáveis
-# globais (definidas antes da injeção via QWebEnginePage.runJavaScript).
+# Preenche título e descrição usando as variáveis definidas por
+# `_SpotifyPublishWindow._build_setup_js`.
+#
+# Por que um observador em vez de algumas tentativas: o wizard é uma SPA. Sair de
+# "Upload" para "Details" NÃO recarrega a página, então `loadFinished` não
+# dispara de novo — e os campos de título/descrição só existem no segundo passo.
+# A versão anterior tentava 10 vezes em 6 s, ainda na tela de Upload, desistia, e
+# nunca via os campos aparecerem (relato de campo: arquivo entrou, texto não).
+#
+# Regras de convivência com o usuário:
+#   - cada campo é preenchido UMA vez e só se estiver vazio (nunca sobrescreve
+#     o que ele digitou);
+#   - o observador se desliga sozinho ao concluir ou após o prazo;
+#   - tudo é registrado no console, que o app grava no log (linhas `js:`).
 _SPOTIFY_FILL_JS = r"""
-(function() {
-    // Helper: força o React a reconhecer a mudança de valor do input/textarea
-    function setNativeValue(el, value) {
-        var nativeInputValueSetter = Object.getOwnPropertyDescriptor(
-            window.HTMLInputElement.prototype, 'value'
-        );
-        var nativeTextAreaSetter = Object.getOwnPropertyDescriptor(
-            window.HTMLTextAreaElement.prototype, 'value'
-        );
-        var setter = el.tagName === 'TEXTAREA' ? nativeTextAreaSetter : nativeInputValueSetter;
-        if (setter && setter.set) {
-            setter.set.call(el, value);
-        } else {
-            el.value = value;
-        }
-        el.dispatchEvent(new Event('input', { bubbles: true }));
+(function () {
+    if (window.__ipmFiller) { window.__ipmFiller.tenta('reinjecao'); return; }
+
+    var PRAZO_MS  = 5 * 60 * 1000;   // desiste depois disso
+    var DEBOUNCE  = 300;
+    var inicio    = Date.now();
+    var feito     = { titulo: false, descricao: false };
+    var observer  = null, timer = null, pendente = null;
+
+    function log(msg) { try { console.log('[IPMadalena] ' + msg); } catch (e) {} }
+
+    function visivel(el) {
+        if (!el || el.disabled || el.readOnly) { return false; }
+        if (el.offsetParent === null) { return false; }
+        var r = el.getBoundingClientRect();
+        return r.width > 4 && r.height > 4;
+    }
+
+    function vazio(el) {
+        var v;
+        if (el.value !== undefined && el.value !== null) { v = el.value; }
+        else { v = el.innerText || el.textContent || ''; }
+        // Editores costumam deixar <br>, espaço fino ou caractere de largura
+        // zero no campo "vazio" — nada disso conta como conteúdo do usuário.
+        return String(v).replace(/[\s​-‍﻿]/g, '') === '';
+    }
+
+    // Busca que também entra em shadow DOM e iframes de mesma origem. O caminho
+    // caro só roda quando a busca simples não achou nada.
+    function coleta(raiz, seletor, saida) {
+        try {
+            var achados = raiz.querySelectorAll(seletor);
+            for (var i = 0; i < achados.length; i++) { saida.push(achados[i]); }
+            var todos = raiz.querySelectorAll('*');
+            for (var j = 0; j < todos.length; j++) {
+                if (todos[j].shadowRoot) { coleta(todos[j].shadowRoot, seletor, saida); }
+                if (todos[j].tagName === 'IFRAME') {
+                    try {
+                        var doc = todos[j].contentDocument;
+                        if (doc) { coleta(doc, seletor, saida); }
+                    } catch (e) { /* iframe de outra origem: inacessível */ }
+                }
+            }
+        } catch (e) {}
+        return saida;
+    }
+
+    function acha(seletor) {
+        var simples = [];
+        try {
+            simples = Array.prototype.slice.call(document.querySelectorAll(seletor));
+        } catch (e) {}
+        return simples.length ? simples : coleta(document, seletor, []);
+    }
+
+    // Força o React a reconhecer a mudança (ele ignora atribuição direta a .value)
+    function setNativo(el, valor) {
+        var proto = (el.tagName === 'TEXTAREA')
+            ? window.HTMLTextAreaElement.prototype
+            : window.HTMLInputElement.prototype;
+        var desc = Object.getOwnPropertyDescriptor(proto, 'value');
+        if (desc && desc.set) { desc.set.call(el, valor); } else { el.value = valor; }
+        el.dispatchEvent(new Event('input',  { bubbles: true }));
         el.dispatchEvent(new Event('change', { bubbles: true }));
     }
 
-    function tryFill() {
-        // Título: primeiro input visível que não seja de busca
-        var titleInputs = document.querySelectorAll('input[type="text"]:not([type="search"])');
-        var titleFilled = false;
-        for (var i = 0; i < titleInputs.length; i++) {
-            var el = titleInputs[i];
-            if (el.offsetParent !== null && window._spotifyTitle) {
-                setNativeValue(el, window._spotifyTitle);
-                titleFilled = true;
-                break;
-            }
+    // Editor rico (contenteditable): execCommand gera os eventos que editores
+    // como Draft.js/ProseMirror esperam; atribuir textContent sozinho não basta.
+    function setRico(el, texto) {
+        el.focus();
+        var ok = false;
+        try { ok = document.execCommand('insertText', false, texto); } catch (e) { ok = false; }
+        if (!ok || vazio(el)) {
+            el.textContent = texto;
+            try { el.dispatchEvent(new InputEvent('input', { bubbles: true })); }
+            catch (e) { el.dispatchEvent(new Event('input', { bubbles: true })); }
         }
-        // Descrição: primeiro textarea visível
-        var descAreas = document.querySelectorAll('textarea');
-        for (var j = 0; j < descAreas.length; j++) {
-            var ta = descAreas[j];
-            if (ta.offsetParent !== null && window._spotifyDescription) {
-                setNativeValue(ta, window._spotifyDescription);
-                break;
-            }
-        }
-        return titleFilled;
     }
 
-    // Tenta imediatamente; se o form ainda não renderizou, tenta mais 5 vezes
-    if (!tryFill()) {
-        var attempts = 0;
-        var interval = setInterval(function() {
-            if (tryFill() || ++attempts >= 10) {
-                clearInterval(interval);
+    var RUIDO = /search|busca|pesquis|filtro|filter/i;
+    var TITULO = /name|nome|title|t[ií]tulo/i;
+
+    function achaTitulo() {
+        var todos = acha('input'), candidatos = [];
+        for (var i = 0; i < todos.length; i++) {
+            var el = todos[i], tipo = (el.type || 'text').toLowerCase();
+            if (tipo !== 'text') { continue; }
+            if (!visivel(el) || !vazio(el)) { continue; }
+            var dica = (el.placeholder || '') + ' ' + (el.getAttribute('aria-label') || '') +
+                       ' ' + (el.name || '') + ' ' + (el.id || '') +
+                       ' ' + (el.getAttribute('role') || '');
+            if (RUIDO.test(dica)) { continue; }
+            if (TITULO.test(dica)) { return el; }
+            candidatos.push(el);
+        }
+        // Sem pista no atributo, só arrisca quando não há ambiguidade
+        return candidatos.length === 1 ? candidatos[0] : null;
+    }
+
+    function achaDescricao() {
+        var tas = acha('textarea');
+        for (var i = 0; i < tas.length; i++) {
+            if (visivel(tas[i]) && vazio(tas[i])) { return { el: tas[i], rico: false }; }
+        }
+        // `[contenteditable]` sem exigir ="true": o atributo aceita valor vazio
+        // e pode ser herdado — `isContentEditable` é quem responde de verdade.
+        var ces = acha('[contenteditable]');
+        for (var j = 0; j < ces.length; j++) {
+            if (ces[j].isContentEditable && visivel(ces[j]) && vazio(ces[j])) {
+                return { el: ces[j], rico: true };
             }
-        }, 600);
+        }
+        return null;
+    }
+
+    // Quando não achamos o campo, o log precisa dizer POR QUÊ — senão a
+    // investigação vira adivinhação a cada tentativa do usuário.
+    var diagnosticado = false;
+    function diagnostica() {
+        if (diagnosticado) { return; }
+        diagnosticado = true;
+        var tas = acha('textarea'), ces = acha('[contenteditable]');
+        var partes = ['descricao nao encontrada. textarea=' + tas.length +
+                      ' contenteditable=' + ces.length];
+        function descreve(el, i) {
+            return '#' + i + '{visivel=' + visivel(el) + ' vazio=' + vazio(el) +
+                   ' editavel=' + (el.isContentEditable === true) +
+                   ' classe=' + String(el.className || '').slice(0, 40) + '}';
+        }
+        for (var i = 0; i < Math.min(tas.length, 3); i++) { partes.push('ta' + descreve(tas[i], i)); }
+        for (var j = 0; j < Math.min(ces.length, 3); j++) { partes.push('ce' + descreve(ces[j], j)); }
+        log(partes.join(' '));
+    }
+
+    function para(motivo) {
+        if (observer) { observer.disconnect(); observer = null; }
+        if (timer) { clearInterval(timer); timer = null; }
+        log('preenchimento encerrado: ' + motivo);
+    }
+
+    function tenta(origem) {
+        if (feito.titulo && feito.descricao) { return true; }
+        if (Date.now() - inicio > PRAZO_MS) {
+            para('prazo esgotado (titulo=' + feito.titulo + ' descricao=' + feito.descricao + ')');
+            return true;
+        }
+        if (!feito.titulo && window._spotifyTitle) {
+            var t = achaTitulo();
+            if (t) {
+                setNativo(t, window._spotifyTitle);
+                feito.titulo = true;
+                log('titulo preenchido [' + origem + ']');
+            }
+        }
+        if (!feito.descricao && window._spotifyDescription) {
+            var d = achaDescricao();
+            if (d) {
+                if (d.rico) { setRico(d.el, window._spotifyDescription); }
+                else { setNativo(d.el, window._spotifyDescription); }
+                feito.descricao = true;
+                log('descricao preenchida [' + origem + (d.rico ? ', editor rico' : '') + ']');
+            } else if (feito.titulo &&
+                       Date.now() - inicio > (window.__ipmDiagnosticoMs || 6000)) {
+                // Título já entrou (logo a tela do episódio está aberta) e a
+                // descrição não: relata o que existe na página.
+                diagnostica();
+            }
+        }
+        if (feito.titulo && feito.descricao) { para('tudo preenchido'); return true; }
+        return false;
+    }
+
+    function agenda() {
+        if (pendente) { return; }
+        pendente = setTimeout(function () { pendente = null; tenta('dom'); }, DEBOUNCE);
+    }
+
+    window.__ipmFiller = { tenta: tenta, para: para };
+
+    if (!tenta('inicial')) {
+        // Observador: pega os campos surgindo na troca de passo do wizard.
+        observer = new MutationObserver(agenda);
+        observer.observe(document.documentElement, { childList: true, subtree: true });
+        // Rede de segurança para conteúdo que não passa por mutação observável.
+        timer = setInterval(function () { tenta('timer'); }, 1000);
+        log('aguardando os campos do episodio aparecerem');
     }
 })();
 """
+
+
+#: Altura da barra de ferramentas das janelas do Spotify.
+_SPOTIFY_BAR_H = 40
+
+# Formatos que o seletor de arquivos pode pedir. O `accept` de um <input> pode
+# vir como tipo MIME (`audio/*`) OU como lista de extensões (`.mp3,.m4a,...`) —
+# e o QtWebEngine repassa exatamente o que está no HTML, sem normalizar.
+# Medido: o Qt entrega `['.mp3', '.m4a', '.wav', '.mpg', '.mp4', '.mov']` para o
+# formulário do Spotify, que anuncia justamente esses formatos.
+_SP_EXT_AUDIO = (
+    ".mp3", ".m4a", ".wav", ".mpg", ".mp4", ".mov",
+    ".aac", ".flac", ".ogg", ".oga", ".m4v", ".wma",
+)
+_SP_EXT_IMAGEM = (".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp")
+
+_SP_PEDE_AUDIO = "audio"
+_SP_PEDE_IMAGEM = "imagem"
+_SP_PEDE_INDEFINIDO = "indefinido"
+
+
+def _spotify_tipo_pedido(accepted) -> str:
+    """
+    Diz o que o formulário está pedindo a partir da lista de tipos aceitos.
+
+    Retorna ``_SP_PEDE_IMAGEM``, ``_SP_PEDE_AUDIO`` ou ``_SP_PEDE_INDEFINIDO``
+    (lista vazia ou irreconhecível — o `accept` é opcional no HTML).
+
+    A imagem é testada primeiro: o passo da capa costuma aceitar só imagem,
+    enquanto o do episódio aceita áudio E vídeo.
+    """
+    itens = [str(m).strip().lower() for m in (accepted or []) if str(m).strip()]
+    if not itens:
+        return _SP_PEDE_INDEFINIDO
+
+    def casa(item, familia, extensoes):
+        return item.startswith(familia + "/") or item.endswith(extensoes)
+
+    if any(casa(m, "image", _SP_EXT_IMAGEM) for m in itens):
+        return _SP_PEDE_IMAGEM
+    if any(
+        casa(m, "audio", _SP_EXT_AUDIO) or m.startswith("video/")
+        for m in itens
+    ):
+        return _SP_PEDE_AUDIO
+    return _SP_PEDE_INDEFINIDO
+
+
+def _spotify_top_bar(esquerda: list, direita: list) -> QWidget:
+    """
+    Monta a barra de ferramentas das janelas do Spotify, com altura FIXA.
+
+    Por que um widget de altura fixa em vez de só um QHBoxLayout: num
+    QVBoxLayout, a altura máxima de uma linha aninhada depende dos itens dela —
+    e, medido, o resultado muda conforme a ORDEM deles. Com o botão (altura
+    fixa) à esquerda e o rótulo (altura flexível) à direita, a barra ficava sem
+    limite e engolia 503 px de uma janela de 1000 px, empurrando a página para
+    baixo; com a ordem invertida, ficava nos 37 px esperados. Fixar a altura
+    aqui elimina essa dependência de ordem — e o chamador ainda dá stretch 1 ao
+    WebView, para que a sobra vá toda para a página.
+    """
+    barra = QWidget()
+    barra.setFixedHeight(_SPOTIFY_BAR_H)
+    barra.setStyleSheet(
+        f"background: {P.D_SIDEBAR}; border-bottom: 1px solid {P.D_BORDER};"
+    )
+    lay = QHBoxLayout(barra)
+    lay.setContentsMargins(8, 0, 12, 0)
+    lay.setSpacing(8)
+    for w in esquerda:
+        lay.addWidget(w)
+    lay.addStretch()
+    for w in direita:
+        lay.addWidget(w)
+    return barra
 
 
 class _SpotifyPage:
@@ -5329,26 +5824,233 @@ class _SpotifyPage:
     # O construtor real é feito em _SpotifyPublishWindow._make_page().
 
     @staticmethod
-    def _make_page(parent_view, audio_path: str = "", cover_path: str = ""):
+    def _make_page(parent_view, audio_path: str = "", cover_path: str = "", profile=None):
+        """
+        Cria a página do WebView.
+
+        ``profile`` é o perfil persistente da sessão do Spotify. Sem ele a página
+        cai no perfil padrão do Qt, que é off-the-record — e o login se perde ao
+        fechar a janela.
+        """
         from PyQt6.QtWebEngineCore import QWebEnginePage
 
         class _Page(QWebEnginePage):
             def __init__(self, view):
-                super().__init__(view)
+                if profile is not None:
+                    super().__init__(profile, view)
+                else:
+                    super().__init__(view)
                 self._audio_path = audio_path
                 self._cover_image_path = cover_path
 
+            def javaScriptConsoleMessage(self, level, message, line, source):
+                """
+                Leva as mensagens do injetor para o log do app.
+
+                Não dá para confiar no encaminhamento padrão do Qt: medido, ele
+                não imprimiu nem `console.log` nem `console.error` — e foi por
+                isso que um relato de campo chegou sem nenhuma linha
+                `[IPMadalena]`, apesar de o script ter rodado (o título tinha
+                sido preenchido). O resto das mensagens da página segue o
+                caminho normal.
+                """
+                if message and "[IPMadalena]" in message:
+                    _file_log(f"Spotify: {message.replace('[IPMadalena] ', '')}")
+                    return
+                super().javaScriptConsoleMessage(level, message, line, source)
+
             def chooseFiles(self, mode, old_files, accepted_mimetypes):
-                # Detecta se o browser pede áudio ou imagem pela lista de MIMEs
-                is_audio = any("audio" in m for m in (accepted_mimetypes or []))
-                is_image = any("image" in m for m in (accepted_mimetypes or []))
-                if is_audio and self._audio_path and os.path.isfile(self._audio_path):
-                    return [self._audio_path]
-                if is_image and self._cover_image_path and os.path.isfile(self._cover_image_path):
-                    return [self._cover_image_path]
+                """
+                Entrega o arquivo certo no lugar do seletor do Windows.
+
+                Chamado quando o usuário clica em "Select a file" na página —
+                não há como preencher o campo antes disso (o navegador só
+                permite escolher arquivo a partir de um gesto do usuário).
+                """
+                tipo = _spotify_tipo_pedido(accepted_mimetypes)
+                capa  = self._cover_image_path
+                audio = self._audio_path
+
+                if tipo == _SP_PEDE_IMAGEM and capa and os.path.isfile(capa):
+                    _file_log(f"Spotify: capa entregue ao formulário — {capa}")
+                    return [capa]
+                # 'indefinido' cai no áudio: é o passo obrigatório do wizard, e
+                # a capa é opcional (o usuário escolhe manualmente se preciso).
+                if tipo in (_SP_PEDE_AUDIO, _SP_PEDE_INDEFINIDO) and audio \
+                        and os.path.isfile(audio):
+                    _file_log(f"Spotify: áudio entregue ao formulário — {audio}")
+                    return [audio]
+
+                _file_log(
+                    f"Spotify: seletor de arquivos aberto sem preenchimento "
+                    f"automático (pedido={tipo}, aceitos={list(accepted_mimetypes or [])})."
+                )
                 return super().chooseFiles(mode, old_files, accepted_mimetypes)
 
         return _Page(parent_view)
+
+
+class _SpotifyLoginWindow(QMainWindow):
+    """
+    Janela de login no Spotify, usando o perfil persistente da sessão.
+
+    Abre a tela de credenciais (``login_url``) e acompanha para onde a navegação
+    vai. A área autenticada do Creators **não** serve de entrada: deslogado, o
+    roteador dela trava a página carregando (ver o docstring de
+    ``infrastructure/spotify/session.py``).
+
+    Por que a detecção é por TRANSIÇÃO
+    ----------------------------------
+    "Estar numa URL interna do Creators" não prova sessão: com o banner de
+    consentimento de cookies na tela, a página fica parada nessa URL
+    indefinidamente (medido ao vivo, 20 s em ``/pod/dashboard``). Então o
+    positivo só é aceito depois de a tela de credenciais ter aparecido e a
+    página sair dela — a transição ``logged_out → logged_in``, que nenhuma
+    página travada consegue produzir.
+
+    Para quem já estava logado (nunca vê a tela de credenciais) existe o botão
+    "Concluí o login". Se ele for clicado sem login de verdade, o flag fica
+    errado até a próxima publicação, quando a janela do wizard recebe a tela de
+    login e corrige — o erro não persiste.
+
+    Fecha sozinha ao confirmar o login e chama ``on_finish(logado: bool)``.
+    """
+
+    #: Silêncio de navegação que caracteriza a página "assentada". Reiniciado a
+    #: cada carregamento, então uma cadeia de redirecionamentos só é avaliada
+    #: quando para.
+    _ASSENTAR_MS = 2500
+
+    #: Espera antes de fechar após detectar o login — deixa o Spotify concluir
+    #: os redirecionamentos do OAuth e gravar os cookies antes da janela sumir.
+    _FECHAR_APOS_MS = 1200
+
+    def __init__(self, session, on_finish=None, parent=None):
+        super().__init__(parent)
+        self._session   = session
+        self._on_finish = on_finish
+        self._logado    = False
+        self._notificou = False
+        # Marca se a tela de credenciais já apareceu — é o que autoriza aceitar
+        # o veredito positivo depois.
+        self._viu_login = False
+
+        # Timer reiniciável: cada loadFinished adia a avaliação, então uma
+        # cadeia de redirecionamentos só é julgada quando para.
+        self._assentar_timer = QTimer(self)
+        self._assentar_timer.setSingleShot(True)
+        self._assentar_timer.timeout.connect(self._on_settled)
+
+        self.setWindowTitle("Entrar no Spotify")
+        self.resize(1000, 760)
+
+        from PyQt6.QtWebEngineWidgets import QWebEngineView
+        self._view = QWebEngineView()
+        self._view.setPage(
+            _SpotifyPage._make_page(self._view, profile=session.profile())
+        )
+        self._view.loadFinished.connect(self._on_load_finished)
+
+        central = QWidget()
+        self.setCentralWidget(central)
+        layout = QVBoxLayout(central)
+        layout.setContentsMargins(0, 0, 0, 0)
+        # Sem espaçamento: senão sobra uma faixa escura entre a barra e a página
+        layout.setSpacing(0)
+
+        self._hint_lbl = QLabel(
+            "Entre com a conta que administra o podcast. "
+            "A janela fecha sozinha quando o login for concluído."
+        )
+        self._hint_lbl.setStyleSheet(f"color: {P.HINT}; font-size: 12px;")
+        self._confirm_btn = QPushButton("Concluí o login")
+        self._confirm_btn.setToolTip(
+            "Use se a janela não fechar sozinha depois de você entrar"
+        )
+        self._confirm_btn.clicked.connect(self._confirmar_manual)
+        layout.addWidget(_spotify_top_bar([self._hint_lbl], [self._confirm_btn]))
+        # stretch 1: toda a sobra vertical vai para a página, não para a barra
+        layout.addWidget(self._view, 1)
+
+        from PyQt6.QtCore import QUrl
+        self._view.load(QUrl(session.login_url()))
+
+    def _on_load_finished(self, ok: bool):
+        """
+        Adia a avaliação: só decide quando a navegação parar.
+
+        Não dá para classificar aqui. O desvio do Creators para o login é feito
+        pelo próprio site, não por um 302 — então o primeiro ``loadFinished``
+        chega com a URL interna ainda no lugar, e o ``urlChanged`` é pior ainda
+        (traz a URL só pedida). Medido ao vivo: deslogado, os dois sinais
+        entregam ``logged_in`` antes de o Spotify mandar para o login.
+        """
+        if not ok:
+            return
+        self._assentar_timer.start(self._ASSENTAR_MS)
+
+    def _on_settled(self):
+        """
+        Julga a página assentada.
+
+        Tela de credenciais → registra que ela apareceu (e corrige o flag, que
+        pode estar ligado de uma sessão expirada). Página interna DEPOIS disso →
+        login concluído.
+
+        Usa o veredito da URL, nunca ``is_logged_in()``: o flag pode estar ligado
+        de antes e a janela fecharia ainda na tela de credenciais.
+        """
+        from domain.ports import SPOTIFY_LOGGED_IN, SPOTIFY_LOGGED_OUT
+
+        veredito = self._session.classify(self._view.url().toString())
+
+        if veredito == SPOTIFY_LOGGED_OUT:
+            self._viu_login = True
+            self._session.mark_logged_in(False)
+            return
+
+        if veredito == SPOTIFY_LOGGED_IN and self._viu_login:
+            self._concluir()
+
+    def _confirmar_manual(self):
+        """
+        Botão "Concluí o login" — saída para quem já estava logado.
+
+        Sem a transição observada não há como provar a sessão daqui, então
+        confiamos no usuário; só barramos o caso claramente errado (ainda na
+        tela de credenciais).
+        """
+        from domain.ports import SPOTIFY_LOGGED_OUT
+
+        if self._session.classify(self._view.url().toString()) == SPOTIFY_LOGGED_OUT:
+            self._hint_lbl.setText(
+                "Ainda na tela de login — entre na sua conta para continuar."
+            )
+            return
+        self._concluir()
+
+    def _concluir(self):
+        """Registra o login, avisa na tela e fecha a janela."""
+        if self._logado:
+            return
+        self._logado = True
+        self._session.mark_logged_in(True)
+        self._hint_lbl.setText("Conectado! Fechando...")
+        self._confirm_btn.setEnabled(False)
+        QTimer.singleShot(self._FECHAR_APOS_MS, self.close)
+
+    def closeEvent(self, event):
+        self._assentar_timer.stop()
+        self._notificar()
+        super().closeEvent(event)
+
+    def _notificar(self):
+        """Avisa o App uma única vez (o closeEvent pode disparar mais de uma)."""
+        if self._notificou:
+            return
+        self._notificou = True
+        if callable(self._on_finish):
+            self._on_finish(self._logado)
 
 
 class _SpotifyPublishWindow(QMainWindow):
@@ -5368,6 +6070,7 @@ class _SpotifyPublishWindow(QMainWindow):
         audio_path: str = "",
         cover_image_path: str = "",
         parent=None,
+        session=None,
     ):
         super().__init__(parent)
         self.setWindowTitle("Publicar no Spotify for Podcasters")
@@ -5378,50 +6081,94 @@ class _SpotifyPublishWindow(QMainWindow):
         self._episode_description = episode_description
         self._audio_path = audio_path
         self._cover_image_path = cover_image_path
+        self._session = session
 
         from PyQt6.QtWebEngineWidgets import QWebEngineView
         self._view = QWebEngineView()
         page = _SpotifyPage._make_page(
-            self._view, audio_path=audio_path, cover_path=cover_image_path
+            self._view,
+            audio_path = audio_path,
+            cover_path = cover_image_path,
+            # Mesmo perfil da janela de login — é o que evita cair na tela de
+            # credenciais aqui.
+            profile    = session.profile() if session is not None else None,
         )
         self._view.setPage(page)
+        # A classificação da sessão acontece em _on_load_finished, com a URL
+        # final. `urlChanged` traria a URL pedida (o wizard, sempre "logado")
+        # antes de o Spotify decidir se redireciona para o login.
         self._view.loadFinished.connect(self._on_load_finished)
 
         central = QWidget()
         self.setCentralWidget(central)
         layout = QVBoxLayout(central)
         layout.setContentsMargins(0, 0, 0, 0)
+        # Sem espaçamento: senão sobra uma faixa escura entre a barra e a página
+        layout.setSpacing(0)
 
         # Barra de ferramentas superior
-        bar = QHBoxLayout()
-        bar.setContentsMargins(8, 6, 8, 6)
-        bar.setSpacing(8)
         back_btn = QPushButton("← Voltar")
         back_btn.clicked.connect(self._view.back)
-        bar.addWidget(back_btn)
-        bar.addStretch()
         hint_lbl = QLabel("Revise e publique o episódio no Spotify for Podcasters")
         hint_lbl.setStyleSheet(f"color: {P.HINT}; font-size: 12px;")
-        bar.addWidget(hint_lbl)
-        layout.addLayout(bar)
-        layout.addWidget(self._view)
+        layout.addWidget(_spotify_top_bar([back_btn], [hint_lbl]))
+        # stretch 1: toda a sobra vertical vai para a página, não para a barra
+        layout.addWidget(self._view, 1)
 
-        url = f"https://creators.spotify.com/pod/show/{show_id}/episode/wizard"
+        if session is not None:
+            url = session.wizard_url(show_id)
+        else:
+            url = f"https://creators.spotify.com/pod/show/{show_id}/episode/wizard"
         from PyQt6.QtCore import QUrl
         self._view.load(QUrl(url))
 
     def _on_load_finished(self, ok: bool):
         if not ok:
             return
+        # Não preenche quando o Spotify devolveu a tela de credenciais: o
+        # primeiro input visível ali é o campo de e-mail, e o título do
+        # episódio acabaria digitado no login.
+        #
+        # Usa `classify` (que não persiste) e só corrige o flag na direção
+        # LOGGED_OUT: essa é conclusiva — se o Spotify pediu credenciais, a
+        # sessão acabou. O contrário não vale aqui, porque este callback também
+        # roda antes de um eventual desvio para o login.
+        if self._session is not None:
+            from domain.ports import SPOTIFY_LOGGED_OUT
+
+            if self._session.classify(self._view.url().toString()) == SPOTIFY_LOGGED_OUT:
+                self._session.mark_logged_in(False)
+                return
         # Define variáveis JS antes de injetar o script de preenchimento
-        title_escaped = self._episode_title.replace("\\", "\\\\").replace("'", "\\'")
-        desc_escaped  = self._episode_description.replace("\\", "\\\\").replace("'", "\\'")
-        setup_js = (
-            f"window._spotifyTitle = '{title_escaped}';\n"
-            f"window._spotifyDescription = '{desc_escaped}';\n"
+        self._view.page().runJavaScript(
+            self._build_setup_js(self._episode_title, self._episode_description)
         )
-        self._view.page().runJavaScript(setup_js)
         self._view.page().runJavaScript(_SPOTIFY_FILL_JS)
+
+    @staticmethod
+    def _build_setup_js(title: str, description: str) -> str:
+        """
+        Monta o JS que declara título e descrição para o script de preenchimento.
+
+        Usa `json.dumps` para gerar os literais. O escape manual anterior tratava
+        só `\\` e `'` — e a descrição do YouTube é multi-linha (as reais têm ~25
+        linhas). Uma quebra de linha crua dentro de `'...'` torna o script
+        inválido, ele falha inteiro e silenciosamente, e aí NEM o título é
+        preenchido (o preenchedor só age se a variável existir). Verificado numa
+        página real: com descrição multi-linha, as duas variáveis chegavam como
+        `undefined`.
+
+        `json.dumps` escapa aspas, barras e quebras de linha, e com o
+        `ensure_ascii` padrão converte todo caractere não-ASCII em `\\uXXXX` —
+        o que também neutraliza U+2028/U+2029, válidos em JSON mas quebrados
+        como literal de string em JS antigo.
+        """
+        import json as _json
+
+        return (
+            f"window._spotifyTitle = {_json.dumps(title or '')};\n"
+            f"window._spotifyDescription = {_json.dumps(description or '')};\n"
+        )
 
 
 class _SpotifyPrePublishDialog(QDialog):
@@ -5446,12 +6193,14 @@ class _SpotifyPrePublishDialog(QDialog):
         audio_path: str,
         cover_image_path: str = "",
         parent=None,
+        session=None,
     ):
         super().__init__(parent)
         self._show_id          = show_id
         self._video_id         = video_id
         self._audio_path       = audio_path
         self._cover_image_path = cover_image_path
+        self._session          = session
 
         self.setWindowTitle("Publicar no Spotify for Podcasters")
         self.setMinimumWidth(500)
@@ -5548,6 +6297,10 @@ class _SpotifyPrePublishDialog(QDialog):
             audio_path          = self._audio_path,
             cover_image_path    = self._cover_image_path,
             parent              = parent_app,
+            # A sessão vem do App quando o diálogo não a recebeu explicitamente
+            # — é ela que carrega o perfil já logado.
+            session             = self._session
+                                  or getattr(parent_app, "_spotify_session", None),
         )
         # Mantém referência viva no App para evitar que o GC destrua a janela
         # imediatamente após este método retornar.

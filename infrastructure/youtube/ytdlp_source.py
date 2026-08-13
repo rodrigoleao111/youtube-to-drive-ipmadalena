@@ -123,6 +123,55 @@ def _normalize_upload_date(value: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Busca rápida por data — janela de tolerância da data aproximada
+# ---------------------------------------------------------------------------
+
+# A busca por data usa duas fases (ver YtDlpVideoSource.list_videos). A fase
+# rápida lê a aba do canal em modo --flat-playlist com
+# ``youtubetab:approximate_date``: o yt-dlp converte o texto "Streamed X ago"
+# em uma data aproximada SEM extrair cada vídeo. A precisão desse texto piora
+# com a idade (medido ao vivo em 13/08/2026 no canal @IPMadalena):
+#
+#   idade ≤ ~1 semana  → erro ≤ 2 dias (inclui o fuso: upload_date é UTC)
+#   semanas            → erro ≤ ~7 dias ("2 weeks ago" arredonda para baixo)
+#   meses              → erro ≤ ~31 dias
+#   anos               → o bucket inteiro colapsa em uma única data
+#                        ("11 years ago" → hoje-11a para TODOS os vídeos do ano)
+#
+# O YouTube sempre arredonda a idade PARA BAIXO, então a data aproximada é
+# igual ou POSTERIOR à real — a janela para trás pode ser pequena e fixa,
+# e a janela para frente cresce com a idade do vídeo.
+
+# Dias de folga para TRÁS da data alvo (fuso UTC + margem de segurança).
+_FLAT_JANELA_PASSADO_DIAS = 3
+
+# Entradas consecutivas mais antigas que a janela antes de encerrar a
+# leitura da aba (a lista é decrescente por data; 5 seguidas fora da janela
+# significam que já passamos do alvo — mata o subprocess sem enumerar tudo).
+_FLAT_PARADA_CONSECUTIVAS = 5
+
+# Máximo de entradas sem data (lives em andamento/agendadas imprimem NA)
+# aceitas como candidatas quando a data alvo é ~hoje.
+_FLAT_NA_CANDIDATOS_MAX = 5
+
+
+def _flat_janela_futuro_dias(idade_dias: int) -> int:
+    """
+    Dias de folga para FRENTE da data alvo, em função da idade do vídeo.
+
+    Acompanha a resolução do "Streamed X ago" do YouTube (ver comentário
+    acima). Idades negativas (data alvo no futuro) caem no piso.
+    """
+    if idade_dias <= 10:
+        return 7
+    if idade_dias <= 45:
+        return 12
+    if idade_dias <= 400:
+        return 35
+    return 400
+
+
+# ---------------------------------------------------------------------------
 # IVideoSource
 # ---------------------------------------------------------------------------
 
@@ -146,13 +195,230 @@ class YtDlpVideoSource:
         """
         Retorna a lista de vídeos publicados na data informada.
 
+        A busca é feita em duas fases para não pagar uma extração completa
+        por vídeo do canal (medido em 13/08/2026: o caminho antigo levava
+        ~19 s para a data mais recente — ~15 s enumerando as 1391 entradas
+        da aba antes de extrair qualquer vídeo — e crescia ~1,5 s por vídeo
+        mais novo que o alvo):
+
+          1. Fase rápida  — lista a aba em --flat-playlist --lazy-playlist
+             com datas APROXIMADAS (1 requisição por ~30 entradas, ~0,2 s
+             cada) e seleciona os candidatos dentro da janela de tolerância;
+             a leitura para assim que as entradas ficam mais antigas que o
+             alvo, sem enumerar o canal inteiro.
+          2. Confirmação — extração completa SOMENTE dos candidatos, com o
+             MESMO filtro exato de sempre (upload_date == alvo ou alvo+1,
+             por causa do fuso UTC).
+
+        Se a fase rápida não encontrar nada (datas aproximadas indisponíveis,
+        vídeo fora da janela, data sem culto), cai na varredura completa
+        original — o resultado final é sempre o mesmo do caminho antigo.
+
         Lança VideoNaoEncontrado se não houver vídeos na data.
         Lança OperacaoCancelada se cancel_event for sinalizado.
         """
         log    = on_log    if callable(on_log)    else _noop
         status = on_status if callable(on_status) else _noop
 
-        date          = datetime.strptime(date_str, "%d/%m/%Y")
+        date = datetime.strptime(date_str, "%d/%m/%Y")
+
+        status("Buscando vídeos no YouTube...")
+        log(f"Canal: {channel_url}")
+        log(f"Data: {date_str}")
+
+        candidatos = self._buscar_candidatos_flat(
+            date, channel_url, cancel_event=cancel_event, on_log=log
+        )
+        if candidatos:
+            status(f"Confirmando data de {len(candidatos)} vídeo(s)...")
+            videos = self._confirmar_datas(
+                candidatos, date, cancel_event=cancel_event, on_log=log
+            )
+            if videos:
+                log(f"{len(videos)} vídeo(s) encontrado(s).")
+                return videos
+
+        log("Busca rápida sem resultados — varrendo o canal completo...")
+        status("Buscando vídeos no YouTube (varredura completa)...")
+        return self._listar_por_varredura(
+            date, date_str, channel_url, cancel_event=cancel_event, on_log=log
+        )
+
+    # -----------------------------------------------------------------------
+    # Fase 1 — candidatos via flat playlist com data aproximada
+    # -----------------------------------------------------------------------
+
+    def _buscar_candidatos_flat(
+        self,
+        date: datetime,
+        channel_url: str,
+        *,
+        cancel_event=None,
+        on_log: Optional[Callable[[str], None]] = None,
+        hoje: Optional[datetime] = None,
+    ) -> List[str]:
+        """
+        Varre a aba do canal em modo flat (sem extração por vídeo) e devolve
+        os IDs cujas datas APROXIMADAS caem na janela de tolerância do alvo.
+
+        ``--lazy-playlist`` faz o yt-dlp imprimir as entradas conforme as
+        páginas chegam (medido: 1ª linha em ~1,4 s; sem a flag ele enumera a
+        aba inteira antes de imprimir qualquer coisa). Assim dá para encerrar
+        o subprocess na hora em que a lista — decrescente por data — passa
+        do alvo.
+
+        Entradas sem data (``NA`` = live em andamento/agendada) só entram
+        como candidatas quando o alvo é ~hoje: é o único caso em que uma
+        live em andamento poderia pertencer à data pesquisada.
+
+        ``hoje`` existe apenas para os testes fixarem o relógio.
+        Devolve lista vazia quando nada cai na janela — o chamador decide
+        o fallback.
+        """
+        log  = on_log if callable(on_log) else _noop
+        hoje = hoje if hoje is not None else datetime.now()
+
+        idade  = (hoje - date).days
+        minimo = (date - timedelta(days=_FLAT_JANELA_PASSADO_DIAS)).strftime("%Y%m%d")
+        maximo = (date + timedelta(days=_flat_janela_futuro_dias(idade))).strftime("%Y%m%d")
+        aceitar_sem_data = idade <= _FLAT_JANELA_PASSADO_DIAS
+
+        cmd = [
+            ytdlp_exe(),
+            "--simulate",
+            "--flat-playlist",
+            "--lazy-playlist",
+            "--extractor-args", "youtubetab:approximate_date",
+            "--print", "%(id)s|||%(title)s|||%(upload_date)s",
+            "--socket-timeout", "30",
+            "--encoding", "utf-8",
+            channel_url,
+        ]
+
+        process = start_process(cmd, cancel_event)
+
+        candidatos: List[str] = []
+        sem_data_aceitos    = 0
+        antigos_consecutivos = 0
+        try:
+            for line in process.stdout:
+                check_cancel(cancel_event)
+                line = line.rstrip()
+                if "|||" not in line:
+                    continue
+                parts = line.split("|||", 2)
+                if len(parts) != 3:
+                    continue
+                vid_id, _title, aprox = parts
+                vid_id = vid_id.strip()
+                aprox  = _normalize_upload_date(aprox)
+
+                if not aprox:
+                    if aceitar_sem_data and sem_data_aceitos < _FLAT_NA_CANDIDATOS_MAX:
+                        candidatos.append(vid_id)
+                        sem_data_aceitos += 1
+                    continue
+
+                # Strings YYYYMMDD comparam corretamente como texto.
+                if aprox < minimo:
+                    antigos_consecutivos += 1
+                    if antigos_consecutivos >= _FLAT_PARADA_CONSECUTIVAS:
+                        break
+                    continue
+
+                antigos_consecutivos = 0
+                if aprox <= maximo and vid_id not in candidatos:
+                    candidatos.append(vid_id)
+        finally:
+            # Encerramento antecipado (break/cancelamento): o subprocess ainda
+            # estaria enumerando o resto do canal.
+            try:
+                process.terminate()
+            except Exception:
+                pass
+            process.wait()
+
+        check_cancel(cancel_event)
+        if candidatos:
+            log(f"Busca rápida: {len(candidatos)} candidato(s) na janela da data.")
+        return candidatos
+
+    # -----------------------------------------------------------------------
+    # Fase 2 — confirmação com extração completa apenas dos candidatos
+    # -----------------------------------------------------------------------
+
+    def _confirmar_datas(
+        self,
+        video_ids: List[str],
+        date: datetime,
+        *,
+        cancel_event=None,
+        on_log: Optional[Callable[[str], None]] = None,
+    ) -> List[Video]:
+        """
+        Extrai os metadados completos dos candidatos (um único processo
+        yt-dlp com todas as URLs) e aplica o filtro EXATO de data — o mesmo
+        da varredura completa: upload_date == alvo ou alvo+1 (fuso UTC).
+
+        ``--ignore-errors`` evita que um candidato indisponível (vídeo
+        privado/removido) aborte a confirmação dos demais.
+        """
+        log = on_log if callable(on_log) else _noop
+
+        target_date    = date.strftime("%Y%m%d")
+        target_date_p1 = (date + timedelta(days=1)).strftime("%Y%m%d")
+
+        cmd = [
+            ytdlp_exe(),
+            "--simulate",
+            "--ignore-errors",
+            "--print", "%(id)s|||%(title)s|||%(upload_date)s",
+            "--socket-timeout", "30",
+            "--encoding", "utf-8",
+        ] + [f"https://www.youtube.com/watch?v={vid}" for vid in video_ids]
+
+        process = start_process(cmd, cancel_event)
+
+        videos: List[Video] = []
+        for line in process.stdout:
+            check_cancel(cancel_event)
+            line = line.rstrip()
+            if "|||" not in line:
+                continue
+            parts = line.split("|||", 2)
+            if len(parts) == 3:
+                vid_id, title, upload_date = parts
+                upload_date = upload_date.strip()
+                if upload_date not in (target_date, target_date_p1):
+                    continue
+                videos.append(Video(id=vid_id, title=title, upload_date=upload_date))
+                log(f"Encontrado: {title}")
+
+        process.wait()
+        check_cancel(cancel_event)
+        return videos
+
+    # -----------------------------------------------------------------------
+    # Fallback — varredura completa (caminho original, inalterado)
+    # -----------------------------------------------------------------------
+
+    def _listar_por_varredura(
+        self,
+        date: datetime,
+        date_str: str,
+        channel_url: str,
+        *,
+        cancel_event=None,
+        on_log: Optional[Callable[[str], None]] = None,
+    ) -> List[Video]:
+        """
+        Varredura completa do canal: extração por vídeo com --dateafter +
+        --break-on-reject. É o comportamento original de list_videos() —
+        lento, porém garantido — usado quando a busca rápida não encontra
+        nada (inclusive para confirmar o "nenhum vídeo na data").
+        """
+        log = on_log if callable(on_log) else _noop
+
         dateafter_str = (date - timedelta(days=1)).strftime("%Y%m%d")
 
         cmd = [
@@ -165,10 +431,6 @@ class YtDlpVideoSource:
             "--encoding", "utf-8",
             channel_url,
         ]
-
-        status("Buscando vídeos no YouTube...")
-        log(f"Canal: {channel_url}")
-        log(f"Data: {date_str}")
 
         process = start_process(cmd, cancel_event)
 

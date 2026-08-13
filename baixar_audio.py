@@ -49,6 +49,9 @@ else:
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 TOKEN_FILE       = os.path.join(BASE_DIR, "credentials", "token.pkl")
+# Perfil do navegador embutido usado no Spotify — fica junto do token do Drive
+# porque é dado de sessão do usuário (e, como ele, sobrevive à desinstalação).
+SPOTIFY_PROFILE_DIR = os.path.join(BASE_DIR, "credentials", "spotify")
 DOWNLOAD_DIR     = os.path.join(BASE_DIR, "downloads")
 HISTORY_FILE     = os.path.join(BASE_DIR, "historico.json")
 LOGS_DIR         = os.path.join(BASE_DIR, "logs")
@@ -108,6 +111,11 @@ def config_repo():
                 "show_id":       "",
                 "title_prefix":  "",
                 "default_tags":  "",
+                # Cache do estado de login no navegador embutido. O merge de
+                # defaults é raso (data.setdefault por chave de topo), então
+                # configs antigas chegam sem esta chave — sempre leia com
+                # .get("logged_in", False).
+                "logged_in":     False,
             },
         },
     )

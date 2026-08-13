@@ -8,6 +8,8 @@ A v3.2.0 introduz a **tela Início**: biblioteca local de áudios baixados com c
 
 A v3.5.0 traz duas novidades: a tela **Processar** aceita duas origens — buscar os vídeos do canal por data (padrão) ou **colar o link do vídeo** direto, pulando a etapa de busca — e o upload passa a subir um **pacote `.zip`** por episódio (áudio + capa + descrição) em vez de arquivos soltos.
 
+A v3.5.1 fecha a **publicação no Spotify**: login que **fica salvo** entre execuções (aba Configurações → Spotify), com o envio só habilitado quando há usuário logado e ID do canal; no assistente de episódio, o app **seleciona o áudio e preenche título e descrição** automaticamente, usando a descrição gerada no download. A **busca por data ficou 3–4× mais rápida** (~5 s no lugar de ~19 s para um culto recente).
+
 ---
 
 ## Instalação
@@ -142,6 +144,21 @@ Clique no ícone ⚙ no canto superior direito para acessar a tela de configura�
 - **Manter arquivos no dispositivo** — mantém os MP3s em `downloads/` após o upload (necessário para a tela Início)
 - **Abrir log de hoje** — abre o arquivo de log do dia corrente no bloco de notas
 
+### Aba Spotify
+
+- **Conta do Spotify** — entre na conta que administra o podcast. O login fica salvo neste computador (não é preciso repetir a cada publicação) e **Sair** encerra a sessão.
+- **Show ID** — identificador do podcast, encontrado na URL em `creators.spotify.com/pod/show/<show_id>/overview`
+- **Prefixo do título** e **Tags padrão** — pré-preenchem o formulário do episódio
+
+> A publicação no Spotify só é liberada quando as **duas** condições estão
+> atendidas: conta conectada **e** Show ID preenchido. A própria aba avisa qual
+> delas está faltando. Enquanto isso, o botão do Spotify na tela Início fica
+> desabilitado, explicando o motivo no tooltip.
+>
+> A publicação em si continua sendo feita por você: o app abre o formulário do
+> Spotify já preenchido e com o arquivo de áudio e a capa pré-selecionados —
+> basta revisar e publicar.
+
 ---
 
 ## O que o app faz automaticamente
@@ -186,6 +203,7 @@ youtube_to_drive/
 │   ├── archive/                    zip do episódio (áudio+capa+descrição)
 │   ├── drive/                      Google Drive: OAuth + upload streaming
 │   ├── persistence/                JSON: history e config
+│   ├── spotify/                    sessão/login persistente do Spotify
 │   └── notification/               plyer: notificação desktop
 │
 ├── application/                    ← use cases (orquestradores do domínio)
@@ -265,7 +283,7 @@ Detalhes técnicos completos (port-by-port, decisões de design, problemas conhe
 
 ## Testes
 
-Suíte com **1010 testes** usando apenas `pytest` e `unittest.mock` — sem dependências adicionais:
+Suíte com **1195 testes** usando apenas `pytest` e `unittest.mock` — sem dependências adicionais:
 
 ```bash
 python -m pytest tests/
@@ -284,11 +302,11 @@ Distribuição por camada:
 | `test_domain.py` | 105 | Entidades, exceções, Protocols (puro) |
 | `test_zip_archiver.py` | 17 | ZipArchiver: pacote do episódio (I/O real em `tmp_path`) |
 | `test_ffmpeg_editor.py` | 101 | FfmpegAudioEditor: filtros, duração, fades, música de fundo (subprocess mockado) |
-| `test_ytdlp_source.py` | 139 | Adaptadores yt-dlp, `extract_video_id`, `fetch_video`, orçamento de MAX_PATH (subprocess mockado) |
+| `test_ytdlp_source.py` | 160 | Adaptadores yt-dlp, busca por data em duas fases, `extract_video_id`, `fetch_video`, orçamento de MAX_PATH (subprocess mockado) |
 | `test_gdrive_storage.py` | 53 | Drive OAuth + upload (HTTP/Drive API mockados) |
 | `test_use_cases.py` | 57 | Use cases da camada application (ports mockados) |
 | `test_persistence.py` | 33 | Repositórios JSON (I/O real em `tmp_path`) |
-| `test_app.py` | 273 | Integração da GUI (Home, Processar, modo link, Config, Player) |
+| `test_app.py` | 375 | Integração da GUI (Home, Processar, modo link, Config, Player, Spotify) |
 | `test_github_updater.py` | 19 | Auto-update via GitHub Releases (HTTP mockado) |
 | `test_baixar_audio.py` | 38 | Utilidades + CLI + auth wrappers |
 | `test_presenter.py` | 58 | ProcessingPresenter + pacote de upload (use cases mockados) |

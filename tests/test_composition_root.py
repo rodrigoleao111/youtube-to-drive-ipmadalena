@@ -7,6 +7,7 @@ Verifica que o composition root monta o grafo de dependências corretamente:
   - delete_after_upload espelha sys.frozen
   - history_repo aponta para HISTORY_FILE
   - build_notifier retorna PlyerNotifier
+  - build_spotify_session retorna a sessão apontando para credentials/spotify
 """
 
 from __future__ import annotations
@@ -29,8 +30,10 @@ from composition_root import (
     build_audio_test_presenter,
     build_notifier,
     build_processing_presenter,
+    build_spotify_session,
 )
-from domain.ports import INotifier
+from domain.ports import INotifier, ISpotifySession
+from infrastructure.spotify.session import SpotifyWebSession
 from infrastructure.audio.ffmpeg_editor import FfmpegAudioEditor
 from infrastructure.drive.gdrive_storage import GoogleDriveStorage
 from infrastructure.notification.plyer_notifier import PlyerNotifier
@@ -287,3 +290,30 @@ class TestUploadEnabled:
         with patch("baixar_audio.load_config", return_value=cfg):
             p = build_processing_presenter()
         assert p.upload_enabled is True
+
+
+# ---------------------------------------------------------------------------
+# build_spotify_session
+# ---------------------------------------------------------------------------
+
+class TestBuildSpotifySession:
+    def test_retorna_spotify_web_session(self):
+        assert isinstance(build_spotify_session(), SpotifyWebSession)
+
+    def test_implementa_a_porta(self):
+        assert isinstance(build_spotify_session(), ISpotifySession)
+
+    def test_usa_o_diretorio_de_credenciais(self):
+        s = build_spotify_session()
+        assert s.storage_dir == baixar_audio.SPOTIFY_PROFILE_DIR
+
+    def test_perfil_do_qtwebengine_nao_e_criado_no_build(self):
+        """
+        Construir a sessão não pode inicializar o QtWebEngine — o App chama
+        este builder em toda abertura, mesmo de quem não usa o Spotify.
+        """
+        assert build_spotify_session()._profile is None
+
+    def test_recebe_o_config_repo(self):
+        """Sem o repo o estado de login não sobreviveria ao fechamento do app."""
+        assert isinstance(build_spotify_session()._config_repo, JsonConfigRepository)
