@@ -29,7 +29,7 @@ from unittest.mock import MagicMock, call, patch
 import pytest
 from PyQt6.QtCore import QPointF, Qt
 from PyQt6.QtGui import QMouseEvent
-from PyQt6.QtWidgets import QLabel, QMessageBox, QPushButton
+from PyQt6.QtWidgets import QDialog, QLabel, QMessageBox, QPushButton
 
 import baixar_audio
 import app as app_module
@@ -2659,8 +2659,19 @@ class TestHomePage:
 
         card = application._build_home_card(str(fpath))
         btns = card.findChildren(QPushButton)
-        labels = [b.text() for b in btns]
-        assert any("Tocar" in l for l in labels)
+        # Só o ícone ▶: o rótulo "Tocar" não cabia nos 220 px do card e saía
+        # cortado. O significado fica no tooltip.
+        assert any(b.text() == "▶" for b in btns)
+
+    def test_botao_tocar_do_card_nao_tem_rotulo_de_texto(self, application, tmp_path):
+        from PyQt6.QtWidgets import QPushButton
+        fpath = tmp_path / "culto.mp3"
+        fpath.write_bytes(b"\x00" * 1024)
+
+        card = application._build_home_card(str(fpath))
+        play = next(b for b in card.findChildren(QPushButton) if b.toolTip() == "Tocar")
+        assert play.text() == "▶"
+        assert "Tocar" not in play.text()
 
     def test_build_home_card_tem_botao_lixeira(self, application, tmp_path):
         from PyQt6.QtWidgets import QPushButton
@@ -3195,7 +3206,9 @@ class TestAutoUpdate:
     Cobre:
       - existência e estado inicial do banner de atualização
       - _show_update_banner popula label e exibe o banner
-      - _process_queue com "update_available" chama _show_update_banner
+      - _process_queue com "update_available" chama _on_update_available
+      - _on_update_available mostra o banner e abre o modal só se a janela
+        estiver visível (durante o SetupWizard ela está escondida)
       - _check_update_worker descarta exceção silenciosamente
       - _on_update_clicked em modo script exibe QMessageBox.information
     """
@@ -3223,14 +3236,16 @@ class TestAutoUpdate:
         application._show_update_banner("v9.9.9", "https://example.com/setup.exe")
         assert application._pending_update_url == "https://example.com/setup.exe"
 
-    def test_process_queue_update_available_chama_show_update_banner(self, application):
-        with patch.object(application, "_show_update_banner") as mock_show:
-            application._queue.put(("update_available", {
-                "version": "v9.9.9",
-                "download_url": "https://example.com/setup.exe",
-            }))
+    def test_process_queue_update_available_chama_on_update_available(self, application):
+        info = {
+            "version": "v9.9.9",
+            "download_url": "https://example.com/setup.exe",
+            "notes": "## Novidades",
+        }
+        with patch.object(application, "_on_update_available") as mock_on:
+            application._queue.put(("update_available", info))
             application._process_queue()
-        mock_show.assert_called_once_with("v9.9.9", "https://example.com/setup.exe")
+        mock_on.assert_called_once_with(info)
 
     def test_check_update_worker_descarta_excecao_silenciosamente(self, application):
         application._update_banner.hide()  # garante estado inicial oculto
@@ -3256,6 +3271,165 @@ class TestAutoUpdate:
         # Simula clique no botão dispensar
         application._update_banner.hide()
         assert application._update_banner.isHidden()
+
+    # ── Banner fora do QStackedWidget ───────────────────────────────────────
+
+    def test_banner_nao_fica_dentro_do_stack(self, application):
+        """
+        Regressão: até a v3.5.1 o banner era construído dentro da página
+        "Processar" (índice 1), mas o app abre na Home (índice 0) — o aviso de
+        nova versão só aparecia se o usuário navegasse até Processar.
+        """
+        from PyQt6.QtWidgets import QStackedWidget
+
+        ancestrais = []
+        pai = application._update_banner.parentWidget()
+        while pai is not None:
+            ancestrais.append(pai)
+            pai = pai.parentWidget()
+
+        assert ancestrais, "banner precisa estar dentro da janela"
+        assert not any(isinstance(a, QStackedWidget) for a in ancestrais)
+
+    # ── _show_update_banner: estado pendente ────────────────────────────────
+
+    def test_show_update_banner_guarda_versao_e_notas(self, application):
+        application._show_update_banner(
+            "v9.9.9", "https://example.com/setup.exe", "## Novidades"
+        )
+        assert application._pending_update_version == "v9.9.9"
+        assert application._pending_update_notes == "## Novidades"
+
+    def test_notas_sao_opcionais_no_show_update_banner(self, application):
+        application._show_update_banner("v9.9.9", "https://example.com/setup.exe")
+        assert application._pending_update_notes == ""
+
+    # ── _on_update_available ────────────────────────────────────────────────
+
+    def _info(self):
+        return {
+            "version": "v9.9.9",
+            "download_url": "https://example.com/setup.exe",
+            "notes": "## Novidades",
+        }
+
+    def test_on_update_available_exibe_banner(self, application):
+        application._update_banner.hide()
+        with patch.object(application, "_show_update_dialog"):
+            application._on_update_available(self._info())
+        assert not application._update_banner.isHidden()
+        assert "v9.9.9" in application._update_lbl.text()
+
+    def test_on_update_available_abre_dialogo_quando_janela_visivel(self, application):
+        with patch.object(application, "isVisible", return_value=True), \
+             patch.object(application, "_show_update_dialog") as mock_dlg:
+            application._on_update_available(self._info())
+        mock_dlg.assert_called_once()
+
+    def test_on_update_available_nao_abre_dialogo_com_janela_oculta(self, application):
+        # Durante o SetupWizard da primeira execução a janela está escondida:
+        # o modal apareceria órfão na frente do wizard.
+        with patch.object(application, "isVisible", return_value=False), \
+             patch.object(application, "_show_update_dialog") as mock_dlg:
+            application._on_update_available(self._info())
+        mock_dlg.assert_not_called()
+
+    def test_on_update_available_sem_notas_nao_quebra(self, application):
+        info = {"version": "v9.9.9", "download_url": "https://example.com/setup.exe"}
+        with patch.object(application, "_show_update_dialog"):
+            application._on_update_available(info)
+        assert application._pending_update_notes == ""
+
+    # ── _show_update_dialog ─────────────────────────────────────────────────
+
+    def test_show_update_dialog_sem_versao_pendente_nao_abre(self, application):
+        application._pending_update_version = ""
+        with patch("app._UpdateAvailableDialog") as MockDlg:
+            application._show_update_dialog()
+        MockDlg.assert_not_called()
+
+    def test_show_update_dialog_passa_versao_atual_e_notas(self, application):
+        import app as _app
+
+        application._show_update_banner(
+            "v9.9.9", "https://example.com/setup.exe", "## Novidades"
+        )
+        with patch("app._UpdateAvailableDialog") as MockDlg:
+            MockDlg.return_value.exec.return_value = QDialog.DialogCode.Rejected
+            application._show_update_dialog()
+        kwargs = MockDlg.call_args.kwargs
+        assert kwargs["version"] == "v9.9.9"
+        assert kwargs["current"] == _app.APP_VERSION
+        assert kwargs["notes"] == "## Novidades"
+
+    def test_show_update_dialog_aceito_dispara_download(self, application):
+        application._show_update_banner("v9.9.9", "https://example.com/setup.exe")
+        with patch("app._UpdateAvailableDialog") as MockDlg, \
+             patch.object(application, "_on_update_clicked") as mock_click:
+            MockDlg.return_value.exec.return_value = QDialog.DialogCode.Accepted
+            application._show_update_dialog()
+        mock_click.assert_called_once()
+
+    def test_show_update_dialog_recusado_nao_dispara_download(self, application):
+        application._show_update_banner("v9.9.9", "https://example.com/setup.exe")
+        with patch("app._UpdateAvailableDialog") as MockDlg, \
+             patch.object(application, "_on_update_clicked") as mock_click:
+            MockDlg.return_value.exec.return_value = QDialog.DialogCode.Rejected
+            application._show_update_dialog()
+        mock_click.assert_not_called()
+
+
+# ===========================================================================
+# _UpdateAvailableDialog — aviso modal de nova versão
+# ===========================================================================
+
+class TestUpdateAvailableDialog:
+    """
+    Cobre a construção do diálogo. Nenhum teste chama exec(): o modal
+    bloquearia a suíte para sempre (ver conftest._sem_timers_orfaos).
+    """
+
+    def _dlg(self, notes: str = "## Novidades\n- coisa nova", parent=None):
+        from app import _UpdateAvailableDialog
+        return _UpdateAvailableDialog(
+            version="v9.9.9", current="v1.0.0", notes=notes, parent=parent
+        )
+
+    def test_titulo_da_janela(self):
+        assert self._dlg().windowTitle() == "Atualização disponível"
+
+    def test_e_modal(self):
+        assert self._dlg().isModal()
+
+    def test_mostra_versao_nova_e_atual(self):
+        dlg = self._dlg()
+        textos = " ".join(
+            w.text() for w in dlg.findChildren(QLabel) if w.text()
+        )
+        assert "v9.9.9" in textos
+        assert "v1.0.0" in textos
+
+    def test_exibe_notas_do_release(self):
+        dlg = self._dlg()
+        assert hasattr(dlg, "_notes_view")
+        assert "coisa nova" in dlg._notes_view.toPlainText()
+
+    def test_sem_notas_nao_cria_visualizador(self):
+        dlg = self._dlg(notes="")
+        assert not hasattr(dlg, "_notes_view")
+
+    def test_botao_atualizar_aceita(self):
+        dlg = self._dlg()
+        dlg._btn_atualizar.click()
+        assert dlg.result() == QDialog.DialogCode.Accepted
+
+    def test_botao_depois_rejeita(self):
+        dlg = self._dlg()
+        dlg._btn_depois.click()
+        assert dlg.result() == QDialog.DialogCode.Rejected
+
+    def test_botao_atualizar_e_o_default(self):
+        assert self._dlg()._btn_atualizar.isDefault()
 
 
 # ===========================================================================
@@ -4346,6 +4520,35 @@ class TestSpotifyChooseFiles:
             page.chooseFiles(self._modo(), [], ["audio/*"])
         assert mock_log.called
         assert "áudio" in mock_log.call_args.args[0]
+
+
+class TestSpotifyPerfilIdioma:
+    """
+    O perfil real do navegador embutido precisa pedir português.
+
+    Aqui um `QWebEngineProfile` de verdade é criado (em `tmp_path`, nunca em
+    `credentials/`) porque o alvo do teste é justamente o que o Qt guarda no
+    perfil — um mock não provaria nada.
+    """
+
+    @staticmethod
+    def _sessao(tmp_path):
+        from infrastructure.spotify.session import SpotifyWebSession
+        return SpotifyWebSession(
+            storage_dir=str(tmp_path / "spotify"), config_repo=None
+        )
+
+    def test_perfil_pede_portugues(self, tmp_path):
+        from infrastructure.spotify.session import ACCEPT_LANGUAGE
+
+        perfil = self._sessao(tmp_path).profile()
+        assert perfil.httpAcceptLanguage() == ACCEPT_LANGUAGE
+
+    def test_perfil_continua_sem_o_marcador_do_qtwebengine(self, tmp_path):
+        # O idioma não pode ter desfeito a limpeza do user agent: o token
+        # QtWebEngine/<versão> anuncia "navegador embutido" no login.
+        perfil = self._sessao(tmp_path).profile()
+        assert "QtWebEngine" not in perfil.httpUserAgent()
 
 
 class TestSpotifyTopBar:

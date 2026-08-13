@@ -25,6 +25,7 @@ from domain.ports import (
     SPOTIFY_UNKNOWN,
 )
 from infrastructure.spotify.session import (
+    ACCEPT_LANGUAGE,
     CREATORS_HOME_URL,
     LOGIN_URL_BASE,
     PROFILE_NAME,
@@ -444,3 +445,31 @@ class TestContrato:
         """Instanciar o app não deve inicializar o QtWebEngine."""
         s = _sessao(tmp_path)
         assert s._profile is None
+
+
+class TestAcceptLanguage:
+    """
+    Idioma pedido ao Spotify.
+
+    O perfil do QtWebEngine nasce com ``httpAcceptLanguage`` vazio, e sem esse
+    cabeçalho o Spotify for Creators respondia em inglês (medido na raiz
+    pública: "Make your show the next big thing" com cabeçalho vazio ×
+    "Faça seu programa se destacar" com pt-BR).
+
+    O teste de que o perfil realmente aplica a constante vive em test_app.py —
+    aqui nada toca Qt.
+    """
+
+    def test_pede_portugues_do_brasil_primeiro(self):
+        assert ACCEPT_LANGUAGE.split(",")[0] == "pt-BR"
+
+    def test_tem_ingles_como_ultimo_fallback(self):
+        # Sem fallback, uma tela sem tradução ficaria sem idioma aceitável.
+        idiomas = [t.split(";")[0] for t in ACCEPT_LANGUAGE.split(",")]
+        assert idiomas[-1] == "en"
+
+    def test_formato_de_cabecalho_http_valido(self):
+        import re
+
+        for token in ACCEPT_LANGUAGE.split(","):
+            assert re.fullmatch(r"[A-Za-z-]+(;q=[01](\.\d+)?)?", token), token

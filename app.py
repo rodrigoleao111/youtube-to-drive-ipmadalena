@@ -31,7 +31,7 @@ from PyQt6.QtWidgets import (
     QFileDialog, QFrame, QGridLayout, QHBoxLayout,
     QLabel, QLineEdit, QMainWindow, QMessageBox, QPlainTextEdit,
     QProgressBar, QPushButton, QRadioButton, QScrollArea, QSlider,
-    QStackedWidget, QStyle, QTabWidget, QVBoxLayout, QWidget,
+    QStackedWidget, QStyle, QTabWidget, QTextBrowser, QVBoxLayout, QWidget,
 )
 
 import baixar_audio
@@ -39,7 +39,7 @@ from setup_wizard import SetupWizard
 from player_window_qt import PlayerWindowQt as PlayerWindow
 
 
-APP_VERSION = "v3.5.1"
+APP_VERSION = "v3.5.2"
 
 # ---------------------------------------------------------------------------
 # Instância única — impede abrir dois apps ao mesmo tempo
@@ -165,6 +165,7 @@ class _Palette:
     D_SCROLL_H   = "#444"
     D_THUMB      = "#191919"
     D_WARN_BG    = "#5a3500"
+    D_UPD_BG     = "#173a24"   # faixa "nova versão disponível"
     D_HOVER_NAV  = "#232323"
     D_HOVER_THEME = "#252525"
     D_HOVER_ICON = "#333"
@@ -197,6 +198,8 @@ class _Palette:
     L_THUMB      = "#e8e8e8"
     L_WARN_BG    = "#fff3cd"
     L_WARN_BD    = "#ffd060"
+    L_UPD_BG     = "#e7f6ec"   # faixa "nova versão disponível"
+    L_UPD_BD     = "#9bd6ae"
     L_HOVER_NAV  = "#eaeaea"
     L_HOVER_THEME = "#e8e8e8"
     L_HOVER_ICON = "#e8e8e8"
@@ -340,6 +343,7 @@ QPlainTextEdit {{
 
 /* ── Frames / cards ── */
 QFrame#auth_banner {{ background: {P.D_WARN_BG}; border-radius: 8px; }}
+QFrame#update_banner {{ background: {P.D_UPD_BG}; border-bottom: 1px solid {P.D_SEP}; }}
 QFrame#date_frame  {{ background: {P.D_CARD}; border-radius: 8px; }}
 QFrame#section_sep {{ background: {P.D_SEP}; }}
 QFrame#card        {{ background: {P.D_CARD}; border-radius: 8px; }}
@@ -433,6 +437,7 @@ QPlainTextEdit {{
 
 /* ── Frames / cards ── */
 QFrame#auth_banner {{ background: {P.L_WARN_BG}; border-radius: 8px; border: 1px solid {P.L_WARN_BD}; }}
+QFrame#update_banner {{ background: {P.L_UPD_BG}; border-bottom: 1px solid {P.L_UPD_BD}; }}
 QFrame#date_frame  {{ background: {P.L_CARD}; border-radius: 8px; border: 1px solid {P.L_CARD_BD}; }}
 QFrame#section_sep {{ background: {P.L_SEP}; }}
 QFrame#card        {{ background: {P.L_CARD}; border-radius: 8px; border: 1px solid {P.L_CARD_BD}; }}
@@ -960,6 +965,13 @@ class App(QMainWindow):
         # Spotify publishing — preenchido em _worker_phase2, consumido em _on_done
         self._spotify_pending: dict | None = None
 
+        # Atualização disponível — preenchido por _check_update_worker (via
+        # fila) e consumido pelo banner e pelo diálogo. Inicializados aqui para
+        # que a UI possa ser construída/clicada antes da checagem terminar.
+        self._pending_update_url     = ""
+        self._pending_update_version = ""
+        self._pending_update_notes   = ""
+
         from composition_root import build_notifier, build_spotify_session
         self._notifier = build_notifier()
         # Uma única sessão do Spotify por execução (dona do perfil persistente
@@ -996,7 +1008,7 @@ class App(QMainWindow):
             self._check_auth_visibility()
 
     # -----------------------------------------------------------------------
-    # Layout raiz — sidebar + stack
+    # Layout raiz — sidebar + coluna de conteúdo (banner + stack)
     # -----------------------------------------------------------------------
     def _build_ui(self):
         central = QWidget()
@@ -1007,8 +1019,18 @@ class App(QMainWindow):
 
         root.addWidget(self._build_sidebar())
 
+        # Coluna de conteúdo: faixa de atualização no topo + páginas embaixo.
+        # O banner fica FORA do QStackedWidget de propósito — ver
+        # _build_update_banner.
+        content = QWidget()
+        content_col = QVBoxLayout(content)
+        content_col.setContentsMargins(0, 0, 0, 0)
+        content_col.setSpacing(0)
+
         self._stack = QStackedWidget()
-        root.addWidget(self._stack, stretch=1)
+        content_col.addWidget(self._build_update_banner())
+        content_col.addWidget(self._stack, stretch=1)
+        root.addWidget(content, stretch=1)
 
         self._stack.addWidget(self._build_home_page())         # 0
         self._stack.addWidget(self._build_processar_page())   # 1
@@ -1148,6 +1170,52 @@ class App(QMainWindow):
         # Reaplica estilos inline do nav
         page = getattr(self, "_current_page", 0)
         self._switch_page(page)
+
+    # -----------------------------------------------------------------------
+    # Banner de atualização — faixa no topo da área de conteúdo
+    # -----------------------------------------------------------------------
+    def _build_update_banner(self) -> QWidget:
+        """Faixa "nova versão disponível", oculta até a checagem encontrar uma.
+
+        Fica FORA do QStackedWidget de propósito: até a v3.5.1 este banner era
+        construído dentro de ``_build_processar_page`` (página 1), mas o app
+        abre na Home (página 0) — então o aviso só aparecia se o usuário
+        navegasse até "Processar". Aqui ele é visível em qualquer página, e
+        serve de porta de entrada permanente depois que o usuário fecha o
+        diálogo modal com "Depois".
+        """
+        self._update_banner = QFrame()
+        self._update_banner.setObjectName("update_banner")
+        ub = QHBoxLayout(self._update_banner)
+        # Margem lateral igual ao PAD das páginas (26) para o texto do banner
+        # alinhar com o título da página abaixo dele.
+        ub.setContentsMargins(26, 8, 26, 8)
+        self._update_lbl = QLabel()
+        self._update_lbl.setStyleSheet(f"font-weight: bold; color: {P.GREEN};")
+        btn_do_update = QPushButton("Atualizar agora")
+        btn_do_update.setStyleSheet(
+            f"background: {P.GREEN}; color: white; font-weight: bold;"
+            f" border-radius: 4px; padding: 4px 12px;"
+        )
+        btn_do_update.clicked.connect(self._on_update_clicked)
+        btn_details = QPushButton("O que mudou")
+        btn_details.setObjectName("gray_btn")
+        btn_details.setStyleSheet("padding: 4px 10px;")
+        btn_details.clicked.connect(self._show_update_dialog)
+        btn_dismiss = QPushButton("✕")
+        btn_dismiss.setObjectName("gray_btn")
+        btn_dismiss.setFixedWidth(28)
+        btn_dismiss.setToolTip("Dispensar")
+        btn_dismiss.clicked.connect(self._update_banner.hide)
+        ub.addWidget(self._update_lbl)
+        ub.addStretch()
+        ub.addWidget(btn_details)
+        ub.addSpacing(6)
+        ub.addWidget(btn_do_update)
+        ub.addSpacing(6)
+        ub.addWidget(btn_dismiss)
+        self._update_banner.hide()
+        return self._update_banner
 
     # -----------------------------------------------------------------------
     # Página 0 — Início (Home)
@@ -1376,8 +1444,12 @@ class App(QMainWindow):
         acts.setContentsMargins(0, 6, 0, 0)
 
         _fp = fpath
-        btn_play = QPushButton("▶  Tocar")
-        btn_play.setStyleSheet("font-weight: bold; padding: 6px 0;")
+        # Só o ícone: o card tem 220 px e até 5 botões na linha, então o rótulo
+        # "Tocar" não cabia e saía cortado. O tooltip preserva o significado,
+        # igual aos outros botões de ação do card.
+        btn_play = QPushButton("▶")
+        btn_play.setStyleSheet("font-size: 13px; font-weight: bold; padding: 6px 0;")
+        btn_play.setToolTip("Tocar")
         btn_play.clicked.connect(lambda: self._play_local_file(_fp))
         acts.addWidget(btn_play, stretch=1)
 
@@ -1642,32 +1714,6 @@ class App(QMainWindow):
         self._processar_sub.setStyleSheet(f"color: {P.HINT}; font-size: 12px;")
         layout.addWidget(self._processar_sub)
         layout.addSpacing(14)
-
-        # ── Banner de atualização disponível ────────────────────────────────
-        self._update_banner = QFrame()
-        self._update_banner.setObjectName("update_banner")
-        ub = QHBoxLayout(self._update_banner)
-        ub.setContentsMargins(14, 8, 14, 8)
-        self._update_lbl = QLabel()
-        self._update_lbl.setStyleSheet(f"font-weight: bold; color: {P.GREEN};")
-        btn_do_update = QPushButton("Atualizar agora")
-        btn_do_update.setStyleSheet(
-            f"background: {P.GREEN}; color: white; font-weight: bold;"
-            f" border-radius: 4px; padding: 4px 12px;"
-        )
-        btn_do_update.clicked.connect(self._on_update_clicked)
-        btn_dismiss = QPushButton("✕")
-        btn_dismiss.setObjectName("gray_btn")
-        btn_dismiss.setFixedWidth(28)
-        btn_dismiss.setToolTip("Dispensar")
-        btn_dismiss.clicked.connect(self._update_banner.hide)
-        ub.addWidget(self._update_lbl)
-        ub.addStretch()
-        ub.addWidget(btn_do_update)
-        ub.addSpacing(6)
-        ub.addWidget(btn_dismiss)
-        self._update_banner.hide()
-        layout.addWidget(self._update_banner)
 
         # ── Banner de autorização (oculto quando autorizado) ────────────────
         self._auth_banner = QFrame()
@@ -2892,7 +2938,7 @@ class App(QMainWindow):
                     _file_log(f"Erro na autorização Drive: {value}")
 
                 elif kind == "update_available":
-                    self._show_update_banner(value["version"], value["download_url"])
+                    self._on_update_available(value)
 
         except queue.Empty:
             pass
@@ -3401,10 +3447,43 @@ class App(QMainWindow):
         except Exception:
             pass  # falha silenciosa — sem rede, GitHub indisponível, etc.
 
-    def _show_update_banner(self, version: str, download_url: str):
-        self._pending_update_url = download_url
+    def _on_update_available(self, info: dict):
+        """Reage à checagem: mostra a faixa e, em seguida, o aviso modal.
+
+        Chamado do thread principal (via ``_process_queue``), então pode abrir
+        um modal direto — sem QTimer.singleShot, que não é cancelável e já
+        causou travamento na suíte de testes (ver conftest._sem_timers_orfaos).
+
+        O modal só abre se a janela principal já estiver visível: durante o
+        SetupWizard da primeira execução a janela está escondida, e um modal
+        órfão apareceria na frente do wizard sem dono visível.
+        """
+        self._show_update_banner(
+            info["version"], info["download_url"], info.get("notes", "")
+        )
+        _file_log(f"Nova versão disponível: {info['version']}.")
+        if self.isVisible():
+            self._show_update_dialog()
+
+    def _show_update_banner(self, version: str, download_url: str, notes: str = ""):
+        self._pending_update_url     = download_url
+        self._pending_update_version = version
+        self._pending_update_notes   = notes
         self._update_lbl.setText(f"🎉  Nova versão {version} disponível")
         self._update_banner.show()
+
+    def _show_update_dialog(self):
+        """Aviso modal de nova versão. "Atualizar agora" cai em _on_update_clicked."""
+        if not self._pending_update_version:
+            return
+        dlg = _UpdateAvailableDialog(
+            version = self._pending_update_version,
+            current = APP_VERSION,
+            notes   = self._pending_update_notes,
+            parent  = self,
+        )
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            self._on_update_clicked()
 
     def _on_update_clicked(self):
         if not getattr(sys, "frozen", False):
@@ -3842,6 +3921,80 @@ class App(QMainWindow):
         self._spotify_predialog_timer.stop()
         self._spotify_predialog_pending = None
         event.accept()
+
+
+# ---------------------------------------------------------------------------
+# Dialog de aviso de nova versão
+# ---------------------------------------------------------------------------
+class _UpdateAvailableDialog(QDialog):
+    """
+    Aviso modal de nova versão, aberto na inicialização quando a checagem no
+    GitHub Releases encontra uma tag mais nova que APP_VERSION.
+
+    Aparece a cada inicialização enquanto houver versão nova — "Depois" não
+    persiste nada em disco de propósito, para que o usuário não fique parado
+    numa versão antiga sem perceber. A faixa no topo da janela
+    (``_build_update_banner``) continua disponível depois de fechar.
+
+    ``accept()`` significa "quero atualizar agora"; quem trata o download é o
+    App (``_show_update_dialog`` → ``_on_update_clicked``).
+    """
+
+    def __init__(self, version: str, current: str, notes: str = "", parent=None):
+        super().__init__(parent)
+
+        self.setWindowTitle("Atualização disponível")
+        self.setModal(True)
+        self.setMinimumWidth(520)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(24, 20, 24, 20)
+        layout.setSpacing(10)
+
+        titulo = QLabel(f"🎉  Nova versão {version} disponível")
+        titulo.setStyleSheet(f"font-size: 16px; font-weight: bold; color: {P.GREEN};")
+        layout.addWidget(titulo)
+
+        sub = QLabel(f"Você está usando a {current}. Recomendamos atualizar.")
+        sub.setStyleSheet(f"color: {P.HINT}; font-size: 12px;")
+        layout.addWidget(sub)
+
+        if notes:
+            layout.addSpacing(6)
+            rotulo = QLabel("O que mudou:")
+            rotulo.setStyleSheet("font-weight: bold; font-size: 12px;")
+            layout.addWidget(rotulo)
+
+            self._notes_view = QTextBrowser()
+            self._notes_view.setOpenExternalLinks(True)
+            self._notes_view.setMinimumHeight(140)
+            self._notes_view.setMaximumHeight(260)
+            # As notas vêm em Markdown (corpo do release no GitHub). setMarkdown
+            # existe no Qt 6; o fallback cobre um texto que o parser rejeite.
+            try:
+                self._notes_view.setMarkdown(notes)
+            except Exception:
+                self._notes_view.setPlainText(notes)
+            layout.addWidget(self._notes_view)
+
+        layout.addSpacing(6)
+
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+
+        self._btn_depois = QPushButton("Depois")
+        self._btn_depois.setObjectName("gray_btn")
+        self._btn_depois.clicked.connect(self.reject)
+        btn_row.addWidget(self._btn_depois)
+
+        btn_row.addSpacing(8)
+
+        self._btn_atualizar = QPushButton("Atualizar agora")
+        self._btn_atualizar.setDefault(True)
+        self._btn_atualizar.clicked.connect(self.accept)
+        btn_row.addWidget(self._btn_atualizar)
+
+        layout.addLayout(btn_row)
 
 
 # ---------------------------------------------------------------------------

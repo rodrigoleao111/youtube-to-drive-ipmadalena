@@ -378,7 +378,7 @@ Esta seção é a **norma para qualquer mudança ou adição** ao projeto. Segui
 
 ## 6. Antes de fazer push
 
-1. `python -m pytest tests/` — DEVE passar 100% (atualmente 1195/1195, ~33 s num único processo).
+1. `python -m pytest tests/` — DEVE passar 100% (atualmente 1223/1223, ~40 s num único processo).
 2. Atualizar `CLAUDE.md` se a arquitetura, convenções ou estrutura mudaram.
 3. Atualizar `README.md` se o comportamento visível ao usuário/dev mudou.
 4. Mensagem de commit em formato convencional: `feat:`, `fix:`, `refactor:`, `docs:`, `test:`, `chore:`.
@@ -461,7 +461,8 @@ Módulo "raiz" do projeto: hospeda constantes, configuração OAuth, utilidades 
 
 ## `infrastructure/updater/github_updater.py`
 
-- **`check_latest_version(repo, current) -> dict | None`:** consulta `GET /repos/{repo}/releases/latest` via `urllib.request` (stdlib). Compara `tag_name` com `current` usando `_version_tuple` (conversão numérica segura — ex.: `"v3.10.0" > "v3.9.0"`). Retorna `{"version": tag, "download_url": url_do_exe}` somente se houver versão nova E um asset `.exe` disponível. Qualquer exceção (rede, HTTP) é propagada para o chamador tratar.
+- **`check_latest_version(repo, current) -> dict | None`:** consulta `GET /repos/{repo}/releases/latest` via `urllib.request` (stdlib). Compara `tag_name` com `current` usando `_version_tuple` (conversão numérica segura — ex.: `"v3.10.0" > "v3.9.0"`). Retorna `{"version": tag, "download_url": url_do_exe, "notes": corpo_do_release}` somente se houver versão nova E um asset `.exe` disponível. Qualquer exceção (rede, HTTP) é propagada para o chamador tratar.
+  - **`notes`** vem do campo `body` do release (Markdown, exibido no `_UpdateAvailableDialog`). A API devolve `body: null` quando o release foi publicado sem descrição — daí o `(data.get("body") or "").strip()`, já que `QTextBrowser.setMarkdown(None)` quebraria. **Consequência prática: escrever a descrição do release é o que o usuário lê no aviso de atualização.**
 - **`download_release(url, dest, on_progress)`:** usa `urllib.request.urlretrieve` com `reporthook` que chama `on_progress(float)` com valor em `[0.0, 1.0]`. Sem chamada quando `total_size == 0`.
 - **`_version_tuple(v)`:** converte `"v3.2.0"` ou `"3.2.0"` em `(3, 2, 0)` para comparação numérica segura.
 - **Sem dependências externas** — usa apenas stdlib (`urllib`, `json`).
@@ -476,6 +477,8 @@ mexer** — ele registra as medições que sustentam o desenho.
 - **`login_url()` = `accounts.spotify.com/login?continue=<CREATORS_HOME_URL>`.** **Nunca use a área autenticada do Creators como porta de entrada do login.** Deslogado, o roteador dela falha a autenticação silenciosa e **não** segue para a tela de credenciais — a janela fica carregando para sempre. Regressão de campo (reproduzida aqui): console com `[AuthRouter] auth error {"error": "login_required"}` + `requestStorageAccess: Permission denied`, 25 s parado em `/pod/dashboard` com a página em branco e depois só o banner de consentimento. A tela de credenciais renderiza de imediato e é estável. O `continue` faz o Spotify devolver o usuário ao Creators depois do login — é o que produz a transição usada como prova.
 - **`profile()`:** cria o `QWebEngineProfile` NOMEADO (`PROFILE_NAME = "ipmadalena_spotify"`, estável entre versões — mudá-lo perderia o login dos usuários) com `persistentStoragePath`, `cachePath` e `ForcePersistentCookies`. **Criação tardia**: instanciar a sessão não inicializa o QtWebEngine, só o primeiro uso.
 - **`desktop_user_agent(ua)`:** remove o token `QtWebEngine/<versão>` do UA padrão, sobrando um UA de Chrome legítimo na versão do Chromium embarcado. Derivado do padrão (em vez de string fixa) para não envelhecer a cada atualização do Qt.
+- **`ACCEPT_LANGUAGE = "pt-BR,pt;q=0.9,en;q=0.8"`, aplicado em `_make_profile`:** o `QWebEngineProfile` nasce com `httpAcceptLanguage` **vazio** (medido no Qt 6.11 — string vazia, não o locale do Windows), então o navegador embutido não pedia idioma nenhum e o Spotify for Creators respondia em **inglês**. Medido na raiz pública do Creators, mesmo perfil e mesmo UA, variando só o cabeçalho: vazio → "Make your show the next big thing"; `pt-BR` → "Faça seu programa se destacar". O `en` no fim é fallback para telas sem tradução.
+  - A **tela de login já vinha em português** por conta própria: o Spotify redireciona `accounts.spotify.com/login` para `/pt-BR/login` (provavelmente por GeoIP). Quem dependia do cabeçalho era só a área do Creators — onde o episódio é publicado.
 - **`classify_url(url) -> 'logged_in' | 'logged_out' | 'unknown'`:** função pura. `accounts.spotify.com` → deslogado; `creators.spotify.com` com path além de `/` → logado; resto → desconhecido. A **raiz** `creators.spotify.com/` é a landing page de marketing e carrega deslogada — por isso não conta.
 - **`classify(url)` (não persiste) × `mark_logged_in(bool)` (persiste):** a separação é o cerne. Uma URL isolada NÃO prova sessão:
   1. o desvio do Creators para o login é feito pelo site, não por um 302 — `urlChanged` e o primeiro `loadFinished` chegam com a URL interna ainda no lugar (medido: deslogado, os dois dizem `logged_in`);
@@ -524,7 +527,7 @@ mexer** — ele registra as medições que sustentam o desenho.
 ## `app.py`
 
 - **Framework:** PyQt6. **Janela:** `QMainWindow` com sidebar à esquerda + `QStackedWidget` à direita (4 páginas: Início / Processar / Histórico / Configurações).
-- **`APP_VERSION`:** constante de módulo (`"v3.5.1"`) usada na sidebar e no rodapé da aba Configurações. Bumpar aqui ao fechar cada versão — e **também o `#define AppVersion` do `installer.iss`**, que ficou parado no 3.0.0 por quatro versões.
+- **`APP_VERSION`:** constante de módulo (`"v3.5.2"`) usada na sidebar e no rodapé da aba Configurações. Bumpar aqui ao fechar cada versão — e **também o `#define AppVersion` do `installer.iss`**, que ficou parado no 3.0.0 por quatro versões.
 - **`_build_palette(dark: bool) -> QPalette`:** constrói a QPalette correta para modo escuro/claro. Chamada no startup (`_q.setPalette(...)`) e em `_toggle_theme`. Necessária porque o QSS global **não** define mais `background-color` na regra `QWidget` — o Fusion style usa a QPalette para pintar controles (`QComboBox`, `QDoubleSpinBox`, `QTabBar`, etc.) que não têm regra QSS explícita.
 - **Página Início (`_build_home_page`):** lista arquivos MP3 em `DOWNLOAD_DIR` como cards (220×262 px). Topbar com `QComboBox` de ordenação ("Mais recentes" / "A–Z"). Estado vazio com ícone grande + instrução de ação. Subtítulo mostra contagem e tamanho total. Badge "✓ Enviado ao Drive" (verde) ou "● Local" (cinza) detectado pelo título do arquivo vs. `historico.json`. Botão "↑" (SP_ArrowUp) dispara re-upload individual em thread daemon; botão lixeira (SP_TrashIcon) exclui local com confirmação em português.
 - **`_reupload_file(fpath, btn)`:** constrói `AudioFile(video_id="")` com `mtime` como `date_str`, chama `upload_uc.execute()` em thread, atualiza badge via `QTimer.singleShot(0, _refresh_home)`.
@@ -536,8 +539,12 @@ mexer** — ele registra as medições que sustentam o desenho.
 - **Instância única:** porta TCP 47892 reservada via `_acquire_single_instance()`; segunda instância exibe alerta e encerra.
 - **Log em arquivo:** `logs/DD-MM-YYYY.log` via `logging.basicConfig`. **No modo script (não-frozen), também escreve em stderr** — `_setup_file_logging()` adiciona um `StreamHandler` quando `sys.frozen` é False. Isso faz `logging.getLogger("audio_edit").info(...)` aparecer no console do dev, sem prejudicar o .exe empacotado (que não tem stderr visível).
 - **Auto-update yt-dlp:** thread daemon roda `update_ytdlp()` ao iniciar.
-- **Auto-update do app:** thread daemon `_check_update_worker()` consulta GitHub Releases ao iniciar via `infrastructure.updater.github_updater.check_latest_version(baixar_audio.GITHUB_REPO, APP_VERSION)`. Resultado colocado na `_queue` como `("update_available", {"version": ..., "download_url": ...})`. Exceções silenciadas. `_show_update_banner(version, url)` exibe banner verde no topo. `_on_update_clicked()`: em modo script exibe info; em modo frozen confirma → abre `_UpdateDownloadDialog`. `_UpdateDownloadDialog`: modal com `QProgressBar`, baixa o installer em thread daemon via `download_release()`, ao concluir executa `subprocess.Popen([installer_path])` + `sys.exit(0)`.
-- **Banner de atualização (`_update_banner`):** `QFrame` verde no topo, acima do banner de autorização. Começa oculto. Botão "✕" dispensa (`.hide()`). Botão "Atualizar agora" → `_on_update_clicked()`.
+- **Auto-update do app:** thread daemon `_check_update_worker()` consulta GitHub Releases ao iniciar via `infrastructure.updater.github_updater.check_latest_version(baixar_audio.GITHUB_REPO, APP_VERSION)`. Resultado colocado na `_queue` como `("update_available", {"version": ..., "download_url": ..., "notes": ...})`. Exceções silenciadas. `_on_update_available(info)` exibe a faixa **e** o aviso modal. `_on_update_clicked()`: em modo script exibe info; em modo frozen confirma → abre `_UpdateDownloadDialog`. `_UpdateDownloadDialog`: modal com `QProgressBar`, baixa o installer em thread daemon via `download_release()`, ao concluir executa `subprocess.Popen([installer_path])` + `sys.exit(0)`.
+- **Aviso modal de nova versão (`_UpdateAvailableDialog`):** aberto por `_show_update_dialog()` na inicialização, com a versão nova, a atual e as notas do release renderizadas em Markdown num `QTextBrowser` (`setMarkdown`, com fallback para `setPlainText`). "Atualizar agora" → `accept()`; "Depois" → `reject()`. **Aparece a cada inicialização enquanto houver versão nova** — "Depois" não persiste nada em disco, de propósito, para o usuário não ficar parado numa versão antiga sem perceber.
+  - `_on_update_available` só abre o modal se `self.isVisible()`: durante o `SetupWizard` da primeira execução a janela principal está escondida e o modal apareceria órfão na frente do wizard.
+  - O modal é aberto direto do `_process_queue` (thread principal), **sem `QTimer.singleShot`** — timer solto não é cancelável e foi exatamente o que travou a suíte de testes (ver `conftest._sem_timers_orfaos`).
+- **Banner de atualização (`_update_banner`):** faixa verde construída em `_build_update_banner()` e inserida **fora do `QStackedWidget`**, no topo da coluna de conteúdo (`_build_ui`), portanto visível em todas as páginas. Começa oculto. Botões: "O que mudou" (`_show_update_dialog`), "Atualizar agora" (`_on_update_clicked`) e "✕" (`.hide()`).
+  - **Por que fora do stack:** até a v3.5.1 o banner era construído dentro de `_build_processar_page()` (página 1), mas o app abre na Home (página 0) — o aviso de nova versão só aparecia se o usuário navegasse até "Processar", ou seja, era invisível na prática. O `QFrame#update_banner` também não tinha regra de estilo no QSS (fundo transparente); hoje usa `P.D_UPD_BG`/`P.L_UPD_BD`.
 - **Primeira execução:** se `credentials/token.pkl` não existe, janela principal é `hide()` e `SetupWizard` abre; ao concluir, `_check_auth_visibility()` é chamado e a janela é exibida.
 - **Banner de autorização:** `QFrame` condicional no topo — visível quando Drive não autorizado.
 - **`_set_status(text, state)`:** atualiza `status_label` e `_status_dot`; estados: `idle` (cinza), `running` (verde), `done` (verde), `error` (vermelho).
@@ -619,7 +626,7 @@ tests/
 ├── test_ffmpeg_editor.py      ← 101 testes do FfmpegAudioEditor (subprocess mockado)
 ├── test_gdrive_storage.py     ← 53 testes do adaptador Drive (HTTP/Drive API mockados)
 ├── test_zip_archiver.py       ← 17 testes do ZipArchiver (I/O real em tmp_path)
-├── test_spotify_session.py    ← 53 testes da SpotifyWebSession (sem Qt e sem rede)
+├── test_spotify_session.py    ← 60 testes da SpotifyWebSession (sem Qt e sem rede)
 ├── test_persistence.py        ← 33 testes dos repositórios JSON (I/O real em tmp_path)
 ├── test_plyer_notifier.py     ← 10 testes do PlyerNotifier (plyer mockado)
 ├── test_use_cases.py          ← 57 testes dos use cases (ports mockados)
@@ -627,13 +634,13 @@ tests/
 ├── test_audio_test_presenter.py ← 17 testes do AudioTestPresenter
 ├── test_composition_root.py   ← 32 testes do composition root (DI/wiring)
 ├── test_baixar_audio.py       ← 38 testes de utilidades + auth wrappers + update_ytdlp
-├── test_app.py                ← 371 testes de integração da GUI
-├── test_github_updater.py     ← 19 testes do módulo de auto-update (HTTP mockado)
+├── test_app.py                ← 397 testes de integração da GUI
+├── test_github_updater.py     ← 22 testes do módulo de auto-update (HTTP mockado)
 ├── test_player_window.py      ← 34 testes do PlayerWindow
 └── test_player_window_qt.py   ← 29 testes do PlayerWindowQt
 ```
 
-**Total: 1195 testes** (~33 s num único processo; `test_app.py` e `test_player_window_qt.py`, que sobem QtWebEngine, respondem pela maior parte).
+**Total: 1223 testes** (~40 s num único processo; `test_app.py` e `test_player_window_qt.py`, que sobem QtWebEngine, respondem pela maior parte).
 
 > O `_reset_app_state` (autouse) devolve a tela Processar ao modo "busca por
 > data" e limpa o `link_entry` antes de cada teste — sem isso, um teste que
@@ -870,6 +877,12 @@ EOF
 ```
 
 O asset `IPMadalena_Setup.exe` fica anexado ao release e é o arquivo que o auto-update do app baixa automaticamente.
+
+> **O texto do `--notes` é lido pelo usuário final.** O corpo do release é exibido, renderizado em
+> Markdown, dentro do aviso de nova versão que abre na inicialização do app
+> (`_UpdateAvailableDialog`). Escreva "O que há de novo" pensando em quem vai decidir se atualiza —
+> nada de "vários ajustes". Um release publicado sem descrição faz o aviso aparecer só com o número
+> da versão.
 
 ## Checklist resumido
 

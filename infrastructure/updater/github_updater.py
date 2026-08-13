@@ -26,8 +26,10 @@ def check_latest_version(repo: str, current: str) -> dict | None:
     """
     Consulta a release mais recente do repositório GitHub.
 
-    Retorna dict com 'version' (str) e 'download_url' (str) se houver uma
-    versão mais nova que `current`, ou None caso contrário.
+    Retorna dict com 'version' (str), 'download_url' (str) e 'notes' (str —
+    o corpo do release em Markdown, string vazia se o release não tiver
+    descrição) se houver uma versão mais nova que `current`, ou None caso
+    contrário.
 
     Propaga qualquer exceção de rede/HTTP para o chamador lidar (tipicamente
     descartando silenciosamente em uma thread daemon de startup).
@@ -63,7 +65,14 @@ def check_latest_version(repo: str, current: str) -> dict | None:
     if not download_url:
         return None
 
-    return {"version": tag, "download_url": download_url}
+    # 'body' é o texto do release. Vem None quando o release foi publicado sem
+    # descrição, por isso o `or ""` — o chamador exibe isso num QTextEdit e
+    # None quebraria o setMarkdown.
+    return {
+        "version":      tag,
+        "download_url": download_url,
+        "notes":        (data.get("body") or "").strip(),
+    }
 
 
 def download_release(

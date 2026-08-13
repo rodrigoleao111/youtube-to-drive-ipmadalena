@@ -101,6 +101,23 @@ UNKNOWN = SPOTIFY_UNKNOWN
 #: que amarra o perfil ao diretório de storage.
 PROFILE_NAME = "ipmadalena_spotify"
 
+#: Idioma pedido ao Spotify, no formato do cabeçalho HTTP ``Accept-Language``.
+#:
+#: Por que fixar isto: o ``QWebEngineProfile`` nasce com ``httpAcceptLanguage``
+#: **vazio** (medido aqui no Qt 6.11 — string vazia, não o locale do Windows),
+#: então o navegador embutido não pedia idioma nenhum e o Spotify for Creators
+#: respondia em inglês. Medição na raiz pública do Creators, mesmo perfil e
+#: mesmo user agent, só variando este cabeçalho:
+#:
+#: - vazio: "Make your show the next big thing"
+#: - ``pt-BR``: "Faça seu programa se destacar"
+#:
+#: O ``en`` no fim é fallback: se uma tela não tiver tradução, ela aparece em
+#: inglês em vez de quebrar. A tela de login já vinha em português por conta
+#: própria (o Spotify redireciona para ``accounts.spotify.com/pt-BR/login``),
+#: então quem dependia disto era só a área do Creators.
+ACCEPT_LANGUAGE = "pt-BR,pt;q=0.9,en;q=0.8"
+
 
 def classify_url(url: str) -> str:
     """
@@ -277,6 +294,7 @@ class SpotifyWebSession:
             QWebEngineProfile.PersistentCookiesPolicy.ForcePersistentCookies
         )
         prof.setHttpUserAgent(desktop_user_agent(prof.httpUserAgent()))
+        prof.setHttpAcceptLanguage(ACCEPT_LANGUAGE)
         return prof
 
     # -------------------------------------------------------------------

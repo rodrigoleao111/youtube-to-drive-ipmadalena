@@ -30,10 +30,15 @@ _REPO = "dono/repo"
 _CURRENT = "v3.2.0"
 
 
-def _make_response(tag: str, assets: list[dict] | None = None) -> MagicMock:
+def _make_response(
+    tag: str,
+    assets: list[dict] | None = None,
+    body: str | None = "## Novidades\n- item",
+) -> MagicMock:
     """Simula urllib.request.urlopen context manager com payload GitHub."""
     payload = {
         "tag_name": tag,
+        "body": body,
         "assets": assets
         if assets is not None
         else [
@@ -126,6 +131,26 @@ class TestCheckLatestVersion:
         with patch("urllib.request.urlopen", side_effect=OSError("sem rede")):
             with pytest.raises(OSError):
                 check_latest_version(_REPO, _CURRENT)
+
+    def test_retorna_notas_do_release(self):
+        with patch("urllib.request.urlopen", return_value=_make_response("v3.3.0")):
+            result = check_latest_version(_REPO, _CURRENT)
+        assert result["notes"] == "## Novidades\n- item"
+
+    def test_notas_vazias_quando_body_ausente(self):
+        # Release publicado sem descrição: a API devolve body=None. O dict tem
+        # de trazer string vazia (o QTextBrowser.setMarkdown quebra com None).
+        with patch("urllib.request.urlopen", return_value=_make_response("v3.3.0", body=None)):
+            result = check_latest_version(_REPO, _CURRENT)
+        assert result["notes"] == ""
+
+    def test_notas_sem_espacos_nas_pontas(self):
+        with patch(
+            "urllib.request.urlopen",
+            return_value=_make_response("v3.3.0", body="\n\n  Correções  \n\n"),
+        ):
+            result = check_latest_version(_REPO, _CURRENT)
+        assert result["notes"] == "Correções"
 
     def test_ignora_assets_nao_exe(self):
         assets = [

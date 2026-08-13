@@ -10,6 +10,8 @@ A v3.5.0 traz duas novidades: a tela **Processar** aceita duas origens — busca
 
 A v3.5.1 fecha a **publicação no Spotify**: login que **fica salvo** entre execuções (aba Configurações → Spotify), com o envio só habilitado quando há usuário logado e ID do canal; no assistente de episódio, o app **seleciona o áudio e preenche título e descrição** automaticamente, usando a descrição gerada no download. A **busca por data ficou 3–4× mais rápida** (~5 s no lugar de ~19 s para um culto recente).
 
+A v3.5.2 avisa quando há **nova versão disponível**: ao abrir, o app mostra o que mudou e oferece atualizar na hora — antes o aviso ficava numa faixa que só aparecia na tela "Processar", então passava despercebido. O site do Spotify passa a abrir **em português**, e o botão de tocar nos cards da tela Início virou só o ícone ▶ (o texto não cabia e saía cortado).
+
 ---
 
 ## Instalação
@@ -167,7 +169,7 @@ Clique no ícone ⚙ no canto superior direito para acessar a tela de configura�
 2. Limpa arquivos residuais de execuções anteriores
 3. Avisa se a data já foi processada antes (pode prosseguir mesmo assim)
 4. Atualiza o yt-dlp em background ao iniciar
-5. Verifica se há nova versão do app no GitHub Releases e exibe banner verde quando disponível — permite baixar e instalar sem sair do app (apenas no instalador; em modo script exibe instrução para `git pull`)
+5. Verifica se há nova versão do app no GitHub Releases ao iniciar e, quando existe, **abre um aviso mostrando o que mudou** (as notas do release) com os botões "Atualizar agora" e "Depois"; uma faixa verde fica no topo da janela — em todas as páginas — até o app ser atualizado. O download e a instalação acontecem sem sair do app (apenas no instalador; em modo script exibe instrução para `git pull`)
 6. Busca os vídeos publicados na data informada no canal (ou resolve direto o vídeo do link, quando esse modo é usado)
 7. Exibe popup para selecionar quais vídeos processar (pulado no modo link)
 8. Abre o player para marcar o trecho desejado (início/fim da pregação)
@@ -283,7 +285,7 @@ Detalhes técnicos completos (port-by-port, decisões de design, problemas conhe
 
 ## Testes
 
-Suíte com **1195 testes** usando apenas `pytest` e `unittest.mock` — sem dependências adicionais:
+Suíte com **1223 testes** usando apenas `pytest` e `unittest.mock` — sem dependências adicionais:
 
 ```bash
 python -m pytest tests/
@@ -306,8 +308,9 @@ Distribuição por camada:
 | `test_gdrive_storage.py` | 53 | Drive OAuth + upload (HTTP/Drive API mockados) |
 | `test_use_cases.py` | 57 | Use cases da camada application (ports mockados) |
 | `test_persistence.py` | 33 | Repositórios JSON (I/O real em `tmp_path`) |
-| `test_app.py` | 375 | Integração da GUI (Home, Processar, modo link, Config, Player, Spotify) |
-| `test_github_updater.py` | 19 | Auto-update via GitHub Releases (HTTP mockado) |
+| `test_app.py` | 397 | Integração da GUI (Home, Processar, modo link, Config, Player, Spotify, aviso de atualização) |
+| `test_spotify_session.py` | 60 | Sessão do Spotify: estado de login, logout, idioma do perfil (sem Qt e sem rede) |
+| `test_github_updater.py` | 22 | Auto-update via GitHub Releases (HTTP mockado) |
 | `test_baixar_audio.py` | 38 | Utilidades + CLI + auth wrappers |
 | `test_presenter.py` | 58 | ProcessingPresenter + pacote de upload (use cases mockados) |
 | `test_player_window_qt.py` | 29 | PlayerWindowQt |
