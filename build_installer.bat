@@ -66,13 +66,14 @@ echo.
 echo  [4/4] Gerando instalador com Inno Setup...
 
 :: Procura o Inno Setup em locais comuns (admin e sem-admin)
+:: NAO quebrar estas linhas com "^": o caret escapa o fim de linha e o cmd passa
+:: a ler os espacos da linha seguinte como um comando ("' ' nao e reconhecido"),
+:: deixando ISCC vazio SEMPRE - o script pulava o passo 4 dizendo que o Inno
+:: Setup nao estava instalado, mesmo instalado. Uma linha por teste.
 set "ISCC="
-if exist "%ProgramFiles(x86)%\Inno Setup 6\ISCC.exe" ^
-    set "ISCC=%ProgramFiles(x86)%\Inno Setup 6\ISCC.exe"
-if exist "%ProgramFiles%\Inno Setup 6\ISCC.exe" ^
-    set "ISCC=%ProgramFiles%\Inno Setup 6\ISCC.exe"
-if exist "%LOCALAPPDATA%\Programs\Inno Setup 6\ISCC.exe" ^
-    set "ISCC=%LOCALAPPDATA%\Programs\Inno Setup 6\ISCC.exe"
+if exist "%ProgramFiles(x86)%\Inno Setup 6\ISCC.exe" set "ISCC=%ProgramFiles(x86)%\Inno Setup 6\ISCC.exe"
+if exist "%ProgramFiles%\Inno Setup 6\ISCC.exe" set "ISCC=%ProgramFiles%\Inno Setup 6\ISCC.exe"
+if exist "%LOCALAPPDATA%\Programs\Inno Setup 6\ISCC.exe" set "ISCC=%LOCALAPPDATA%\Programs\Inno Setup 6\ISCC.exe"
 
 if "%ISCC%"=="" (
     echo.

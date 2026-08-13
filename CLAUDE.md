@@ -727,11 +727,19 @@ Orquestra a geração completa em 4 passos:
 
 **IMPORTANTE:** o arquivo `build_installer.bat` deve conter **apenas caracteres ASCII**. Caracteres UTF-8 como `─`, `—` corrompem o parsing do `cmd.exe` antes que `chcp 65001` entre em vigor, fazendo o bat falhar silenciosamente. Use `=`, `-` e hifens simples.
 
-**Comando manual (se o `.bat` falhar):**
+**IMPORTANTE 2 — não quebrar `if exist` com `^`.** O caret escapa o fim de linha e o `cmd` passa a ler os espaços da linha seguinte como comando (`' ' não é reconhecido...`), deixando a variável vazia. Era assim que a detecção do Inno Setup estava escrita: o passo 4 pulava **sempre**, alegando que o Inno Setup não estava instalado (corrigido em 13/08/2026 — cada `if exist ... set ...` numa única linha).
+
+**Rodando o `.bat` em shell não-interativo:** ele termina com `pause` (e usa `pause & exit /b` nos erros). Redirecione o stdin de `nul`, senão a execução fica pendurada:
 ```powershell
-& "C:\Users\Rodrigo\AppData\Local\Programs\Python\Python312\python.exe" -m PyInstaller build_app.spec --noconfirm --clean
-& "C:\Users\Rodrigo\AppData\Local\Programs\Inno Setup 6\ISCC.exe" "E:\Engenharia de Software\youtube-to-drive-ipmadalena\installer.iss"
+cmd /c '"<raiz>\build_installer.bat" < nul'
 ```
+
+**Comandos manuais (se o `.bat` falhar) — caminhos desta máquina:**
+```powershell
+& "C:\Users\rasantos\AppData\Local\Programs\Python\Python312\python.exe" -m PyInstaller build_app.spec --noconfirm --clean
+& "C:\Users\rasantos\AppData\Local\Programs\Inno Setup 6\ISCC.exe" "C:\Users\rasantos\PythonProjects\youtube-to-drive-ipmadalena\installer.iss"
+```
+> O PyInstaller leva ~5 min e o Inno Setup ~6 min (o instalador tem ~239 MB). Rode em background e acompanhe a saída em arquivo.
 
 ## `installer.iss` — Inno Setup
 
@@ -830,14 +838,19 @@ git push origin vX.Y.Z
 build_installer.bat
 ```
 
-Caso o `.bat` falhe, usar os comandos manuais:
+Em shell não-interativo, redirecionar o stdin (o bat termina com `pause`):
 
 ```powershell
-& "C:\Users\Rodrigo\AppData\Local\Programs\Python\Python312\python.exe" -m PyInstaller build_app.spec --noconfirm --clean
-& "C:\Users\Rodrigo\AppData\Local\Programs\Inno Setup 6\ISCC.exe" "E:\Engenharia de Software\youtube-to-drive-ipmadalena\installer.iss"
+cmd /c '"C:\Users\rasantos\PythonProjects\youtube-to-drive-ipmadalena\build_installer.bat" < nul'
 ```
 
-O instalador gerado estará em `dist\IPMadalena_Setup.exe`.
+Caso o `.bat` falhe, usar os comandos manuais (ver a seção `build_installer.bat` para os caminhos e tempos esperados).
+
+O instalador gerado estará em `dist\IPMadalena_Setup.exe`. **Conferir a versão antes de publicar** — o `dist/` guarda o build anterior e é fácil subir o exe errado:
+
+```powershell
+(Get-Item "dist\IPMadalena_Setup.exe").VersionInfo.ProductVersion   # deve ser X.Y.Z
+```
 
 ## Passo 8 — Criar o release no GitHub
 
@@ -911,6 +924,7 @@ App baixa formato 18 e extrai áudio via ffmpeg → MP3. Resultado final equival
 - `player_client=tv_embedded` descontinuado pelo YouTube → substituído por `ios,android,web`.
 - `--date` ignora `--dateafter` no yt-dlp → usar apenas `--dateafter` + `--break-on-reject`.
 - Busca por data lenta (~19 s até para a data mais recente; minutos para datas antigas) → a extração completa por vídeo + enumeração total da aba dominavam o tempo. Resolvido com busca em duas fases (flat playlist com `youtubetab:approximate_date` → confirmação só dos candidatos) e fallback para a varredura original. Medições e janelas de tolerância documentadas em `ytdlp_source.py`.
+- `build_installer.bat` sempre pulava o passo 4 ("Inno Setup nao encontrado", mesmo instalado) → os `if exist` da detecção estavam quebrados em duas linhas com `^`; o caret escapa o fim de linha e o `cmd` lê os espaços da linha seguinte como comando, deixando `ISCC` vazio. Corrigido pondo cada teste numa única linha. Era por isso que o release exigia rodar o `ISCC.exe` à mão.
 - Suíte de testes travando para sempre em ~65 % (primeira janela `CTkToplevel` de `test_player_window.py`) → **não** era incompatibilidade Qt × tkinter. Um teste de `_on_done` armava o `QTimer.singleShot(800, …)` real do diálogo de pré-publicação do Spotify: a lambda resolve `self._show_spotify_predialog` **na hora de disparar**, quando o `patch.object` do teste já foi desfeito. O timer órfão sobrevivia ao teste e disparava dentro do `update()` do Tcl/Tk (que pompa a fila de mensagens do Windows), abrindo um modal `exec()` que nunca retornava. Corrigido em três camadas: (1) `_agendar_spotify_predialog` usa timer próprio, filho do `App`, cancelado no `closeEvent` — o que também conserta o caso real de o diálogo abrir depois de o app fechar; (2) o teste passou a disparar o callback à mão em vez de deixar o timer armado; (3) rede de segurança `_sem_timers_orfaos` + watchdog do `pytest.ini`. Diagnóstico só foi possível com `faulthandler.dump_traceback_later(..., exit=True)` escrevendo num arquivo dedicado.
 - Cancelar operação mostrava popup de erro → separado em mensagem `("cancelled", None)` → `_on_cancelled()` sem popup.
 - Barra de progresso mostrava marcador em 0% → `progress_color=fg_color`.
